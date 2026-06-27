@@ -1,7 +1,6 @@
 import { auth } from "./firebase-config.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-
-const API_URL = 'https://heatbox-api.tyron-app.workers.dev';
+const API_URL = window.HiMusicConfig.apiBaseUrl;
 
 function _parseVibes(v) {
     if (!v) return [];
