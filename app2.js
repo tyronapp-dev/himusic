@@ -1087,7 +1087,7 @@ function initApp() {
     const fileUploadInput = document.getElementById('native-file-upload');
     const jsmediatags = window.jsmediatags;
 
-    const UPLOAD_CONFIG = { PARALLEL_UPLOADS: 1, MAX_RETRIES: 2, WORKER_URL: 'https://heatbox-upload.tyron-app.workers.dev', ITUNES_TIMEOUT: 6000 };
+const UPLOAD_CONFIG = { PARALLEL_UPLOADS: 1, MAX_RETRIES: 2, WORKER_URL: `${API_URL}/upload`, ITUNES_TIMEOUT: 6000 };
     let _uploadQueue = []; let _uploadRunning = false; let _uploadStats = { total: 0, success: 0, failed: 0, skipped: 0 }; let _inFlightKeys = new Set();
 
     async function _uploadSingleFile(file, retryCount = 0) {
