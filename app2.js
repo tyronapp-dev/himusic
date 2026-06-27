@@ -2521,46 +2521,44 @@ const groups = new Map();
         });
     })();
 
-    // --- PULL TO REFRESH ---
+// --- PULL TO REFRESH ---
     let pullStartY = 0;
-    let pullMoveY = 0;
     let isPullingToRefresh = false;
-    let pullStartTime = 0;
+    let pullRefreshTimeout = null;
 
     document.addEventListener('touchstart', (e) => {
         const activeView = document.querySelector('.view.active');
-        if (!activeView) return;
-        if (activeView.scrollTop <= 0) {
-            pullStartY = e.touches[0].clientY;
-            pullStartTime = Date.now();
-            isPullingToRefresh = true;
-        }
+        if (!activeView || activeView.scrollTop > 0) return;
+        pullStartY = e.touches[0].clientY;
+        isPullingToRefresh = true;
     }, {passive: true});
 
     document.addEventListener('touchmove', (e) => {
         if (!isPullingToRefresh) return;
-        pullMoveY = e.touches[0].clientY;
+        let pullDistance = e.touches[0].clientY - pullStartY;
+        
+        if (pullDistance > 100) { 
+            // Finger ist weit genug unten -> Timer starten
+            if (!pullRefreshTimeout) {
+                pullRefreshTimeout = setTimeout(() => {
+                    clearTimeout(_saveTimer);
+                    _doSavePlayerState();
+                    document.body.style.transition = 'opacity 0.3s';
+                    document.body.style.opacity = '0.5';
+                    window.location.reload();
+                }, 2000); // Löst nach exakt 2 Sekunden aus
+            }
+        } else {
+            // Wisch wieder nach oben -> Abbruch
+            clearTimeout(pullRefreshTimeout);
+            pullRefreshTimeout = null;
+        }
     }, {passive: true});
 
     document.addEventListener('touchend', () => {
-        if (!isPullingToRefresh) return;
         isPullingToRefresh = false;
-        
-        const pullDuration = Date.now() - pullStartTime;
-        const pullDistance = pullMoveY - pullStartY;
-        
-        if (pullDuration >= 2000 && pullDistance >= 180 && pullStartY > 0) {
-            clearTimeout(_saveTimer);
-            _doSavePlayerState();
-            
-            document.body.style.transition = 'opacity 0.3s';
-            document.body.style.opacity = '0.5';
-            setTimeout(() => window.location.reload(), 150);
-        }
-        
-        pullStartY = 0;
-        pullMoveY = 0;
-        pullStartTime = 0;
+        clearTimeout(pullRefreshTimeout);
+        pullRefreshTimeout = null;
     });
 
     setTimeout(() => {
