@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-import { getAuth } from "https://cdn.jsdelivr.net/npm/firebase@10.8.0/firebase-auth.js";
+import { getAuth } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js"; // <-- Das hier war falsch!
 
 // PLATZHALTER: Ersetze das hier mit deinen echten Firebase-Daten!
 const firebaseConfig = {
