@@ -585,26 +585,46 @@ function initApp() {
         } catch(e) {}
     }
 
-    let _bgCacheActive = false;
+let _bgCacheActive = false;
     let _bgCacheQueue = [];
+    let _bgActiveCount = 0;
 
     function startBackgroundCacheQueue(songs) {
         const newUrls = songs.filter(s => s.file_url).map(s => s.file_url);
         const existing = new Set(_bgCacheQueue);
         newUrls.forEach(url => { if (!existing.has(url)) _bgCacheQueue.push(url); });
+        
         if (_bgCacheActive) return; 
         _bgCacheActive = true;
-        const IDLE_PARALLEL = 3;   
-        const IDLE_DELAY_MS = 500; 
+        const IDLE_PARALLEL = 3; // 3 Spuren unsichtbar im Hintergrund
+
         async function processNext() {
-            if (_bgCacheQueue.length === 0) { _bgCacheActive = false; return; }
+            if (_bgCacheQueue.length === 0) {
+                if (_bgActiveCount === 0) _bgCacheActive = false;
+                return;
+            }
+            if (_bgActiveCount >= IDLE_PARALLEL) return;
+
             const player = document.getElementById('main-audio-player');
-            if (player && !player.paused) { setTimeout(processNext, 3000); return; }
-            const batch = _bgCacheQueue.splice(0, IDLE_PARALLEL);
-            await Promise.all(batch.map(url => downloadToLocal(url, '').catch(() => {})));
-            setTimeout(processNext, IDLE_DELAY_MS);
+            if (player && !player.paused) { 
+                setTimeout(processNext, 3000); 
+                return; 
+            }
+
+            _bgActiveCount++;
+            const url = _bgCacheQueue.shift();
+            
+            await downloadToLocal(url, '').catch(() => {});
+            
+            _bgActiveCount--;
+            // Sobald fertig, sofort den nächsten starten:
+            setTimeout(processNext, 100); 
         }
-        setTimeout(processNext, 5000);
+
+        setTimeout(() => {
+            // Alle Spuren gleichzeitig anwerfen
+            for(let i=0; i<IDLE_PARALLEL; i++) processNext();
+        }, 5000);
     }
 
     async function clearLocalAudio() {
@@ -2479,8 +2499,24 @@ const groups = new Map();
                 if (progSong) progSong.textContent = song.title;
             }
 
-            for (let i = 0; i < songs.length; i += PARALLEL)
-                await Promise.all(songs.slice(i, i + PARALLEL).map(dlOne));
+let currentIndex = 0;
+            const MAX_CONCURRENT = 6; // Vollgas: Nutzt das absolute Browser-Limit aus
+
+            // Fluid-Pool Worker: Nimmt sich immer den nächsten Song aus der Liste, sobald eine Spur frei wird
+            async function downloadWorker() {
+                while (currentIndex < songs.length) {
+                    const song = songs[currentIndex];
+                    currentIndex++;
+                    await dlOne(song);
+                }
+            }
+
+            // Starte alle 6 Spuren parallel
+            const workers = [];
+            for (let i = 0; i < MAX_CONCURRENT; i++) {
+                workers.push(downloadWorker());
+            }
+            await Promise.all(workers);
 
             progWrap.style.display = 'none';
             doneWrap.style.display = 'block';
