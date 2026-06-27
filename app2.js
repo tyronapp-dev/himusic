@@ -1098,10 +1098,18 @@ const UPLOAD_CONFIG = { PARALLEL_UPLOADS: 1, MAX_RETRIES: 2, WORKER_URL: `${API_
                 const tags = await new Promise((resolve, reject) => { jsmediatags.read(file, { onSuccess: (t) => resolve(t.tags), onError: reject }); });
                 if (tags.title) title = tags.title.trim(); if (tags.artist) artist = tags.artist.trim();
             } catch (e) { }
+const titleNorm = title.toLowerCase().trim();
+            const artistNorm = artist.toLowerCase().trim();
 
-            const isDup = window.globalSongsData.some(s => (s.title === title && s.artist === artist) || (s.file_size === file.size && s.title === title));
+            const isDup = window.globalSongsData.some(s => {
+                const sTitle = (s.title || '').toLowerCase().trim();
+                const sArtist = (s.artist || '').toLowerCase().trim();
+                // Datei ist nur ein Duplikat, wenn Bytegröße UND Titel exakt stimmen
+                return (s.file_size === file.size && sTitle === titleNorm) || 
+                       (sTitle === titleNorm && sArtist === artistNorm && sArtist !== 'unbekannter künstler' && s.file_size === file.size);
+            });
+
             if (isDup) { _uploadStats.skipped++; return { success: false, skipped: true }; }
-
             const safeFileName = `${Date.now()}_${Math.random().toString(36).substr(2, 5)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
             const uploadResponse = await fetch(`${UPLOAD_CONFIG.WORKER_URL}/${safeFileName}`, { method: 'PUT', body: file, signal: AbortSignal.timeout(60000) });
             if (!uploadResponse.ok) throw new Error(`HTTP ${uploadResponse.status}`);
@@ -2217,11 +2225,23 @@ sheet.addEventListener('touchend', (e) => {
         progressBarEl.style.width = '40%';
         statusEl.innerText = `${all.length} Songs geladen. Suche Duplikate...`;
 
-        const groups = new Map();
+const groups = new Map();
         all.forEach(song => {
-            const k = song.file_size && song.file_size > 0
-                ? `sz_${song.file_size}`
-                : `meta_${(song.title||'').toLowerCase().trim()}__${(song.artist||'').toLowerCase().trim()}`;
+            const cleanTitle = (song.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const cleanArtist = (song.artist || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            
+            let k;
+            if (song.file_size && song.file_size > 0 && cleanTitle.length > 0) {
+                // Ein echtes Duplikat hat exakt die gleiche Bytegröße UND denselben Titel
+                k = `dup_${song.file_size}_${cleanTitle}`;
+            } else if (cleanArtist !== '' && cleanArtist !== 'unbekannterknstler') {
+                // Fallback: Gleicher Titel & Künstler
+                k = `meta_${cleanTitle}_${cleanArtist}`;
+            } else {
+                // Einzigartig -> nicht löschen
+                k = `unique_${song.id}`;
+            }
+
             if (!groups.has(k)) groups.set(k, []);
             groups.get(k).push(song);
         });
