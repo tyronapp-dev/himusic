@@ -6,38 +6,44 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Himusic">
-    <meta name="theme-color" content="#000000">
     <title>Himusic Login</title>
     
     <link rel="manifest" href="manifest.json">
-    <link rel="apple-touch-icon" href="icon-180.png">
-    <link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
-    <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
+    <link rel="apple-touch-icon" href="icon-192.png">
     
     <style>
         body { background: #000; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: -apple-system, sans-serif; margin: 0; }
-        .login-box { display: flex; flex-direction: column; gap: 15px; width: 300px; padding: 30px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        h2 { margin-top: 0; font-size: 24px; letter-spacing: -0.5px; font-weight: 700; }
-        input[type="email"], input[type="password"] { padding: 12px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: white; font-size: 16px; outline: none; }
-        input::placeholder { color: rgba(255,255,255,0.4); }
+        .login-box { display: flex; flex-direction: column; gap: 15px; width: 300px; padding: 30px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; text-align: center; }
+        h2 { margin-top: 0; font-size: 24px; }
+        input { padding: 12px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: white; font-size: 16px; outline: none; text-align: center; }
         button { padding: 12px; border-radius: 8px; border: none; background: #fa233b; color: white; font-size: 16px; font-weight: 600; cursor: pointer; }
-        button:active { transform: scale(0.98); }
     </style>
 </head>
 <body>
     <div class="login-box">
-        <h2>Himusic Login</h2>
-        <input type="email" id="email" placeholder="E-Mail">
+        <h2>Himusic</h2>
         <input type="password" id="password" placeholder="Passwort">
-        
-        <div style="margin-top: -5px; margin-bottom: 5px; display: flex; align-items: center; justify-content: center; gap: 8px; color: white;">
-            <input type="checkbox" id="remember-me" checked style="width: 16px; height: 16px; accent-color: #fa233b;">
-            <label for="remember-me" style="font-size: 14px; cursor: pointer;">Angemeldet bleiben</label>
-        </div>
-
-        <button id="login-btn">Anmelden</button>
-        <p id="error-msg" style="color: #ff3b30; font-size: 14px; margin: 5px 0 0 0; display: none;"></p>
+        <button id="login-btn">Entsperren</button>
+        <p id="error-msg" style="color: #ff3b30; font-size: 14px; display: none;">Falsches Passwort!</p>
     </div>
-    <script type="module" src="login.js"></script>
+
+    <script>
+        // HIER DEIN EIGENES PASSWORT EINTRAGEN:
+        const APP_PASSWORD = "Kakalika";
+
+        // Wenn schon eingeloggt, SOFORT weiterleiten
+        if(localStorage.getItem('himusic_auth') === 'true') {
+            window.location.replace("index.html");
+        }
+
+        document.getElementById('login-btn').addEventListener('click', () => {
+            if(document.getElementById('password').value === APP_PASSWORD) {
+                localStorage.setItem('himusic_auth', 'true');
+                window.location.replace("index.html");
+            } else {
+                document.getElementById('error-msg').style.display = 'block';
+            }
+        });
+    </script>
 </body>
 </html>

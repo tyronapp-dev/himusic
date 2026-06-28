@@ -1,6 +1,4 @@
-import { auth } from "./firebase-config.js";
-import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-const API_URL = window.HiMusicConfig.apiBaseUrl;
+const API_URL = window.HiMusicConfig?.apiBaseUrl || 'https://heatbox-api.tyron-app.workers.dev';
 
 function _parseVibes(v) {
     if (!v) return [];
@@ -179,20 +177,14 @@ function addClearButton(inputElement) {
 }
 
 // ---------------------------------------------------------
-// FIREBASE AUTHENTICATION WRAPPER
+// LOKALER LOGIN CHECK (FIREBASE ENTFERNT)
 // ---------------------------------------------------------
-document.addEventListener('DOMContentLoaded', async () => {
-    // iOS FIX: App wartet, bis der Speicher komplett ausgelesen wurde!
-    await auth.authStateReady(); 
-
-    if (!auth.currentUser) {
-        // Nicht eingeloggt -> Zurück zum Türsteher
-        window.location.href = "login.html"; 
+document.addEventListener('DOMContentLoaded', () => {
+    if (localStorage.getItem('himusic_auth') !== 'true') {
+        window.location.replace("login.html");
         return;
     }
-    
-    // Eingeloggt -> App hochfahren!
-    initApp();
+    initApp(); 
 });
 
 function initApp() {
