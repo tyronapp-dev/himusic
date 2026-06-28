@@ -2634,3 +2634,54 @@ let currentIndex = 0;
     }, 800); 
 
 } // END initApp()
+// ==========================================
+// YOUTUBE IMPORT LOGIK
+// ==========================================
+document.addEventListener('DOMContentLoaded', () => {
+    const ytInput = document.getElementById('youtube-url-input');
+    const ytBtn = document.getElementById('youtube-import-btn');
+    const ytStatus = document.getElementById('youtube-status');
+
+    if(ytBtn) {
+        ytBtn.addEventListener('click', async () => {
+            const url = ytInput.value.trim();
+            if(!url.includes('youtube.com') && !url.includes('youtu.be')) {
+                alert('Bitte einen gültigen YouTube-Link eingeben!');
+                return;
+            }
+
+            ytBtn.disabled = true;
+            ytBtn.style.opacity = '0.5';
+            ytStatus.style.display = 'block';
+            ytStatus.innerText = 'Lade Video herunter und konvertiere... (Das dauert ein paar Sekunden)';
+            ytStatus.style.color = '#fff';
+
+            try {
+                const response = await fetch(`${API_URL}/import-youtube`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ youtube_url: url })
+                });
+
+                if(!response.ok) throw new Error('Fehler beim Server.');
+                
+                ytInput.value = '';
+                ytStatus.innerText = '✅ Song erfolgreich importiert!';
+                ytStatus.style.color = '#32d74b';
+                
+                // Lade die Song-Liste neu, damit der Song sofort auftaucht
+                if(window.fetchSongsForPage) {
+                    await window.fetchSongsForPage(true);
+                }
+
+            } catch (error) {
+                ytStatus.innerText = '❌ Fehler: ' + error.message;
+                ytStatus.style.color = '#ff3b30';
+            } finally {
+                ytBtn.disabled = false;
+                ytBtn.style.opacity = '1';
+                setTimeout(() => { if(ytStatus.innerText.includes('✅')) ytStatus.style.display = 'none'; }, 4000);
+            }
+        });
+    }
+});
