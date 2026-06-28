@@ -181,14 +181,18 @@ function addClearButton(inputElement) {
 // ---------------------------------------------------------
 // FIREBASE AUTHENTICATION WRAPPER
 // ---------------------------------------------------------
-document.addEventListener('DOMContentLoaded', () => {
-    onAuthStateChanged(auth, (user) => {
-        if (!user) {
-            window.location.href = "login.html";
-            return;
-        }
-        initApp(); // Startet die App erst, wenn der Login erfolgreich ist
-    });
+document.addEventListener('DOMContentLoaded', async () => {
+    // iOS FIX: App wartet, bis der Speicher komplett ausgelesen wurde!
+    await auth.authStateReady(); 
+
+    if (!auth.currentUser) {
+        // Nicht eingeloggt -> Zurück zum Türsteher
+        window.location.href = "login.html"; 
+        return;
+    }
+    
+    // Eingeloggt -> App hochfahren!
+    initApp();
 });
 
 function initApp() {
