@@ -39,7 +39,10 @@ async function apiGetAllPlaylists() {
 
 async function apiCreatePlaylist(name) {
   const response = await fetch(`${API_URL}/playlists`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-  if (!response.ok) throw new Error('Failed to create playlist');
+  if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Server blockiert (Status ${response.status}): ${errText}`);
+  }
   return await response.json();
 }
 
@@ -1665,10 +1668,28 @@ const titleNorm = title.toLowerCase().trim();
         if (!window.globalPlaylistsData || window.globalPlaylistsData.length === 0 || stale) { window.fetchPlaylistsForPage(true); }
     };
 
-    async function createNewPlaylistProcess() {
-        const playlistName = prompt('Name der neuen Playlist:'); if (!playlistName || playlistName.trim() === '') return;
-        try { const newPlaylist = await apiCreatePlaylist(playlistName.trim()); await window.fetchPlaylistsForPage(true); if (newPlaylist && (selectedSongs.size > 0 || window.currentContextSongId)) { addSelectedSongsToPlaylist(newPlaylist.id, newPlaylist.name); } } 
-        catch (error) { alert('Fehler: ' + error.message); }
+async function createNewPlaylistProcess() {
+        const playlistName = prompt('Name der neuen Playlist:'); 
+        if (!playlistName || playlistName.trim() === '') return;
+        
+        try { 
+            const newPlaylist = await apiCreatePlaylist(playlistName.trim()); 
+            await window.fetchPlaylistsForPage(true); 
+            
+            // Fallback, falls die API die ID als Array oder anders benennt
+            let createdId = newPlaylist.id || newPlaylist.playlistId || (Array.isArray(newPlaylist) && newPlaylist[0]?.id) || null;
+            
+            // Sicherstellen, dass alte/falsche Song-IDs nicht aus Versehen hinzugefügt werden
+            if (createdId && (currentMode === 'playlist' || currentMode === 'add-to-specific-playlist') && selectedSongs.size > 0) { 
+                await addSelectedSongsToPlaylist(createdId, playlistName); 
+            } else if (createdId && document.getElementById('song-context-overlay')?.classList.contains('active') && window.currentContextSongId) {
+                await addSelectedSongsToPlaylist(createdId, playlistName);
+            }
+        } 
+        catch (error) { 
+            alert('Fehler beim Erstellen:\n' + error.message); 
+            console.error(error);
+        }
     }
 
     if (btnCreatePlaylistPage) btnCreatePlaylistPage.addEventListener('click', createNewPlaylistProcess);
