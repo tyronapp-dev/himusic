@@ -128,6 +128,22 @@
             <div class="content-padding">
                 <h1 class="page-heading">Settings</h1>
                 
+                <div class="setting-card" style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 14px; margin-top: 20px; border: 1px solid rgba(255,255,255,0.1);">
+    
+    <h3 style="margin-top: 0; margin-bottom: 10px; font-size: 18px; color: #fff; display: flex; align-items: center; gap: 8px;">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="#fa233b"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/></svg>
+        YouTube Import
+    </h3>
+    
+    <p style="font-size: 14px; color: #aaa; margin-bottom: 15px; margin-top: 0;">Füge einen YouTube-Link ein, um das Video automatisch als MP3 in deine Cloud zu laden.</p>
+    
+    <input type="text" id="youtube-url-input" placeholder="https://youtu.be/..." style="width: 100%; box-sizing: border-box; padding: 14px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; outline: none; margin-bottom: 12px; font-size: 16px;">
+    
+    <button id="youtube-import-btn" style="width: 100%; padding: 14px; border-radius: 10px; border: none; background: #fa233b; color: white; font-weight: bold; font-size: 16px; cursor: pointer;">Download & Import</button>
+    
+    <p id="youtube-status" style="font-size: 14px; font-weight: bold; text-align: center; margin-top: 15px; display: none;"></p>
+
+</div>
                 <div class="settings-section">
                     <h3 class="section-title">Design</h3>
                     <div class="settings-list">
