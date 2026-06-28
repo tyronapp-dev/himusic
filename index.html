@@ -134,9 +134,21 @@
                         YouTube Import
                     </h3>
                     <p style="font-size: 14px; color: #aaa; margin-bottom: 15px; margin-top: 0;">Füge einen YouTube-Link ein, um das Video automatisch als MP3 in deine Cloud zu laden.</p>
-                    <input type="text" id="youtube-url-input" placeholder="https://youtu.be/..." style="width: 100%; box-sizing: border-box; padding: 14px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; outline: none; margin-bottom: 12px; font-size: 16px;">
+                    
+                    <div style="position: relative; margin-bottom: 12px;">
+                        <input type="text" id="youtube-url-input" placeholder="https://youtu.be/..." style="width: 100%; box-sizing: border-box; padding: 14px; padding-right: 40px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; outline: none; font-size: 16px;">
+                        <button id="youtube-clear-btn" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #aaa; font-size: 24px; cursor: pointer; display: none; padding: 0;">&times;</button>
+                    </div>
+                    
                     <button id="youtube-import-btn" style="width: 100%; padding: 14px; border-radius: 10px; border: none; background: #fa233b; color: white; font-weight: bold; font-size: 16px; cursor: pointer;">Download & Import</button>
                     <p id="youtube-status" style="font-size: 14px; font-weight: bold; text-align: center; margin-top: 15px; display: none;"></p>
+                </div>
+
+                <div class="setting-card" style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 14px; margin-top: 20px; border: 1px solid rgba(255,255,255,0.1);">
+                    <h3 style="margin-top: 0; margin-bottom: 10px; font-size: 18px; color: #fff;">Cloud Sync</h3>
+                    <p style="font-size: 14px; color: #aaa; margin-bottom: 15px; margin-top: 0;">Prüft deinen Cloudflare-Speicher auf hochgeladene Dateien und importiert sie automatisch in die App.</p>
+                    <button id="btn-sync-r2" style="width: 100%; padding: 14px; border-radius: 10px; border: none; background: var(--accent); color: white; font-weight: bold; font-size: 16px; cursor: pointer;">Jetzt synchronisieren</button>
+                    <p id="sync-r2-status" style="font-size: 14px; font-weight: bold; text-align: center; margin-top: 15px; display: none;"></p>
                 </div>
 
                 <div class="settings-section" style="margin-top: 30px;">

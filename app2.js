@@ -2634,15 +2634,31 @@ let currentIndex = 0;
     }, 800); 
 
 } // END initApp()
+
 // ==========================================
-// YOUTUBE IMPORT LOGIK
+// YOUTUBE IMPORT LOGIK & CLEAR BUTTON
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     const ytInput = document.getElementById('youtube-url-input');
     const ytBtn = document.getElementById('youtube-import-btn');
     const ytStatus = document.getElementById('youtube-status');
+    const ytClearBtn = document.getElementById('youtube-clear-btn');
 
-    if(ytBtn) {
+    // Zeige das X nur an, wenn Text im Feld steht
+    if (ytInput && ytClearBtn) {
+        ytInput.addEventListener('input', () => {
+            ytClearBtn.style.display = ytInput.value.length > 0 ? 'block' : 'none';
+        });
+
+        // Klick auf das X löscht das Feld sofort
+        ytClearBtn.addEventListener('click', () => {
+            ytInput.value = '';
+            ytClearBtn.style.display = 'none';
+            ytInput.focus(); 
+        });
+    }
+
+    if(ytBtn && ytInput) {
         ytBtn.addEventListener('click', async () => {
             const url = ytInput.value.trim();
             if(!url.includes('youtube.com') && !url.includes('youtu.be')) {
@@ -2663,13 +2679,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: JSON.stringify({ youtube_url: url })
                 });
 
-                if(!response.ok) throw new Error('Fehler beim Server.');
+                if(!response.ok) {
+                    const errText = await response.text();
+                    throw new Error('Server-Fehler: ' + errText);
+                }
                 
                 ytInput.value = '';
+                if(ytClearBtn) ytClearBtn.style.display = 'none'; 
                 ytStatus.innerText = '✅ Song erfolgreich importiert!';
                 ytStatus.style.color = '#32d74b';
                 
-                // Lade die Song-Liste neu, damit der Song sofort auftaucht
                 if(window.fetchSongsForPage) {
                     await window.fetchSongsForPage(true);
                 }
