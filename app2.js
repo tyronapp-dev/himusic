@@ -2634,8 +2634,8 @@ let currentIndex = 0;
     }, 800); 
 
 } // END initApp()
-/// ==========================================
-// YOUTUBE IMPORT LOGIK & CLEAR BUTTON (Mit Fallback-Servern & V10 Support)
+// ==========================================
+// YOUTUBE IMPORT LOGIK (Letzter API Versuch)
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     const ytInput = document.getElementById('youtube-url-input');
@@ -2651,65 +2651,41 @@ document.addEventListener('DOMContentLoaded', () => {
     if(ytBtn && ytInput) {
         ytBtn.addEventListener('click', async () => {
             const url = ytInput.value.trim();
-            if(!url.includes('youtube.com') && !url.includes('youtu.be')) { alert('Bitte einen gültigen YouTube-Link eingeben!'); return; }
+            if(!url.includes('youtube.com') && !url.includes('youtu.be')) return;
 
             ytBtn.disabled = true; ytBtn.style.opacity = '0.5';
-            ytStatus.style.display = 'block'; ytStatus.innerText = '1/3: Video wird umgewandelt...'; ytStatus.style.color = '#fff';
+            ytStatus.style.display = 'block'; ytStatus.innerText = 'Wandle um...'; ytStatus.style.color = '#fff';
 
             try {
-                // 5 Fallback-Server für maximale Zuverlässigkeit
-                const cobaltInstances = [
-                    "https://co.wuk.sh/api/json",
-                    "https://api.cobalt.tools/api/json",
-                    "https://cobalt.kling.gg/api/json",
-                    "https://cobalt.c-net.org/api/json",
-                    "https://api.cobalt.tools/" // Neues V10 Format
-                ];
+                // Minimaler Payload direkt an die Haupt-API
+                const cobaltRes = await fetch("https://api.cobalt.tools/", {
+                    method: "POST",
+                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+                    body: JSON.stringify({ url: url, downloadMode: "audio", aFormat: "mp3" })
+                });
                 
-                let cobaltData = null;
-                for (let api of cobaltInstances) {
-                    try {
-                        const cobaltRes = await fetch(api, {
-                            method: "POST",
-                            headers: { "Accept": "application/json", "Content-Type": "application/json" },
-                            // Beide Formate (V7 und V10) mitsenden, um jeden Server abzudecken
-                            body: JSON.stringify({ 
-                                url: url, 
-                                isAudioOnly: true, 
-                                downloadMode: "audio",
-                                aFormat: "mp3"
-                            })
-                        });
-                        if (cobaltRes.ok) {
-                            const json = await cobaltRes.json();
-                            if (json && json.url) {
-                                cobaltData = json;
-                                break;
-                            }
-                        }
-                    } catch(e) { continue; }
-                }
-                
-                if(!cobaltData || !cobaltData.url) throw new Error('Alle Server überlastet. Bitte später versuchen.');
+                if(!cobaltRes.ok) throw new Error('API blockiert');
+                const cobaltData = await cobaltRes.json();
+                if(!cobaltData.url) throw new Error('Kein Link');
 
-                ytStatus.innerText = '2/3: Lade Audio herunter...';
+                ytStatus.innerText = 'Lade hoch...';
 
+                // MP3 direkt aufs Handy laden
                 const audioRes = await fetch(cobaltData.url);
-                if(!audioRes.ok) throw new Error('Download vom Converter fehlgeschlagen.');
+                if(!audioRes.ok) throw new Error('Download fehler');
                 const audioBlob = await audioRes.blob();
 
-                ytStatus.innerText = '3/3: Lade in die Cloud hoch...';
-
+                // In Cloudflare schieben
                 const filename = `yt_${Date.now()}.mp3`;
                 const uploadRes = await fetch(`${API_URL}/upload/${filename}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'audio/mpeg' },
                     body: audioBlob
                 });
-                
-                if(!uploadRes.ok) throw new Error('Cloud-Upload fehlgeschlagen.');
+                if(!uploadRes.ok) throw new Error('Cloud fehler');
                 const uploadData = await uploadRes.json();
 
+                // In DB eintragen
                 await fetch(`${API_URL}/songs`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2720,16 +2696,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 
                 ytInput.value = ''; if(ytClearBtn) ytClearBtn.style.display = 'none'; 
-                ytStatus.innerText = '✅ Song erfolgreich importiert!'; ytStatus.style.color = '#32d74b';
+                ytStatus.innerText = '✅ Importiert!'; ytStatus.style.color = '#32d74b';
                 
                 if(typeof processBackgroundSync === 'function') processBackgroundSync();
                 if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
 
             } catch (error) {
-                ytStatus.innerText = '❌ ' + error.message; ytStatus.style.color = '#ff3b30';
+                ytStatus.innerText = '❌ Blockiert.'; ytStatus.style.color = '#ff3b30';
             } finally {
                 ytBtn.disabled = false; ytBtn.style.opacity = '1';
-                setTimeout(() => { if(ytStatus.innerText.includes('✅')) ytStatus.style.display = 'none'; }, 4000);
+                setTimeout(() => { ytStatus.style.display = 'none'; }, 3000);
             }
         });
     }
@@ -2798,8 +2774,9 @@ window.addEventListener('online', async () => {
     if(hasUpdates && window.fetchSongsForPage && Object.keys(offlineQueue).length === 0) window.fetchSongsForPage(true);
 });
 
+JavaScript
 // ==========================================
-// 2. DUMB & FAST IMPORT (Keine Prüfung, nur massiver Upload)
+// DUMB & FAST IMPORT (Sequenziell, keine Pop-Ups, nur Roh-Upload)
 // ==========================================
 const oldFileInput = document.getElementById('native-file-upload');
 if (oldFileInput) {
@@ -2810,45 +2787,48 @@ if (oldFileInput) {
         const files = Array.from(e.target.files);
         if (files.length === 0) return;
         
-        alert(`Starte superschnellen Import von ${files.length} Songs. Die App lädt sie jetzt roh hoch. Covers und Tags werden später im Hintergrund ergänzt.`);
-        
-        // Upload in 3er Blöcken, um den Handy-RAM nicht zu sprengen
-        for (let i = 0; i < files.length; i += 3) {
-            const batch = files.slice(i, i + 3);
-            await Promise.all(batch.map(async (file) => {
-                const safeFilename = `fast_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
-                try {
-                    // 1. Roh-Upload in Cloudflare R2
-                    const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': file.type || 'audio/mpeg' },
-                        body: file
-                    });
-                    const uploadData = await uploadRes.json();
-                    
-                    // 2. Roh-Eintrag in Datenbank
-                    let rawTitle = file.name.replace(/\.[^/.]+$/, "");
-                    await fetch(`${API_URL}/songs`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            title: rawTitle,
-                            artist: "Unbekannt", // Markierung für den Background Sync
-                            cover_data: "",
-                            file_url: uploadData.url,
-                            file_size: file.size,
-                            duration: 0,
-                            vibes: []
-                        })
-                    });
-                } catch (err) { console.error(err); }
-            }));
+        // Button optisch leicht ausgrauen, damit du weißt, er arbeitet
+        const uploadLabel = document.querySelector('label[for="native-file-upload"]');
+        if(uploadLabel) uploadLabel.style.opacity = '0.5';
+
+        // Einer nach dem anderen (verhindert RAM-Abstürze am Handy)
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const safeFilename = `fast_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+            
+            try {
+                // 1. Roh-Upload in Cloudflare R2
+                const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': file.type || 'audio/mpeg' },
+                    body: file
+                });
+                if(!uploadRes.ok) continue;
+                const uploadData = await uploadRes.json();
+                
+                // 2. Roh-Eintrag in Datenbank
+                let rawTitle = file.name.replace(/\.[^/.]+$/, "");
+                await fetch(`${API_URL}/songs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        title: rawTitle,
+                        artist: "Unbekannt", 
+                        cover_data: "",
+                        file_url: uploadData.url,
+                        file_size: file.size,
+                        duration: 0,
+                        vibes: []
+                    })
+                });
+            } catch (err) { console.error("Fehler bei", file.name); }
         }
+        
+        // Fertig - Button wieder normal machen und UI aktualisieren
+        if(uploadLabel) uploadLabel.style.opacity = '1';
         if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
-        alert("✅ Fast Import abgeschlossen!");
     });
 }
-
 // ==========================================
 // 3. LIVE BACKGROUND SYNC LOGIK (Tags & Covers)
 // ==========================================
