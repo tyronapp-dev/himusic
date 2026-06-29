@@ -1,0 +1,47 @@
+name: YouTube Audio Import
+
+on:
+  repository_dispatch:
+    types: [youtube-import-event]
+
+jobs:
+  import-audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ffmpeg für Audio-Konvertierung
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+
+      # Deno – wird von yt-dlp für JavaScript-Challenge-Entschlüsselung genutzt
+      - name: Install Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install --quiet yt-dlp boto3 requests
+
+      - name: Run extractor
+        env:
+          YOUTUBE_URL:          ${{ github.event.client_payload.youtube_url }}
+          JOB_ID:               ${{ github.event.client_payload.job_id }}
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME:       ${{ secrets.R2_BUCKET_NAME }}
+          R2_PUBLIC_DOMAIN:     ${{ secrets.R2_PUBLIC_DOMAIN }}
+          D1_API_URL:           ${{ secrets.D1_API_URL }}
+          D1_API_KEY:           ${{ secrets.D1_API_KEY }}
+        run: python src/extractor_worker.py

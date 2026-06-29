@@ -2808,7 +2808,7 @@ async function processBackgroundSync() {
 setTimeout(processBackgroundSync, 3000);
 
 // ==========================================
-// 4. YOUTUBE IMPORT (Unblockierbare Piped API)
+// 4. YOUTUBE IMPORT (via GitHub Actions – fire & forget)
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     const ytInput = document.getElementById('youtube-url-input');
@@ -2821,34 +2821,39 @@ document.addEventListener('DOMContentLoaded', () => {
         ytClearBtn.addEventListener('click', () => { ytInput.value = ''; ytClearBtn.style.display = 'none'; ytInput.focus(); });
     }
 
-    if(ytBtn && ytInput) {
+    if (ytBtn && ytInput) {
         ytBtn.addEventListener('click', async () => {
             const url = ytInput.value.trim();
-            if(!url) return;
+            if (!url) return;
 
             ytBtn.disabled = true; ytBtn.style.opacity = '0.5';
-            ytStatus.style.display = 'block'; ytStatus.innerText = 'Lade direkt aus YouTube...'; ytStatus.style.color = '#fff';
+            ytStatus.style.display = 'block';
+            ytStatus.innerText = 'Wird gestartet...';
+            ytStatus.style.color = '#fff';
 
             try {
-                const response = await fetch(`${API_URL}/import-youtube`, {
+                const response = await fetch(`${API_URL}/dispatch-import`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ youtube_url: url })
                 });
-                
-                if(!response.ok) throw new Error('Download fehlgeschlagen.');
-                
-                ytInput.value = ''; if(ytClearBtn) ytClearBtn.style.display = 'none'; 
-                ytStatus.innerText = '✅ Song importiert!'; ytStatus.style.color = '#32d74b';
-                
-                if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
-                processBackgroundSync(); 
+
+                if (!response.ok) throw new Error(`Server: ${response.status}`);
+
+                // Sofortiger Erfolg – der Runner läuft im Hintergrund weiter
+                ytInput.value = '';
+                if (ytClearBtn) ytClearBtn.style.display = 'none';
+                ytStatus.innerText = '⏳ Download im Hintergrund gestartet! Song erscheint in ~2 Min.';
+                ytStatus.style.color = '#32d74b';
+                // Nach 6 Sekunden ausblenden – kein nervöser Ladebalken mehr
+                setTimeout(() => { ytStatus.style.display = 'none'; }, 6000);
 
             } catch (error) {
-                ytStatus.innerText = '❌ Fehler. Link prüfen.'; ytStatus.style.color = '#ff3b30';
+                ytStatus.innerText = `❌ Fehler: ${error.message}`;
+                ytStatus.style.color = '#ff3b30';
+                setTimeout(() => { ytStatus.style.display = 'none'; }, 4000);
             } finally {
                 ytBtn.disabled = false; ytBtn.style.opacity = '1';
-                setTimeout(() => { ytStatus.style.display = 'none'; }, 2000);
             }
         });
     }
