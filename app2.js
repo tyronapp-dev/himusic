@@ -2681,7 +2681,7 @@ window.addEventListener('online', async () => {
 });
 
 // ==========================================
-// 2. DUMB & FAST IMPORT (Sequenziell, Roh-Upload ohne Pop-ups)
+// 2. DUMB & FAST IMPORT (10 Parallel & Duplikat-Check)
 // ==========================================
 const oldFileInput = document.getElementById('native-file-upload');
 if (oldFileInput) {
@@ -2695,25 +2695,62 @@ if (oldFileInput) {
         const uploadLabel = document.querySelector('label[for="native-file-upload"]');
         if(uploadLabel) uploadLabel.style.opacity = '0.5';
 
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            const safeFilename = `fast_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
-            try {
-                const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, { method: 'PUT', headers: { 'Content-Type': file.type || 'audio/mpeg' }, body: file });
-                if(!uploadRes.ok) continue;
-                const uploadData = await uploadRes.json();
+        // 1. Vorab alle Songtitel aus der Datenbank holen (für Duplikat-Check)
+        let existingTitles = new Set();
+        try {
+            const dbRes = await fetch(`${API_URL}/songs`);
+            if (dbRes.ok) {
+                const dbSongs = await dbRes.json();
+                dbSongs.forEach(s => existingTitles.add(s.title.toLowerCase().trim()));
+            }
+        } catch(err) { console.error("Konnte DB für Check nicht laden", err); }
+
+        // 2. Batch-Upload (10 Dateien gleichzeitig = Höchstes sicheres Limit für Handys)
+        const CONCURRENT_UPLOADS = 10;
+        
+        for (let i = 0; i < files.length; i += CONCURRENT_UPLOADS) {
+            const batch = files.slice(i, i + CONCURRENT_UPLOADS);
+            
+            await Promise.all(batch.map(async (file) => {
+                let rawTitle = file.name.replace(/\.[^/.]+$/, "").trim();
                 
-                let rawTitle = file.name.replace(/\.[^/.]+$/, "");
-                await fetch(`${API_URL}/songs`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ title: rawTitle, artist: "Unbekannt", cover_data: "", file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [] })
-                });
-            } catch (err) {}
+                // Check: Ist der Song schon in der Datenbank? -> Überspringen
+                if(existingTitles.has(rawTitle.toLowerCase())) return;
+
+                const safeFilename = `fast_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+                try {
+                    // Upload in Cloudflare
+                    const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, { 
+                        method: 'PUT', 
+                        headers: { 'Content-Type': file.type || 'audio/mpeg' }, 
+                        body: file 
+                    });
+                    if(!uploadRes.ok) return;
+                    const uploadData = await uploadRes.json();
+                    
+                    // Eintrag in DB erstellen
+                    await fetch(`${API_URL}/songs`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            title: rawTitle, artist: "Unbekannt", cover_data: "", 
+                            file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [] 
+                        })
+                    });
+                } catch (err) {}
+            }));
         }
         
         if(uploadLabel) uploadLabel.style.opacity = '1';
         if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
+        
+        // Optionaler Hinweis, wenn er durchgelaufen ist
+        const syncStatusDetail = document.getElementById('sync-status-detail');
+        if(syncStatusDetail) {
+            syncStatusDetail.style.display = 'block';
+            syncStatusDetail.style.color = '#32d74b';
+            syncStatusDetail.innerText = "Upload abgeschlossen! Hintergrund-Sync läuft...";
+        }
     });
 }
 
