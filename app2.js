@@ -2634,8 +2634,8 @@ let currentIndex = 0;
     }, 800); 
 
 } // END initApp()
-// ==========================================
-// YOUTUBE IMPORT LOGIK & CLEAR BUTTON (Mit Fallback-Servern)
+/// ==========================================
+// YOUTUBE IMPORT LOGIK & CLEAR BUTTON (Mit Fallback-Servern & V10 Support)
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     const ytInput = document.getElementById('youtube-url-input');
@@ -2657,11 +2657,13 @@ document.addEventListener('DOMContentLoaded', () => {
             ytStatus.style.display = 'block'; ytStatus.innerText = '1/3: Video wird umgewandelt...'; ytStatus.style.color = '#fff';
 
             try {
-                // 1. Fallback-System: Probiere 3 verschiedene öffentliche Server nacheinander
+                // 5 Fallback-Server für maximale Zuverlässigkeit
                 const cobaltInstances = [
                     "https://co.wuk.sh/api/json",
                     "https://api.cobalt.tools/api/json",
-                    "https://cobalt.q0.is/api/json"
+                    "https://cobalt.kling.gg/api/json",
+                    "https://cobalt.c-net.org/api/json",
+                    "https://api.cobalt.tools/" // Neues V10 Format
                 ];
                 
                 let cobaltData = null;
@@ -2670,27 +2672,34 @@ document.addEventListener('DOMContentLoaded', () => {
                         const cobaltRes = await fetch(api, {
                             method: "POST",
                             headers: { "Accept": "application/json", "Content-Type": "application/json" },
-                            body: JSON.stringify({ url: url, isAudioOnly: true })
+                            // Beide Formate (V7 und V10) mitsenden, um jeden Server abzudecken
+                            body: JSON.stringify({ 
+                                url: url, 
+                                isAudioOnly: true, 
+                                downloadMode: "audio",
+                                aFormat: "mp3"
+                            })
                         });
                         if (cobaltRes.ok) {
-                            cobaltData = await cobaltRes.json();
-                            if (cobaltData && cobaltData.url) break; // Erfolg! Schleife abbrechen.
+                            const json = await cobaltRes.json();
+                            if (json && json.url) {
+                                cobaltData = json;
+                                break;
+                            }
                         }
-                    } catch(e) { continue; /* Fehler ignoriert, probiere nächsten Server */ }
+                    } catch(e) { continue; }
                 }
                 
                 if(!cobaltData || !cobaltData.url) throw new Error('Alle Server überlastet. Bitte später versuchen.');
 
-                ytStatus.innerText = '2/3: Lade Audio auf dein Handy...';
+                ytStatus.innerText = '2/3: Lade Audio herunter...';
 
-                // 2. MP3 direkt aufs Handy laden
                 const audioRes = await fetch(cobaltData.url);
                 if(!audioRes.ok) throw new Error('Download vom Converter fehlgeschlagen.');
                 const audioBlob = await audioRes.blob();
 
                 ytStatus.innerText = '3/3: Lade in die Cloud hoch...';
 
-                // 3. Von deinem Handy in Cloudflare schieben
                 const filename = `yt_${Date.now()}.mp3`;
                 const uploadRes = await fetch(`${API_URL}/upload/${filename}`, {
                     method: 'PUT',
@@ -2701,7 +2710,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if(!uploadRes.ok) throw new Error('Cloud-Upload fehlgeschlagen.');
                 const uploadData = await uploadRes.json();
 
-                // 4. In die Datenbank eintragen
                 await fetch(`${API_URL}/songs`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2714,7 +2722,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ytInput.value = ''; if(ytClearBtn) ytClearBtn.style.display = 'none'; 
                 ytStatus.innerText = '✅ Song erfolgreich importiert!'; ytStatus.style.color = '#32d74b';
                 
-                // Hintergrund-Sync sofort anstoßen
                 if(typeof processBackgroundSync === 'function') processBackgroundSync();
                 if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
 
