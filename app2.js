@@ -2635,7 +2635,143 @@ let currentIndex = 0;
 
 } // END initApp()
 // ==========================================
-// YOUTUBE IMPORT LOGIK (Letzter API Versuch)
+// 1. OFFLINE TAG EDITOR (Speichert lokal, synchronisiert online)
+// ==========================================
+const oldSaveBtn = document.getElementById('btn-save-tags');
+if (oldSaveBtn) {
+    const newSaveBtn = oldSaveBtn.cloneNode(true);
+    oldSaveBtn.parentNode.replaceChild(newSaveBtn, oldSaveBtn);
+    
+    newSaveBtn.addEventListener('click', async () => {
+        const title = document.getElementById('edit-input-title').value.trim();
+        const artist = document.getElementById('edit-input-artist').value.trim();
+        
+        if(document.getElementById('bp-song-name')) document.getElementById('bp-song-name').innerText = title;
+        if(document.getElementById('bp-artist-name')) document.getElementById('bp-artist-name').innerText = artist;
+        
+        const updatedData = { title: title, artist: artist, cover_data: window.currentEditCover || "", vibes: window.currentEditVibes || [] };
+        const overlay = document.getElementById('edit-tags-overlay');
+        if(overlay) overlay.classList.remove('active');
+
+        if (!navigator.onLine) {
+            let offlineQueue = JSON.parse(localStorage.getItem('offline_tags') || '{}');
+            offlineQueue[window.currentEditSongId] = updatedData;
+            localStorage.setItem('offline_tags', JSON.stringify(offlineQueue));
+            alert("Offline gespeichert! Wird synchronisiert, sobald du online bist.");
+            return;
+        }
+
+        await fetch(`${API_URL}/songs/${window.currentEditSongId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedData) });
+        if(window.fetchSongsForPage) window.fetchSongsForPage(true);
+    });
+}
+
+window.addEventListener('online', async () => {
+    let offlineQueue = JSON.parse(localStorage.getItem('offline_tags') || '{}');
+    let hasUpdates = false;
+    for (const [id, data] of Object.entries(offlineQueue)) {
+        try {
+            await fetch(`${API_URL}/songs/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+            delete offlineQueue[id];
+            hasUpdates = true;
+        } catch(e) {}
+    }
+    localStorage.setItem('offline_tags', JSON.stringify(offlineQueue));
+    if(hasUpdates && window.fetchSongsForPage && Object.keys(offlineQueue).length === 0) window.fetchSongsForPage(true);
+});
+
+// ==========================================
+// 2. DUMB & FAST IMPORT (Sequenziell, Roh-Upload ohne Pop-ups)
+// ==========================================
+const oldFileInput = document.getElementById('native-file-upload');
+if (oldFileInput) {
+    const newFileInput = oldFileInput.cloneNode(true);
+    oldFileInput.parentNode.replaceChild(newFileInput, oldFileInput);
+
+    newFileInput.addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files);
+        if (files.length === 0) return;
+        
+        const uploadLabel = document.querySelector('label[for="native-file-upload"]');
+        if(uploadLabel) uploadLabel.style.opacity = '0.5';
+
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const safeFilename = `fast_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+            try {
+                const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, { method: 'PUT', headers: { 'Content-Type': file.type || 'audio/mpeg' }, body: file });
+                if(!uploadRes.ok) continue;
+                const uploadData = await uploadRes.json();
+                
+                let rawTitle = file.name.replace(/\.[^/.]+$/, "");
+                await fetch(`${API_URL}/songs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: rawTitle, artist: "Unbekannt", cover_data: "", file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [] })
+                });
+            } catch (err) {}
+        }
+        
+        if(uploadLabel) uploadLabel.style.opacity = '1';
+        if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
+    });
+}
+
+// ==========================================
+// 3. LIVE BACKGROUND SYNC LOGIK (Tags & Covers)
+// ==========================================
+async function processBackgroundSync() {
+    const progressText = document.getElementById('sync-progress-text');
+    const progressBar = document.getElementById('sync-progress-bar');
+    const statusDetail = document.getElementById('sync-status-detail');
+
+    try {
+        const response = await fetch(`${API_URL}/songs`);
+        const songs = await response.json();
+        const totalSongs = songs.length;
+        const unsyncedSongs = songs.filter(s => s.artist === "Unbekannt" || s.artist === "");
+        const syncedSongsCount = totalSongs - unsyncedSongs.length;
+
+        if (progressText) progressText.innerText = `${syncedSongsCount} / ${totalSongs}`;
+        if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(syncedSongsCount / totalSongs) * 100}%` : '0%';
+
+        if (unsyncedSongs.length === 0) {
+            if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = "Alle Songs sind auf dem neuesten Stand."; statusDetail.style.color = '#32d74b'; }
+            return; 
+        }
+
+        if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = `Synchronisiere noch ${unsyncedSongs.length} Songs... (App offen lassen)`; statusDetail.style.color = '#fa233b'; }
+        
+        const song = unsyncedSongs[0];
+        let searchTerm = song.title.replace(/(_|-)/g, " ").trim();
+        
+        try {
+            const itunesRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`);
+            const itunesData = await itunesRes.json();
+            
+            if (itunesData.results && itunesData.results.length > 0) {
+                const track = itunesData.results[0];
+                await fetch(`${API_URL}/songs/${song.id}`, {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ title: track.trackName, artist: track.artistName, cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb'), vibes: song.vibes || [] })
+                });
+            } else {
+                await fetch(`${API_URL}/songs/${song.id}`, {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ title: song.title, artist: "Unbekannter Künstler", cover_data: "", vibes: song.vibes || [] })
+                });
+            }
+        } catch(e) {}
+        
+        if (window.fetchSongsForPage) window.fetchSongsForPage(true);
+        setTimeout(processBackgroundSync, 1500);
+
+    } catch(err) { setTimeout(processBackgroundSync, 5000); }
+}
+setTimeout(processBackgroundSync, 3000);
+
+// ==========================================
+// 4. YOUTUBE IMPORT (Unblockierbare Piped API)
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     const ytInput = document.getElementById('youtube-url-input');
@@ -2651,268 +2787,32 @@ document.addEventListener('DOMContentLoaded', () => {
     if(ytBtn && ytInput) {
         ytBtn.addEventListener('click', async () => {
             const url = ytInput.value.trim();
-            if(!url.includes('youtube.com') && !url.includes('youtu.be')) return;
+            if(!url) return;
 
             ytBtn.disabled = true; ytBtn.style.opacity = '0.5';
-            ytStatus.style.display = 'block'; ytStatus.innerText = 'Wandle um...'; ytStatus.style.color = '#fff';
+            ytStatus.style.display = 'block'; ytStatus.innerText = 'Lade direkt aus YouTube...'; ytStatus.style.color = '#fff';
 
             try {
-                // Minimaler Payload direkt an die Haupt-API
-                const cobaltRes = await fetch("https://api.cobalt.tools/", {
-                    method: "POST",
-                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
-                    body: JSON.stringify({ url: url, downloadMode: "audio", aFormat: "mp3" })
-                });
-                
-                if(!cobaltRes.ok) throw new Error('API blockiert');
-                const cobaltData = await cobaltRes.json();
-                if(!cobaltData.url) throw new Error('Kein Link');
-
-                ytStatus.innerText = 'Lade hoch...';
-
-                // MP3 direkt aufs Handy laden
-                const audioRes = await fetch(cobaltData.url);
-                if(!audioRes.ok) throw new Error('Download fehler');
-                const audioBlob = await audioRes.blob();
-
-                // In Cloudflare schieben
-                const filename = `yt_${Date.now()}.mp3`;
-                const uploadRes = await fetch(`${API_URL}/upload/${filename}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'audio/mpeg' },
-                    body: audioBlob
-                });
-                if(!uploadRes.ok) throw new Error('Cloud fehler');
-                const uploadData = await uploadRes.json();
-
-                // In DB eintragen
-                await fetch(`${API_URL}/songs`, {
+                const response = await fetch(`${API_URL}/import-youtube`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        title: "YouTube Import", artist: "Unbekannt", cover_data: "",
-                        file_url: uploadData.url, file_size: audioBlob.size, duration: 0, vibes: []
-                    })
+                    body: JSON.stringify({ youtube_url: url })
                 });
+                
+                if(!response.ok) throw new Error('Download fehlgeschlagen.');
                 
                 ytInput.value = ''; if(ytClearBtn) ytClearBtn.style.display = 'none'; 
-                ytStatus.innerText = '✅ Importiert!'; ytStatus.style.color = '#32d74b';
+                ytStatus.innerText = '✅ Song importiert!'; ytStatus.style.color = '#32d74b';
                 
-                if(typeof processBackgroundSync === 'function') processBackgroundSync();
                 if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
+                processBackgroundSync(); 
 
             } catch (error) {
-                ytStatus.innerText = '❌ Blockiert.'; ytStatus.style.color = '#ff3b30';
+                ytStatus.innerText = '❌ Fehler. Link prüfen.'; ytStatus.style.color = '#ff3b30';
             } finally {
                 ytBtn.disabled = false; ytBtn.style.opacity = '1';
-                setTimeout(() => { ytStatus.style.display = 'none'; }, 3000);
+                setTimeout(() => { ytStatus.style.display = 'none'; }, 2000);
             }
         });
     }
 });
-// ==========================================
-// 1. OFFLINE TAG EDITOR (Speichert lokal, synchronisiert online)
-// ==========================================
-const oldSaveBtn = document.getElementById('btn-save-tags');
-if (oldSaveBtn) {
-    const newSaveBtn = oldSaveBtn.cloneNode(true);
-    oldSaveBtn.parentNode.replaceChild(newSaveBtn, oldSaveBtn);
-    
-    newSaveBtn.addEventListener('click', async () => {
-        const title = document.getElementById('edit-input-title').value.trim();
-        const artist = document.getElementById('edit-input-artist').value.trim();
-        
-        // UI sofort anpassen (damit es sich schnell anfühlt)
-        if(document.getElementById('bp-song-name')) document.getElementById('bp-song-name').innerText = title;
-        if(document.getElementById('bp-artist-name')) document.getElementById('bp-artist-name').innerText = artist;
-        
-        const updatedData = { 
-            title: title, 
-            artist: artist, 
-            cover_data: window.currentEditCover || "", 
-            vibes: window.currentEditVibes || [] 
-        };
-
-        const overlay = document.getElementById('edit-tags-overlay');
-        if(overlay) overlay.classList.remove('active');
-
-        // Offline Check: Im Tresor speichern
-        if (!navigator.onLine) {
-            let offlineQueue = JSON.parse(localStorage.getItem('offline_tags') || '{}');
-            offlineQueue[window.currentEditSongId] = updatedData;
-            localStorage.setItem('offline_tags', JSON.stringify(offlineQueue));
-            alert("Offline gespeichert! Wird automatisch synchronisiert, sobald du online bist.");
-            return;
-        }
-
-        // Online Check: Direkt in Datenbank
-        await fetch(`${API_URL}/songs/${window.currentEditSongId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updatedData)
-        });
-        if(window.fetchSongsForPage) window.fetchSongsForPage(true);
-    });
-}
-
-// Sobald das Handy wieder Internet hat: Tresor leeren
-window.addEventListener('online', async () => {
-    let offlineQueue = JSON.parse(localStorage.getItem('offline_tags') || '{}');
-    let hasUpdates = false;
-    for (const [id, data] of Object.entries(offlineQueue)) {
-        try {
-            await fetch(`${API_URL}/songs/${id}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            });
-            delete offlineQueue[id];
-            hasUpdates = true;
-        } catch(e) {}
-    }
-    localStorage.setItem('offline_tags', JSON.stringify(offlineQueue));
-    if(hasUpdates && window.fetchSongsForPage && Object.keys(offlineQueue).length === 0) window.fetchSongsForPage(true);
-});
-
-JavaScript
-// ==========================================
-// DUMB & FAST IMPORT (Sequenziell, keine Pop-Ups, nur Roh-Upload)
-// ==========================================
-const oldFileInput = document.getElementById('native-file-upload');
-if (oldFileInput) {
-    const newFileInput = oldFileInput.cloneNode(true);
-    oldFileInput.parentNode.replaceChild(newFileInput, oldFileInput);
-
-    newFileInput.addEventListener('change', async (e) => {
-        const files = Array.from(e.target.files);
-        if (files.length === 0) return;
-        
-        // Button optisch leicht ausgrauen, damit du weißt, er arbeitet
-        const uploadLabel = document.querySelector('label[for="native-file-upload"]');
-        if(uploadLabel) uploadLabel.style.opacity = '0.5';
-
-        // Einer nach dem anderen (verhindert RAM-Abstürze am Handy)
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            const safeFilename = `fast_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
-            
-            try {
-                // 1. Roh-Upload in Cloudflare R2
-                const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': file.type || 'audio/mpeg' },
-                    body: file
-                });
-                if(!uploadRes.ok) continue;
-                const uploadData = await uploadRes.json();
-                
-                // 2. Roh-Eintrag in Datenbank
-                let rawTitle = file.name.replace(/\.[^/.]+$/, "");
-                await fetch(`${API_URL}/songs`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        title: rawTitle,
-                        artist: "Unbekannt", 
-                        cover_data: "",
-                        file_url: uploadData.url,
-                        file_size: file.size,
-                        duration: 0,
-                        vibes: []
-                    })
-                });
-            } catch (err) { console.error("Fehler bei", file.name); }
-        }
-        
-        // Fertig - Button wieder normal machen und UI aktualisieren
-        if(uploadLabel) uploadLabel.style.opacity = '1';
-        if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
-    });
-}
-// ==========================================
-// 3. LIVE BACKGROUND SYNC LOGIK (Tags & Covers)
-// ==========================================
-async function processBackgroundSync() {
-    const progressText = document.getElementById('sync-progress-text');
-    const progressBar = document.getElementById('sync-progress-bar');
-    const statusDetail = document.getElementById('sync-status-detail');
-
-    try {
-        // 1. Alle Songs laden für konsistente Zahlen
-        const response = await fetch(`${API_URL}/songs`);
-        const songs = await response.json();
-        
-        const totalSongs = songs.length;
-        // Alle Songs, die noch den Platzhalter "Unbekannt" haben
-        const unsyncedSongs = songs.filter(s => s.artist === "Unbekannt" || s.artist === "");
-        const syncedSongsCount = totalSongs - unsyncedSongs.length;
-
-        // 2. UI live aktualisieren
-        if (progressText) progressText.innerText = `${syncedSongsCount} / ${totalSongs}`;
-        if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(syncedSongsCount / totalSongs) * 100}%` : '0%';
-
-        if (unsyncedSongs.length === 0) {
-            if (statusDetail) {
-                statusDetail.style.display = 'block';
-                statusDetail.innerText = "Alle Songs sind auf dem neuesten Stand.";
-                statusDetail.style.color = '#32d74b';
-            }
-            return; // Schleife beenden, alles fertig
-        }
-
-        if (statusDetail) {
-            statusDetail.style.display = 'block';
-            statusDetail.innerText = `Synchronisiere noch ${unsyncedSongs.length} Songs... (App offen lassen)`;
-            statusDetail.style.color = '#fa233b';
-        }
-        
-        // 3. Wir verarbeiten immer nur EINEN Song pro Durchlauf (sicher & stabil)
-        const song = unsyncedSongs[0];
-        let searchTerm = song.title.replace(/(_|-)/g, " ").trim();
-        
-        try {
-            const itunesRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`);
-            const itunesData = await itunesRes.json();
-            
-            if (itunesData.results && itunesData.results.length > 0) {
-                const track = itunesData.results[0];
-                await fetch(`${API_URL}/songs/${song.id}`, {
-                    method: 'PUT',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ 
-                        title: track.trackName, 
-                        artist: track.artistName, 
-                        cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb'), 
-                        vibes: song.vibes || [] 
-                    })
-                });
-            } else {
-                // Wenn iTunes nichts findet, ändern wir den Künstler auf "Unbekannter Künstler", 
-                // damit die App ihn nicht in einer Endlosschleife immer wieder neu versucht.
-                await fetch(`${API_URL}/songs/${song.id}`, {
-                    method: 'PUT',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ 
-                        title: song.title, 
-                        artist: "Unbekannter Künstler", 
-                        cover_data: "", 
-                        vibes: song.vibes || [] 
-                    })
-                });
-            }
-        } catch(e) {}
-        
-        // 4. Lade die Songliste im UI lautlos neu, damit das Cover sofort erscheint
-        if (window.fetchSongsForPage) window.fetchSongsForPage(true);
-
-        // 5. 1,5 Sekunden warten (Anti-Apple-Spam) und den nächsten Song holen
-        setTimeout(processBackgroundSync, 1500);
-
-    } catch(err) { 
-        // Bei Netzwerkabbruch: In 5 Sekunden automatisch neu versuchen
-        setTimeout(processBackgroundSync, 5000);
-    }
-}
-
-// Startet automatisch 3 Sekunden nachdem die App geöffnet wurde
-setTimeout(processBackgroundSync, 3000);
