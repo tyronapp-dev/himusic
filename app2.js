@@ -2634,9 +2634,8 @@ let currentIndex = 0;
     }, 800); 
 
 } // END initApp()
-
 // ==========================================
-// YOUTUBE IMPORT LOGIK & CLEAR BUTTON (100% Client-Side)
+// YOUTUBE IMPORT LOGIK & CLEAR BUTTON (Mit Fallback-Servern)
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     const ytInput = document.getElementById('youtube-url-input');
@@ -2645,39 +2644,42 @@ document.addEventListener('DOMContentLoaded', () => {
     const ytClearBtn = document.getElementById('youtube-clear-btn');
 
     if (ytInput && ytClearBtn) {
-        ytInput.addEventListener('input', () => {
-            ytClearBtn.style.display = ytInput.value.length > 0 ? 'block' : 'none';
-        });
-        ytClearBtn.addEventListener('click', () => {
-            ytInput.value = '';
-            ytClearBtn.style.display = 'none';
-            ytInput.focus(); 
-        });
+        ytInput.addEventListener('input', () => { ytClearBtn.style.display = ytInput.value.length > 0 ? 'block' : 'none'; });
+        ytClearBtn.addEventListener('click', () => { ytInput.value = ''; ytClearBtn.style.display = 'none'; ytInput.focus(); });
     }
 
     if(ytBtn && ytInput) {
         ytBtn.addEventListener('click', async () => {
             const url = ytInput.value.trim();
-            if(!url.includes('youtube.com') && !url.includes('youtu.be')) {
-                alert('Bitte einen gültigen YouTube-Link eingeben!'); return;
-            }
+            if(!url.includes('youtube.com') && !url.includes('youtu.be')) { alert('Bitte einen gültigen YouTube-Link eingeben!'); return; }
 
             ytBtn.disabled = true; ytBtn.style.opacity = '0.5';
-            ytStatus.style.display = 'block'; 
-            ytStatus.innerText = '1/3: Video wird umgewandelt...'; 
-            ytStatus.style.color = '#fff';
+            ytStatus.style.display = 'block'; ytStatus.innerText = '1/3: Video wird umgewandelt...'; ytStatus.style.color = '#fff';
 
             try {
-                // 1. Download-Link holen
-                const cobaltRes = await fetch("https://co.wuk.sh/api/json", {
-                    method: "POST",
-                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
-                    body: JSON.stringify({ url: url, isAudioOnly: true })
-                });
+                // 1. Fallback-System: Probiere 3 verschiedene öffentliche Server nacheinander
+                const cobaltInstances = [
+                    "https://co.wuk.sh/api/json",
+                    "https://api.cobalt.tools/api/json",
+                    "https://cobalt.q0.is/api/json"
+                ];
                 
-                if(!cobaltRes.ok) throw new Error('Converter ist aktuell überlastet.');
-                const cobaltData = await cobaltRes.json();
-                if(!cobaltData.url) throw new Error('Konnte Audio nicht extrahieren.');
+                let cobaltData = null;
+                for (let api of cobaltInstances) {
+                    try {
+                        const cobaltRes = await fetch(api, {
+                            method: "POST",
+                            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+                            body: JSON.stringify({ url: url, isAudioOnly: true })
+                        });
+                        if (cobaltRes.ok) {
+                            cobaltData = await cobaltRes.json();
+                            if (cobaltData && cobaltData.url) break; // Erfolg! Schleife abbrechen.
+                        }
+                    } catch(e) { continue; /* Fehler ignoriert, probiere nächsten Server */ }
+                }
+                
+                if(!cobaltData || !cobaltData.url) throw new Error('Alle Server überlastet. Bitte später versuchen.');
 
                 ytStatus.innerText = '2/3: Lade Audio auf dein Handy...';
 
@@ -2699,31 +2701,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 if(!uploadRes.ok) throw new Error('Cloud-Upload fehlgeschlagen.');
                 const uploadData = await uploadRes.json();
 
-                // 4. In die Datenbank eintragen (wird danach per Background-Sync verarbeitet)
+                // 4. In die Datenbank eintragen
                 await fetch(`${API_URL}/songs`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        title: "YouTube Import",
-                        artist: "Unbekannt", 
-                        cover_data: "",
-                        file_url: uploadData.url,
-                        file_size: audioBlob.size,
-                        duration: 0,
-                        vibes: []
+                        title: "YouTube Import", artist: "Unbekannt", cover_data: "",
+                        file_url: uploadData.url, file_size: audioBlob.size, duration: 0, vibes: []
                     })
                 });
                 
-                ytInput.value = ''; 
-                if(ytClearBtn) ytClearBtn.style.display = 'none'; 
-                ytStatus.innerText = '✅ Song erfolgreich importiert!'; 
-                ytStatus.style.color = '#32d74b';
+                ytInput.value = ''; if(ytClearBtn) ytClearBtn.style.display = 'none'; 
+                ytStatus.innerText = '✅ Song erfolgreich importiert!'; ytStatus.style.color = '#32d74b';
                 
+                // Hintergrund-Sync sofort anstoßen
+                if(typeof processBackgroundSync === 'function') processBackgroundSync();
                 if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
 
             } catch (error) {
-                ytStatus.innerText = '❌ ' + error.message; 
-                ytStatus.style.color = '#ff3b30';
+                ytStatus.innerText = '❌ ' + error.message; ytStatus.style.color = '#ff3b30';
             } finally {
                 ytBtn.disabled = false; ytBtn.style.opacity = '1';
                 setTimeout(() => { if(ytStatus.innerText.includes('✅')) ytStatus.style.display = 'none'; }, 4000);
