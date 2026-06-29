@@ -2636,7 +2636,7 @@ let currentIndex = 0;
 } // END initApp()
 
 // ==========================================
-// YOUTUBE IMPORT LOGIK & CLEAR BUTTON (Client-Side Bypass)
+// YOUTUBE IMPORT LOGIK & CLEAR BUTTON (100% Client-Side)
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     const ytInput = document.getElementById('youtube-url-input');
@@ -2664,31 +2664,55 @@ document.addEventListener('DOMContentLoaded', () => {
 
             ytBtn.disabled = true; ytBtn.style.opacity = '0.5';
             ytStatus.style.display = 'block'; 
-            ytStatus.innerText = 'Wandle Video um... (Schritt 1/2)'; 
+            ytStatus.innerText = '1/3: Video wird umgewandelt...'; 
             ytStatus.style.color = '#fff';
 
             try {
-                // 1. Dein Handy fragt den Converter direkt (umgeht die Server-Sperre)
-                const cobaltRes = await fetch("https://api.cobalt.tools/", {
+                // 1. Download-Link holen
+                const cobaltRes = await fetch("https://co.wuk.sh/api/json", {
                     method: "POST",
                     headers: { "Accept": "application/json", "Content-Type": "application/json" },
                     body: JSON.stringify({ url: url, isAudioOnly: true })
                 });
                 
-                if(!cobaltRes.ok) throw new Error('Converter überlastet. Versuch es später nochmal.');
+                if(!cobaltRes.ok) throw new Error('Converter ist aktuell überlastet.');
                 const cobaltData = await cobaltRes.json();
                 if(!cobaltData.url) throw new Error('Konnte Audio nicht extrahieren.');
 
-                ytStatus.innerText = 'Speichere in der Cloud... (Schritt 2/2)';
+                ytStatus.innerText = '2/3: Lade Audio auf dein Handy...';
 
-                // 2. Schicke den reinen Download-Link an Cloudflare
-                const saveRes = await fetch(`${API_URL}/import-youtube-direct`, {
+                // 2. MP3 direkt aufs Handy laden
+                const audioRes = await fetch(cobaltData.url);
+                if(!audioRes.ok) throw new Error('Download vom Converter fehlgeschlagen.');
+                const audioBlob = await audioRes.blob();
+
+                ytStatus.innerText = '3/3: Lade in die Cloud hoch...';
+
+                // 3. Von deinem Handy in Cloudflare schieben
+                const filename = `yt_${Date.now()}.mp3`;
+                const uploadRes = await fetch(`${API_URL}/upload/${filename}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'audio/mpeg' },
+                    body: audioBlob
+                });
+                
+                if(!uploadRes.ok) throw new Error('Cloud-Upload fehlgeschlagen.');
+                const uploadData = await uploadRes.json();
+
+                // 4. In die Datenbank eintragen (wird danach per Background-Sync verarbeitet)
+                await fetch(`${API_URL}/songs`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ stream_url: cobaltData.url })
+                    body: JSON.stringify({
+                        title: "YouTube Import",
+                        artist: "Unbekannt", 
+                        cover_data: "",
+                        file_url: uploadData.url,
+                        file_size: audioBlob.size,
+                        duration: 0,
+                        vibes: []
+                    })
                 });
-
-                if(!saveRes.ok) throw new Error('Fehler beim Speichern in der Cloud.');
                 
                 ytInput.value = ''; 
                 if(ytClearBtn) ytClearBtn.style.display = 'none'; 
@@ -2823,85 +2847,89 @@ if (oldFileInput) {
 }
 
 // ==========================================
-// 3. BACKGROUND SYNC LOGIK (Tags & Covers im Hintergrund)
+// 3. LIVE BACKGROUND SYNC LOGIK (Tags & Covers)
 // ==========================================
 async function processBackgroundSync() {
+    const progressText = document.getElementById('sync-progress-text');
+    const progressBar = document.getElementById('sync-progress-bar');
+    const statusDetail = document.getElementById('sync-status-detail');
+
     try {
+        // 1. Alle Songs laden für konsistente Zahlen
         const response = await fetch(`${API_URL}/songs`);
         const songs = await response.json();
         
-        // Finde alle Songs, die roh importiert wurden
-        const unsynced = songs.filter(s => s.artist === "Unbekannt" || s.artist === "");
-        if(unsynced.length === 0) return;
-        
-        console.log(`Background Sync: Verarbeite ${unsynced.length} Songs...`);
-        let changesMade = false;
-        
-        for(let song of unsynced) {
-            try {
-                // Säubere den Dateinamen für eine saubere iTunes-Suche
-                let searchTerm = song.title.replace(/(_|-)/g, " ").trim();
-                const itunesRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`);
-                const itunesData = await itunesRes.json();
-                
-                if(itunesData.results && itunesData.results.length > 0) {
-                    const track = itunesData.results[0];
-                    await fetch(`${API_URL}/songs/${song.id}`, {
-                        method: 'PUT',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ 
-                            title: track.trackName, 
-                            artist: track.artistName, 
-                            cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb'), 
-                            vibes: song.vibes || [] 
-                        })
-                    });
-                    changesMade = true;
-                }
-            } catch(e) {}
-            
-            // 1 Sekunde Pause pro Song, damit Apple die App nicht wegen Spam blockiert
-            await new Promise(r => setTimeout(r, 1000));
+        const totalSongs = songs.length;
+        // Alle Songs, die noch den Platzhalter "Unbekannt" haben
+        const unsyncedSongs = songs.filter(s => s.artist === "Unbekannt" || s.artist === "");
+        const syncedSongsCount = totalSongs - unsyncedSongs.length;
+
+        // 2. UI live aktualisieren
+        if (progressText) progressText.innerText = `${syncedSongsCount} / ${totalSongs}`;
+        if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(syncedSongsCount / totalSongs) * 100}%` : '0%';
+
+        if (unsyncedSongs.length === 0) {
+            if (statusDetail) {
+                statusDetail.style.display = 'block';
+                statusDetail.innerText = "Alle Songs sind auf dem neuesten Stand.";
+                statusDetail.style.color = '#32d74b';
+            }
+            return; // Schleife beenden, alles fertig
         }
-        if(changesMade && window.fetchSongsForPage) window.fetchSongsForPage(true);
-    } catch(err) { console.error("Background Sync Fehler:", err); }
-}
 
-// Automatischer, lautloser Start 5 Sekunden nach Öffnen der App
-setTimeout(processBackgroundSync, 5000);
-
-// ==========================================
-// 4. SYNC BUTTON (Settings Seite)
-// ==========================================
-const oldSyncBtn = document.getElementById('btn-sync-r2');
-const syncStatus = document.getElementById('sync-r2-status');
-if (oldSyncBtn) {
-    const newSyncBtn = oldSyncBtn.cloneNode(true);
-    oldSyncBtn.parentNode.replaceChild(newSyncBtn, oldSyncBtn);
-
-    newSyncBtn.addEventListener('click', async () => {
-        newSyncBtn.disabled = true; newSyncBtn.style.opacity = '0.5';
-        syncStatus.style.display = 'block'; syncStatus.style.color = '#fff';
-        syncStatus.innerText = '1/2: Prüfe Cloud auf unregistrierte Dateien...';
-
+        if (statusDetail) {
+            statusDetail.style.display = 'block';
+            statusDetail.innerText = `Synchronisiere noch ${unsyncedSongs.length} Songs... (App offen lassen)`;
+            statusDetail.style.color = '#fa233b';
+        }
+        
+        // 3. Wir verarbeiten immer nur EINEN Song pro Durchlauf (sicher & stabil)
+        const song = unsyncedSongs[0];
+        let searchTerm = song.title.replace(/(_|-)/g, " ").trim();
+        
         try {
-            // Schritt 1: Cloudflare R2 nach OneDrive/G-Drive Dateien scannen
-            const res = await fetch(`${API_URL}/sync-r2`, { method: 'POST' });
-            const data = await res.json();
+            const itunesRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`);
+            const itunesData = await itunesRes.json();
             
-            syncStatus.innerText = `2/2: ${data.added} neue Dateien. Verarbeite alle fehlenden Tags...`;
-            
-            // Schritt 2: Den neuen Background Sync für alle unvollständigen Songs auslösen
-            await processBackgroundSync();
-            
-            syncStatus.innerText = '✅ Alles vollständig synchronisiert!';
-            syncStatus.style.color = '#32d74b';
-        } catch (error) {
-            syncStatus.innerText = '❌ Fehler beim Synchronisieren.';
-            syncStatus.style.color = '#ff3b30';
-        } finally {
-            newSyncBtn.disabled = false; newSyncBtn.style.opacity = '1';
-            setTimeout(() => { syncStatus.style.display = 'none'; }, 6000);
-        }
-    });
+            if (itunesData.results && itunesData.results.length > 0) {
+                const track = itunesData.results[0];
+                await fetch(`${API_URL}/songs/${song.id}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ 
+                        title: track.trackName, 
+                        artist: track.artistName, 
+                        cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb'), 
+                        vibes: song.vibes || [] 
+                    })
+                });
+            } else {
+                // Wenn iTunes nichts findet, ändern wir den Künstler auf "Unbekannter Künstler", 
+                // damit die App ihn nicht in einer Endlosschleife immer wieder neu versucht.
+                await fetch(`${API_URL}/songs/${song.id}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ 
+                        title: song.title, 
+                        artist: "Unbekannter Künstler", 
+                        cover_data: "", 
+                        vibes: song.vibes || [] 
+                    })
+                });
+            }
+        } catch(e) {}
+        
+        // 4. Lade die Songliste im UI lautlos neu, damit das Cover sofort erscheint
+        if (window.fetchSongsForPage) window.fetchSongsForPage(true);
+
+        // 5. 1,5 Sekunden warten (Anti-Apple-Spam) und den nächsten Song holen
+        setTimeout(processBackgroundSync, 1500);
+
+    } catch(err) { 
+        // Bei Netzwerkabbruch: In 5 Sekunden automatisch neu versuchen
+        setTimeout(processBackgroundSync, 5000);
+    }
 }
+
+// Startet automatisch 3 Sekunden nachdem die App geöffnet wurde
+setTimeout(processBackgroundSync, 3000);
