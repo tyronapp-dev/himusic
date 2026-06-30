@@ -416,13 +416,18 @@ function initApp() {
     if (memAudio) memAudio.addEventListener('pause', savePlayerState);
     window.addEventListener('beforeunload', savePlayerState);
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'hidden') savePlayerState();
-        else {
-            setTimeout(() => {
-                if (audioPlayer && audioPlayer.paused && window._shouldBePlaying && audioPlayer.src) {
-                    audioPlayer.play().catch(() => {});
-                }
-            }, 500);
+        if (document.visibilityState === 'hidden') {
+            savePlayerState();
+        } else {
+            // iOS braucht mehrere Versuche nach dem Entsperren
+            const tryResume = (attempts) => {
+                if (!audioPlayer || !window._shouldBePlaying || !audioPlayer.src) return;
+                if (!audioPlayer.paused) return;
+                audioPlayer.play().catch(() => {
+                    if (attempts > 0) setTimeout(() => tryResume(attempts - 1), 800);
+                });
+            };
+            setTimeout(() => tryResume(3), 300);
         }
     });
     setInterval(() => { if (memAudio && !memAudio.paused && memAudio.currentTime > 0) _doSavePlayerState(); }, 5000);
@@ -476,25 +481,33 @@ function initApp() {
 
     window.togglePlayPause = async function(e) {
         if(e) e.stopPropagation();
-        if(!audioPlayer.src) return; 
-        if (audioPlayer.paused) { 
-            window._shouldBePlaying = true; 
+        if(!audioPlayer.src) return;
+        if (audioPlayer.paused) {
+            window._userPausedManually = false;
+            window._shouldBePlaying = true;
             try { await audioPlayer.play(); } catch(err){}
-        } else { 
-            window._shouldBePlaying = false; 
-            audioPlayer.pause(); 
+        } else {
+            window._userPausedManually = true;
+            window._shouldBePlaying = false;
+            audioPlayer.pause();
         }
     };
     playPauseBtns.forEach(btn => { if(btn) btn.addEventListener('click', window.togglePlayPause); });
 
     audioPlayer.addEventListener('play', () => {
         window._shouldBePlaying = true;
+        window._userPausedManually = false;
         window.updatePlayPauseIcons(true);
         if ('mediaSession' in navigator) navigator.mediaSession.playbackState = "playing";
     });
-    
+
     audioPlayer.addEventListener('pause', () => {
-        window._shouldBePlaying = false;
+        // Nur als "gewollt pausiert" markieren wenn der User es selbst getan hat.
+        // iOS pausiert den Player beim Sperren des Bildschirms unfreiwillig —
+        // in diesem Fall bleibt _shouldBePlaying true damit die Recovery greift.
+        if (window._userPausedManually) {
+            window._shouldBePlaying = false;
+        }
         window.updatePlayPauseIcons(false);
         if ('mediaSession' in navigator) navigator.mediaSession.playbackState = "paused";
     });
