@@ -16,6 +16,7 @@ const APP_SHELL = [
     './manifest.json',
     './firebase-config.js',
     './config.js',
+    './icon-wave.png',
     './icon-180.png',
     './icon-192.png',
     './icon-512.png',

@@ -8,6 +8,12 @@
   "orientation": "portrait",
   "icons": [
     {
+      "src": "icon-wave.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
       "src": "icon-180.png",
       "sizes": "180x180",
       "type": "image/png",
