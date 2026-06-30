@@ -235,16 +235,35 @@
     </div>
 
     <div id="mini-player" class="glass-panel">
+        <div class="mini-player-progress"><div class="mini-player-progress-fill"></div></div>
         <div class="mini-cover"></div>
-        <div class="mini-info"><span class="mini-title">Kein Titel</span></div>
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5V19L19 12L8 5Z"></path></svg>
+        <div class="mini-info">
+            <span class="mini-title">Kein Titel</span>
+            <span class="mini-artist">—</span>
+        </div>
+        <button class="mini-next-btn" onclick="event.stopPropagation(); window.playNextSong && window.playNextSong();" aria-label="Nächster Titel">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5v14l9-7L6 5zm11 0v14h2V5h-2z"></path></svg>
+        </button>
+        <svg class="mini-play-icon" width="34" height="34" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5V19L19 12L8 5Z"></path></svg>
     </div>
 
     <nav id="bottom-nav" class="glass-panel">
-        <button class="nav-btn active" data-target="view-home">Start</button>
-        <button class="nav-btn" data-target="view-playlists">Playlists</button>
-        <button class="nav-btn" data-target="view-songs">Songs</button>
-        <button class="nav-btn" data-target="view-settings">Settings</button>
+        <button class="nav-btn active" data-target="view-home">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.1L1 12h3v9h6v-6h4v6h6v-9h3L12 2.1zm0 2.69l7 6.3V19h-2v-6H9v6H7v-7.91l5-4.3z"></path></svg>
+            <span>Start</span>
+        </button>
+        <button class="nav-btn" data-target="view-playlists">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M3 4h13v2H3V4zm0 5h13v2H3V9zm0 5h9v2H3v-2zm14-7v8.18A3 3 0 1019 19V9h3V7h-5z"></path></svg>
+            <span>Playlists</span>
+        </button>
+        <button class="nav-btn" data-target="view-songs">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M9 18V5l12-2v13M9 18a3 3 0 11-6 0 3 3 0 016 0zm12-2a3 3 0 11-6 0 3 3 0 016 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+            <span>Songs</span>
+        </button>
+        <button class="nav-btn" data-target="view-settings">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 005 14.4a1.65 1.65 0 00-1.51-1H3.5a2 2 0 110-4h.09A1.65 1.65 0 005 8.6a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"></path></svg>
+            <span>Settings</span>
+        </button>
     </nav>
 
     <div id="fullscreen-player">

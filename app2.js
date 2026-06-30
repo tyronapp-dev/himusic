@@ -7,6 +7,128 @@ function _parseVibes(v) {
     return [];
 }
 
+// ==========================================
+// AUDIO ENGINE: 7-Band Equalizer + Loudness Booster (Web Audio API, lazy-init)
+// Graph: source -> preamp(gain) -> 7x biquad filter -> compressor(limiter) -> destination
+// Built lazily on first user gesture to satisfy autoplay policy and to avoid
+// breaking plain <audio> playback if createMediaElementSource throws (e.g. CORS).
+// ==========================================
+window.AudioEngine = (function () {
+    const BANDS = [60, 150, 400, 1000, 2400, 6000, 14000]; // Hz
+    const PRESETS = {
+        classic:  [0, 0, 0, 0, 0, 0, 0],
+        bass:     [7, 5, 2, 0, -1, -1, 0],
+        treble:   [-1, -1, 0, 1, 3, 5, 6],
+        vocal:    [-2, -1, 1, 4, 4, 2, 0],
+        amapiano: [5, 3, 0, -1, 1, 2, 1],
+        rap:      [6, 4, 1, -1, 0, 2, 1],
+        rnb:      [4, 3, 1, 1, 2, 2, 1],
+        spoken:   [-3, -1, 2, 5, 4, 1, -1]
+    };
+
+    let ctx = null, preampNode = null, filters = [], compressor = null;
+    let ready = false, failed = false, loudnessOn = false;
+
+    function build() {
+        if (ready || failed) return ready;
+        const audioPlayer = document.getElementById('main-audio-player');
+        if (!audioPlayer) return false;
+        try {
+            ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const source = ctx.createMediaElementSource(audioPlayer);
+
+            preampNode = ctx.createGain();
+            preampNode.gain.value = 1;
+
+            filters = BANDS.map((freq, i) => {
+                const f = ctx.createBiquadFilter();
+                f.frequency.value = freq;
+                f.gain.value = 0;
+                if (i === 0) f.type = 'lowshelf';
+                else if (i === BANDS.length - 1) f.type = 'highshelf';
+                else { f.type = 'peaking'; f.Q.value = 1; }
+                return f;
+            });
+
+            compressor = ctx.createDynamicsCompressor();
+            compressor.threshold.value = -3;
+            compressor.knee.value = 12;
+            compressor.ratio.value = 4;
+            compressor.attack.value = 0.003;
+            compressor.release.value = 0.25;
+
+            let node = source.connect(preampNode);
+            filters.forEach(f => { node = node.connect(f); });
+            node.connect(compressor).connect(ctx.destination);
+
+            ready = true;
+            return true;
+        } catch (err) {
+            console.warn('[AudioEngine] Web Audio Graph konnte nicht erstellt werden (evtl. CORS-Einschränkung der Audioquelle):', err);
+            failed = true;
+            return false;
+        }
+    }
+
+    function ensure() {
+        const audioPlayer = document.getElementById('main-audio-player');
+        if (!audioPlayer || ready || failed) return build();
+        // CORS-Vorbereitung: crossOrigin setzen + Quelle neu laden, BEVOR der Graph gebaut wird.
+        // Schlägt das fehl, bleibt die normale <audio>-Wiedergabe unangetastet (failed=true, kein Graph).
+        if (!audioPlayer.crossOrigin) {
+            const wasPlaying = !audioPlayer.paused;
+            const t = audioPlayer.currentTime;
+            const src = audioPlayer.src;
+            audioPlayer.crossOrigin = 'anonymous';
+            audioPlayer.src = src;
+            audioPlayer.load();
+            const resumePlayback = () => {
+                audioPlayer.currentTime = t;
+                if (wasPlaying) audioPlayer.play().catch(() => {});
+                audioPlayer.removeEventListener('canplay', resumePlayback);
+            };
+            audioPlayer.addEventListener('canplay', resumePlayback);
+        }
+        return build();
+    }
+
+    function resumeCtx() { if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {}); }
+
+    function setPreamp(db) {
+        if (!ensure()) return;
+        resumeCtx();
+        preampNode.gain.value = Math.pow(10, (Number(db) || 0) / 20);
+    }
+
+    function setPreset(mode) {
+        if (!ensure()) return;
+        resumeCtx();
+        const gains = PRESETS[mode] || PRESETS.classic;
+        filters.forEach((f, i) => { f.gain.value = gains[i] || 0; });
+    }
+
+    function disable() {
+        if (!ready) return;
+        preampNode.gain.value = 1;
+        filters.forEach(f => f.gain.value = 0);
+    }
+
+    function setLoudnessBoost(on) {
+        if (!ensure()) return;
+        resumeCtx();
+        loudnessOn = !!on;
+        // Stärkerer Limiter + Makeup-Gain, damit lauter werden kann ohne zu clippen
+        compressor.threshold.value = loudnessOn ? -20 : -3;
+        compressor.ratio.value = loudnessOn ? 8 : 4;
+        compressor.release.value = loudnessOn ? 0.15 : 0.25;
+    }
+
+    function isLoudnessOn() { return loudnessOn; }
+    function isFailed() { return failed; }
+
+    return { ensure, setPreamp, setPreset, disable, setLoudnessBoost, isLoudnessOn, isFailed };
+})();
+
 async function apiGetAllSongs() {
   const response = await fetch(`${API_URL}/songs`);
   if (!response.ok) throw new Error('Failed to fetch songs');
@@ -274,6 +396,8 @@ function initApp() {
                 
                 const miniTitle = document.querySelector('.mini-title');
                 if(miniTitle) miniTitle.innerText = state.currentSong.title;
+                const miniArtist = document.querySelector('.mini-artist');
+                if(miniArtist) miniArtist.innerText = state.currentSong.artist || '—';
                 const mpEl = document.getElementById('mini-player');
                 if(mpEl) { mpEl.style.display = 'flex'; mpEl.style.transform = 'none'; mpEl.style.opacity = '1'; }
                 
@@ -330,7 +454,23 @@ function initApp() {
     }
 
     loadPlayerState();
-   
+
+    // EQ/HD-Audio-Status aus localStorage wurde nur in der UI wiederhergestellt (Checkbox/Slider),
+    // der Web-Audio-Graph kann aber erst nach einer echten User-Geste gebaut werden (Autoplay-Policy).
+    const _syncAudioEngineFromUI = () => {
+        const eqToggle = document.getElementById('eq-power-toggle');
+        if (eqToggle && eqToggle.checked) {
+            const preset = document.querySelector('.eq-preset.active')?.dataset.mode || 'classic';
+            window.AudioEngine.setPreset(preset);
+            window.AudioEngine.setPreamp(document.getElementById('eq-preamp')?.value || 0);
+        }
+        if (document.getElementById('setting-hd-audio')?.checked) {
+            window.AudioEngine.setLoudnessBoost(true);
+        }
+    };
+    document.addEventListener('pointerdown', _syncAudioEngineFromUI, { once: true });
+    document.addEventListener('keydown', _syncAudioEngineFromUI, { once: true });
+
     window.currentPlayingSongId = null;
     window.currentPlayingPlaylistId = null;
 
@@ -454,7 +594,7 @@ function initApp() {
     });
 
     const audioPlayer = document.getElementById('main-audio-player');
-    const playPauseBtns = [document.querySelector('#mini-player svg'), document.querySelector('.play-large'), document.getElementById('home-np-playpause')];
+    const playPauseBtns = [document.querySelector('#mini-player .mini-play-icon'), document.querySelector('.play-large'), document.getElementById('home-np-playpause')];
     const timeCurrentEl = document.querySelector('.time-current');
     const timeTotalEl = document.querySelector('.time-total');
     const progressBar = document.querySelector('.time-progress');
@@ -753,8 +893,10 @@ let _bgCacheActive = false;
         if(dynamicBg) dynamicBg.style.backgroundImage = bgStyle;
         const miniCover = document.querySelector('.mini-cover');
         const miniTitle = document.querySelector('.mini-title');
+        const miniArtist = document.querySelector('.mini-artist');
         if(miniCover) { miniCover.style.backgroundImage = bgStyle !== 'none' ? bgStyle : 'var(--accent)'; miniCover.style.backgroundSize = 'cover'; }
         if(miniTitle) miniTitle.innerText = title;
+        if(miniArtist) miniArtist.innerText = artist || '—';
 
         const bpTitle = document.getElementById('bp-song-name');
         const bpArtist = document.getElementById('bp-artist-name');
@@ -853,6 +995,8 @@ let _bgCacheActive = false;
         if (duration && duration > 0) {
             if (progressBar) progressBar.style.width = ((current / duration) * 100) + '%';
             if (timeTotalEl) timeTotalEl.innerText = "-" + formatTime(duration - current);
+            const miniProgressFill = document.querySelector('.mini-player-progress-fill');
+            if (miniProgressFill) miniProgressFill.style.width = ((current / duration) * 100) + '%';
         }
     }
 
@@ -2065,11 +2209,44 @@ async function createNewPlaylistProcess() {
     if(volSlider && audioPlayer) { updateSliderFill(volSlider, 0, 1); volSlider.addEventListener('input', (e) => { audioPlayer.volume = e.target.value; updateSliderFill(e.target, 0, 1); }); }
 
     const eqPreamp = document.getElementById('eq-preamp');
+    const eqPowerToggle = document.getElementById('eq-power-toggle');
     if(eqPreamp) {
         updateSliderFill(eqPreamp, -12, 12);
-        eqPreamp.addEventListener('input', (e) => { if(window.preamp) window.preamp.gain.value = Math.pow(10, e.target.value / 20); const valStr = (e.target.value > 0 ? '+' : '') + e.target.value + ' dB'; const valDisplay = document.getElementById('eq-preamp-val'); if(valDisplay) valDisplay.innerText = valStr; updateSliderFill(e.target, -12, 12); });
+        eqPreamp.addEventListener('input', (e) => {
+            if (eqPowerToggle && eqPowerToggle.checked) window.AudioEngine.setPreamp(e.target.value);
+            const valStr = (e.target.value > 0 ? '+' : '') + e.target.value + ' dB';
+            const valDisplay = document.getElementById('eq-preamp-val');
+            if(valDisplay) valDisplay.innerText = valStr;
+            updateSliderFill(e.target, -12, 12);
+        });
         eqPreamp.addEventListener('change', savePlayerState);
     }
+
+    if (eqPowerToggle) {
+        eqPowerToggle.addEventListener('change', (e) => {
+            if (e.target.checked) {
+                const preset = document.querySelector('.eq-preset.active')?.dataset.mode || 'classic';
+                window.AudioEngine.setPreset(preset);
+                window.AudioEngine.setPreamp(eqPreamp ? eqPreamp.value : 0);
+                if (window.AudioEngine.isFailed()) {
+                    e.target.checked = false;
+                    alert("Equalizer für diesen Song nicht verfügbar (Audioquelle erlaubt keine Verarbeitung).");
+                }
+            } else {
+                window.AudioEngine.disable();
+            }
+            savePlayerState();
+        });
+    }
+
+    document.querySelectorAll('.eq-preset').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.eq-preset').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            if (eqPowerToggle && eqPowerToggle.checked) window.AudioEngine.setPreset(btn.dataset.mode);
+            savePlayerState();
+        });
+    });
 
     let isShuffle = false; let isRepeat = false;
     document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; });
@@ -2159,7 +2336,16 @@ async function createNewPlaylistProcess() {
     });
 
     const hdAudioToggle = document.getElementById('setting-hd-audio');
-    if (hdAudioToggle) { hdAudioToggle.addEventListener('change', (e) => { if (e.target.checked) { if(audioPlayer) audioPlayer.volume = 1.0; alert("HD Audio aktiviert! Maximale Qualität & Lautstärke geladen."); } }); }
+    if (hdAudioToggle) {
+        hdAudioToggle.addEventListener('change', (e) => {
+            if(audioPlayer) audioPlayer.volume = 1.0;
+            window.AudioEngine.setLoudnessBoost(e.target.checked);
+            if (e.target.checked && window.AudioEngine.isFailed()) {
+                e.target.checked = false;
+                alert("Lautstärke-Verstärker für diesen Song nicht verfügbar (Audioquelle erlaubt keine Verarbeitung).");
+            }
+        });
+    }
 
     const bigCover = document.getElementById('big-player-cover');
     if(bigCover) {
@@ -2694,8 +2880,14 @@ window.addEventListener('online', async () => {
 });
 
 // ==========================================
-// 2. SMART BULK IMPORT (10 Parallel, intelligenter Duplikat-Check)
+// 2. SMART BULK IMPORT (content-hash dedup, safe concurrency, retry, decoupled post-processing)
 // ==========================================
+async function _hashFile(file) {
+    const buf = await file.arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 const oldFileInput = document.getElementById('native-file-upload');
 if (oldFileInput) {
     const newFileInput = oldFileInput.cloneNode(true);
@@ -2714,9 +2906,7 @@ if (oldFileInput) {
         if (uploadLabel) uploadLabel.style.opacity = '0.5';
         setStatus(`⏳ Lade Datenbank...`);
 
-        // 1. DB laden: Duplikat-Check via Titel (normalisiert) + Dateigröße
-        //    Echtes Duplikat = gleicher Titel UND gleiche Größe
-        //    Gleicher Titel aber andere Größe = anderer Song → importieren mit Suffix
+        // 1. DB laden: vorhandene content_hash-Werte (falls Backend sie liefert) + Titel/Größe als Fallback
         let existingSongs = [];
         try {
             const dbRes = await fetch(`${API_URL}/songs`);
@@ -2725,20 +2915,45 @@ if (oldFileInput) {
 
         const dupKey = (title, size) => `${title.toLowerCase().trim()}::${size}`;
         const existingKeys = new Set(existingSongs.map(s => dupKey(s.title, s.file_size)));
+        const existingHashes = new Set(existingSongs.filter(s => s.content_hash).map(s => s.content_hash));
         const existingTitleCounts = {};
         existingSongs.forEach(s => {
             const t = s.title.toLowerCase().trim();
             existingTitleCounts[t] = (existingTitleCounts[t] || 0) + 1;
         });
 
-        // 2. Dateien filtern
-        const toUpload = [];
-        for (const file of files) {
-            let rawTitle = file.name.replace(/\.[^/.]+$/, "").trim();
-            const key = dupKey(rawTitle, file.size);
-            if (existingKeys.has(key)) continue; // echtes Duplikat → überspringen
+        // 2. Phase 1: Hashes berechnen (erkennt echte Duplikate auch INNERHALB der gleichen Auswahl,
+        //    nicht nur gegen die DB — das war der Bug bei 200-400 Songs auf einmal)
+        const HASH_CONCURRENT = 8;
+        const hashed = new Array(files.length);
+        let hashedCount = 0;
+        for (let i = 0; i < files.length; i += HASH_CONCURRENT) {
+            const batch = files.slice(i, i + HASH_CONCURRENT);
+            await Promise.all(batch.map(async (file, j) => {
+                try {
+                    hashed[i + j] = { file, hash: await _hashFile(file) };
+                } catch(err) {
+                    hashed[i + j] = { file, hash: null }; // Hash fehlgeschlagen → wird nie als Duplikat erkannt, aber trotzdem importiert
+                }
+                hashedCount++;
+                setStatus(`🔢 Prüfe Dateien: ${hashedCount} / ${files.length}...`);
+            }));
+        }
 
-            // Gleicher Name aber andere Größe → Suffix anhängen
+        // 3. Dateien filtern: erst gegen DB-Hashes, dann gegen bereits in dieser Auswahl gesehene Hashes
+        const seenHashesThisBatch = new Set();
+        const toUpload = [];
+        for (const { file, hash } of hashed) {
+            if (hash) {
+                if (existingHashes.has(hash) || seenHashesThisBatch.has(hash)) continue; // echtes Duplikat → überspringen
+                seenHashesThisBatch.add(hash);
+            }
+
+            let rawTitle = file.name.replace(/\.[^/.]+$/, "").trim();
+
+            // Fallback für Songs ohne Hash-Match in der DB (alte Einträge ohne content_hash): Titel+Größe
+            if (!hash && existingKeys.has(dupKey(rawTitle, file.size))) continue;
+
             const titleLower = rawTitle.toLowerCase().trim();
             if (existingTitleCounts[titleLower]) {
                 existingTitleCounts[titleLower]++;
@@ -2746,7 +2961,7 @@ if (oldFileInput) {
             } else {
                 existingTitleCounts[titleLower] = 1;
             }
-            toUpload.push({ file, title: rawTitle });
+            toUpload.push({ file, title: rawTitle, hash });
         }
 
         const skipped = files.length - toUpload.length;
@@ -2758,41 +2973,49 @@ if (oldFileInput) {
 
         setStatus(`⬆️ 0 / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} Duplikate übersprungen)` : ''}...`);
 
-        // 3. Parallel-Upload mit Echtzeit-Fortschritt
-        const CONCURRENT = 10;
+        // 4. Phase 2: Parallel-Upload mit Echtzeit-Fortschritt + 1 Retry bei Netzwerkfehlern
+        const CONCURRENT = 6;
         let done = 0, failed = 0;
+
+        async function uploadOne(file, title, hash, attempt = 1) {
+            const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+            try {
+                const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': file.type || 'audio/mpeg' },
+                    body: file
+                });
+                if (!uploadRes.ok) throw new Error('upload failed');
+                const uploadData = await uploadRes.json();
+
+                const songRes = await fetch(`${API_URL}/songs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        title, artist: "Unbekannt", cover_data: "",
+                        file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [],
+                        content_hash: hash || undefined
+                    })
+                });
+                if (!songRes.ok) throw new Error('song create failed');
+                done++;
+            } catch(err) {
+                if (attempt < 2) { await uploadOne(file, title, hash, attempt + 1); return; }
+                failed++;
+            }
+            setStatus(`⬆️ ${done} / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} übersprungen)` : ''}...`);
+        }
 
         for (let i = 0; i < toUpload.length; i += CONCURRENT) {
             const batch = toUpload.slice(i, i + CONCURRENT);
-            await Promise.all(batch.map(async ({ file, title }) => {
-                const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
-                try {
-                    const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': file.type || 'audio/mpeg' },
-                        body: file
-                    });
-                    if (!uploadRes.ok) { failed++; return; }
-                    const uploadData = await uploadRes.json();
-
-                    await fetch(`${API_URL}/songs`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            title, artist: "Unbekannt", cover_data: "",
-                            file_url: uploadData.url, file_size: file.size, duration: 0, vibes: []
-                        })
-                    });
-                    done++;
-                } catch(err) { failed++; }
-                setStatus(`⬆️ ${done} / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} übersprungen)` : ''}...`);
-            }));
+            await Promise.all(batch.map(({ file, title, hash }) => uploadOne(file, title, hash)));
         }
 
         if (uploadLabel) uploadLabel.style.opacity = '1';
         const summary = `✅ ${done} importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} Fehler` : ''}`;
         setStatus(summary, done > 0 ? '#32d74b' : '#ff3b30');
 
+        // 5. Post-Import-Logik (Cover/Artist-Sync) läuft komplett entkoppelt im Hintergrund
         if (window.fetchSongsForPage) await window.fetchSongsForPage(true);
         if (done > 0) setTimeout(processBackgroundSync, 1000);
     });

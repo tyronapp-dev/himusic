@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m http.server 8787)",
+      "Bash(Start-Sleep -Seconds 2)",
+      "Bash(Invoke-WebRequest -Uri \"http://localhost:8787/index.html\" -UseBasicParsing)",
+      "Bash(Select-Object -ExpandProperty StatusCode)",
+      "Bash(npx --yes serve . -l 8787)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8787/index.html)"
+    ]
+  }
+}
