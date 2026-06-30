@@ -126,7 +126,7 @@ window.AudioEngine = (function () {
     function isLoudnessOn() { return loudnessOn; }
     function isFailed() { return failed; }
 
-    return { ensure, setPreamp, setPreset, disable, setLoudnessBoost, isLoudnessOn, isFailed };
+    return { ensure, setPreamp, setPreset, disable, setLoudnessBoost, isLoudnessOn, isFailed, resumeCtx };
 })();
 
 async function apiGetAllSongs() {
@@ -455,22 +455,6 @@ function initApp() {
 
     loadPlayerState();
 
-    // EQ/HD-Audio-Status aus localStorage wurde nur in der UI wiederhergestellt (Checkbox/Slider),
-    // der Web-Audio-Graph kann aber erst nach einer echten User-Geste gebaut werden (Autoplay-Policy).
-    const _syncAudioEngineFromUI = () => {
-        const eqToggle = document.getElementById('eq-power-toggle');
-        if (eqToggle && eqToggle.checked) {
-            const preset = document.querySelector('.eq-preset.active')?.dataset.mode || 'classic';
-            window.AudioEngine.setPreset(preset);
-            window.AudioEngine.setPreamp(document.getElementById('eq-preamp')?.value || 0);
-        }
-        if (document.getElementById('setting-hd-audio')?.checked) {
-            window.AudioEngine.setLoudnessBoost(true);
-        }
-    };
-    document.addEventListener('pointerdown', _syncAudioEngineFromUI, { once: true });
-    document.addEventListener('keydown', _syncAudioEngineFromUI, { once: true });
-
     window.currentPlayingSongId = null;
     window.currentPlayingPlaylistId = null;
 
@@ -559,15 +543,18 @@ function initApp() {
         if (document.visibilityState === 'hidden') {
             savePlayerState();
         } else {
+            // iOS pausiert AudioContext wenn App in den Hintergrund geht → wieder aufwecken
+            window.AudioEngine.resumeCtx();
             // iOS braucht mehrere Versuche nach dem Entsperren
             const tryResume = (attempts) => {
                 if (!audioPlayer || !window._shouldBePlaying || !audioPlayer.src) return;
                 if (!audioPlayer.paused) return;
+                window.AudioEngine.resumeCtx();
                 audioPlayer.play().catch(() => {
                     if (attempts > 0) setTimeout(() => tryResume(attempts - 1), 800);
                 });
             };
-            setTimeout(() => tryResume(3), 300);
+            setTimeout(() => tryResume(4), 300);
         }
     });
     setInterval(() => { if (memAudio && !memAudio.paused && memAudio.currentTime > 0) _doSavePlayerState(); }, 5000);
@@ -2248,6 +2235,25 @@ async function createNewPlaylistProcess() {
         });
     });
 
+    // Vorverstärker-Slider direkt im Player (synchronisiert mit EQ-Overlay-Slider)
+    const playerPreamp = document.getElementById('player-preamp');
+    if (playerPreamp) {
+        playerPreamp.addEventListener('input', (e) => {
+            window.AudioEngine.setPreamp(e.target.value);
+            // Overlay-Slider synchron halten
+            if (eqPreamp) { eqPreamp.value = e.target.value; updateSliderFill(eqPreamp, -12, 12); }
+            const valDisplay = document.getElementById('eq-preamp-val');
+            if (valDisplay) valDisplay.innerText = (e.target.value > 0 ? '+' : '') + e.target.value + ' dB';
+            // EQ einschalten falls noch aus
+            if (eqPowerToggle && !eqPowerToggle.checked) {
+                eqPowerToggle.checked = true;
+                const preset = document.querySelector('.eq-preset.active')?.dataset.mode || 'classic';
+                window.AudioEngine.setPreset(preset);
+            }
+        });
+        playerPreamp.addEventListener('change', savePlayerState);
+    }
+
     let isShuffle = false; let isRepeat = false;
     document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; });
     document.getElementById('btn-shuffle')?.addEventListener('click', (e) => { isShuffle = !isShuffle; e.currentTarget.classList.toggle('ctrl-active', isShuffle); if(isShuffle) { playbackQueue = playbackQueue.sort(() => 0.5 - Math.random()); } });
@@ -2302,6 +2308,11 @@ async function createNewPlaylistProcess() {
         }
         return div;
     }
+
+    document.getElementById('btn-eq-open')?.addEventListener('click', () => {
+        const eqOverlay = document.getElementById('eq-overlay');
+        if (eqOverlay) eqOverlay.classList.add('active');
+    });
 
     document.getElementById('btn-queue-menu')?.addEventListener('click', () => {
         const qContainer = document.getElementById('queue-list'); qContainer.innerHTML = '';

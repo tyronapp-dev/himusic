@@ -280,8 +280,10 @@
             </div>
 
             <div class="track-info-container">
-                <div class="song-name" id="bp-song-name">Songname</div>
-                <div class="artist-name" id="bp-artist-name">Künstler</div>
+                <div class="track-info-text">
+                    <div class="song-name" id="bp-song-name">Songname</div>
+                    <div class="artist-name" id="bp-artist-name">Künstler</div>
+                </div>
             </div>
 
             <div class="time-scrubber">
@@ -289,25 +291,38 @@
                 <div class="time-labels"><span class="time-current">0:00</span><span class="time-total">-0:00</span></div>
             </div>
 
-            <div class="main-controls" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 35px; padding: 0 10px;">
+            <!-- Hauptsteuerung: Shuffle | Zurück | Play/Pause | Vor | Repeat -->
+            <div class="main-controls">
                 <button class="icon-btn secondary-control" id="btn-shuffle">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>
                 </button>
-                <div class="center-controls" style="display: flex; align-items: center; gap: 28px;">
-                    <button class="icon-btn play-ctrl" id="btn-prev">
-                        <svg width="36" height="36" viewBox="0 0 24 24" fill="currentColor"><path d="M7 6c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1s1-.45 1-1V7c0-.55-.45-1-1-1zm3.66 6.73l6.5 4.33c.66.44 1.54-.03 1.54-.82V7.76c0-.79-.88-1.26-1.54-.82l-6.5 4.33c-.42.28-.42.89 0 1.18z"/></svg>
-                    </button>
-                    <button class="icon-btn play-ctrl play-large">
-                        <svg width="56" height="56" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    </button>
-                    <button class="icon-btn play-ctrl" id="btn-next">
-                        <svg width="36" height="36" viewBox="0 0 24 24" fill="currentColor"><path d="M17 6c.55 0 1 .45 1 1v10c0 .55-.45 1-1 1s-1-.45-1-1V7c0-.55.45-1 1-1zm-3.66 6.73l-6.5 4.33C6.18 17.5 5.3 17.03 5.3 16.24V7.76c0-.79.88-1.26 1.54-.82l6.5 4.33c.42.28.42.89 0 1.18z"/></svg>
-                    </button>
-                    <button class="icon-btn secondary-control" id="btn-queue-menu" style="opacity: 0.75;">
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><polygon points="3 6 3 12 6 9" fill="currentColor" stroke="none"/></svg>
-                    </button>
+                <button class="icon-btn play-ctrl" id="btn-prev">
+                    <svg width="38" height="38" viewBox="0 0 24 24" fill="currentColor"><path d="M7 6c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1s1-.45 1-1V7c0-.55-.45-1-1-1zm3.66 6.73l6.5 4.33c.66.44 1.54-.03 1.54-.82V7.76c0-.79-.88-1.26-1.54-.82l-6.5 4.33c-.42.28-.42.89 0 1.18z"/></svg>
+                </button>
+                <button class="icon-btn play-ctrl play-large">
+                    <svg width="58" height="58" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                </button>
+                <button class="icon-btn play-ctrl" id="btn-next">
+                    <svg width="38" height="38" viewBox="0 0 24 24" fill="currentColor"><path d="M17 6c.55 0 1 .45 1 1v10c0 .55-.45 1-1 1s-1-.45-1-1V7c0-.55.45-1 1-1zm-3.66 6.73l-6.5 4.33C6.18 17.5 5.3 17.03 5.3 16.24V7.76c0-.79.88-1.26 1.54-.82l6.5 4.33c.42.28.42.89 0 1.18z"/></svg>
+                </button>
+                <button class="icon-btn secondary-control" id="btn-repeat">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+                </button>
+            </div>
+
+            <!-- Untere Leiste: Warteschlange | Vorverstärker | EQ -->
+            <div class="player-bottom-bar">
+                <button class="icon-btn secondary-control" id="btn-queue-menu">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><polygon points="3 6 3 12 6 9" fill="currentColor" stroke="none"/></svg>
+                </button>
+                <div class="preamp-bar">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" opacity="0.5"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+                    <input type="range" id="player-preamp" class="preamp-slider" min="-12" max="12" step="1" value="0">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" opacity="0.9"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
                 </div>
-             
+                <button class="icon-btn secondary-control" id="btn-eq-open">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+                </button>
             </div>
             <input type="range" id="volume-slider" style="display:none;" min="0" max="1" step="0.01" value="1">
         </div> 
