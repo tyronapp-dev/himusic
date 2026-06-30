@@ -2694,7 +2694,7 @@ window.addEventListener('online', async () => {
 });
 
 // ==========================================
-// 2. DUMB & FAST IMPORT (10 Parallel & Duplikat-Check)
+// 2. SMART BULK IMPORT (10 Parallel, intelligenter Duplikat-Check)
 // ==========================================
 const oldFileInput = document.getElementById('native-file-upload');
 if (oldFileInput) {
@@ -2704,116 +2704,166 @@ if (oldFileInput) {
     newFileInput.addEventListener('change', async (e) => {
         const files = Array.from(e.target.files);
         if (files.length === 0) return;
-        
-        const uploadLabel = document.querySelector('label[for="native-file-upload"]');
-        if(uploadLabel) uploadLabel.style.opacity = '0.5';
 
-        // 1. Vorab alle Songtitel aus der Datenbank holen (für Duplikat-Check)
-        let existingTitles = new Set();
+        const uploadLabel = document.querySelector('label[for="native-file-upload"]');
+        const syncStatusDetail = document.getElementById('sync-status-detail');
+        const setStatus = (msg, color = '#fff') => {
+            if (syncStatusDetail) { syncStatusDetail.style.display = 'block'; syncStatusDetail.style.color = color; syncStatusDetail.innerText = msg; }
+        };
+
+        if (uploadLabel) uploadLabel.style.opacity = '0.5';
+        setStatus(`⏳ Lade Datenbank...`);
+
+        // 1. DB laden: Duplikat-Check via Titel (normalisiert) + Dateigröße
+        //    Echtes Duplikat = gleicher Titel UND gleiche Größe
+        //    Gleicher Titel aber andere Größe = anderer Song → importieren mit Suffix
+        let existingSongs = [];
         try {
             const dbRes = await fetch(`${API_URL}/songs`);
-            if (dbRes.ok) {
-                const dbSongs = await dbRes.json();
-                dbSongs.forEach(s => existingTitles.add(s.title.toLowerCase().trim()));
+            if (dbRes.ok) existingSongs = await dbRes.json();
+        } catch(err) {}
+
+        const dupKey = (title, size) => `${title.toLowerCase().trim()}::${size}`;
+        const existingKeys = new Set(existingSongs.map(s => dupKey(s.title, s.file_size)));
+        const existingTitleCounts = {};
+        existingSongs.forEach(s => {
+            const t = s.title.toLowerCase().trim();
+            existingTitleCounts[t] = (existingTitleCounts[t] || 0) + 1;
+        });
+
+        // 2. Dateien filtern
+        const toUpload = [];
+        for (const file of files) {
+            let rawTitle = file.name.replace(/\.[^/.]+$/, "").trim();
+            const key = dupKey(rawTitle, file.size);
+            if (existingKeys.has(key)) continue; // echtes Duplikat → überspringen
+
+            // Gleicher Name aber andere Größe → Suffix anhängen
+            const titleLower = rawTitle.toLowerCase().trim();
+            if (existingTitleCounts[titleLower]) {
+                existingTitleCounts[titleLower]++;
+                rawTitle = `${rawTitle} (${existingTitleCounts[titleLower]})`;
+            } else {
+                existingTitleCounts[titleLower] = 1;
             }
-        } catch(err) { console.error("Konnte DB für Check nicht laden", err); }
+            toUpload.push({ file, title: rawTitle });
+        }
 
-        // 2. Batch-Upload (10 Dateien gleichzeitig = Höchstes sicheres Limit für Handys)
-        const CONCURRENT_UPLOADS = 10;
-        
-        for (let i = 0; i < files.length; i += CONCURRENT_UPLOADS) {
-            const batch = files.slice(i, i + CONCURRENT_UPLOADS);
-            
-            await Promise.all(batch.map(async (file) => {
-                let rawTitle = file.name.replace(/\.[^/.]+$/, "").trim();
-                
-                // Check: Ist der Song schon in der Datenbank? -> Überspringen
-                if(existingTitles.has(rawTitle.toLowerCase())) return;
+        const skipped = files.length - toUpload.length;
+        if (toUpload.length === 0) {
+            setStatus(`✅ Alle ${files.length} Songs bereits vorhanden – nichts zu importieren.`, '#32d74b');
+            if (uploadLabel) uploadLabel.style.opacity = '1';
+            return;
+        }
 
-                const safeFilename = `fast_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+        setStatus(`⬆️ 0 / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} Duplikate übersprungen)` : ''}...`);
+
+        // 3. Parallel-Upload mit Echtzeit-Fortschritt
+        const CONCURRENT = 10;
+        let done = 0, failed = 0;
+
+        for (let i = 0; i < toUpload.length; i += CONCURRENT) {
+            const batch = toUpload.slice(i, i + CONCURRENT);
+            await Promise.all(batch.map(async ({ file, title }) => {
+                const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
                 try {
-                    // Upload in Cloudflare
-                    const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, { 
-                        method: 'PUT', 
-                        headers: { 'Content-Type': file.type || 'audio/mpeg' }, 
-                        body: file 
+                    const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': file.type || 'audio/mpeg' },
+                        body: file
                     });
-                    if(!uploadRes.ok) return;
+                    if (!uploadRes.ok) { failed++; return; }
                     const uploadData = await uploadRes.json();
-                    
-                    // Eintrag in DB erstellen
+
                     await fetch(`${API_URL}/songs`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                            title: rawTitle, artist: "Unbekannt", cover_data: "", 
-                            file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [] 
+                        body: JSON.stringify({
+                            title, artist: "Unbekannt", cover_data: "",
+                            file_url: uploadData.url, file_size: file.size, duration: 0, vibes: []
                         })
                     });
-                } catch (err) {}
+                    done++;
+                } catch(err) { failed++; }
+                setStatus(`⬆️ ${done} / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} übersprungen)` : ''}...`);
             }));
         }
-        
-        if(uploadLabel) uploadLabel.style.opacity = '1';
-        if(window.fetchSongsForPage) await window.fetchSongsForPage(true);
-        
-        // Optionaler Hinweis, wenn er durchgelaufen ist
-        const syncStatusDetail = document.getElementById('sync-status-detail');
-        if(syncStatusDetail) {
-            syncStatusDetail.style.display = 'block';
-            syncStatusDetail.style.color = '#32d74b';
-            syncStatusDetail.innerText = "Upload abgeschlossen! Hintergrund-Sync läuft...";
-        }
+
+        if (uploadLabel) uploadLabel.style.opacity = '1';
+        const summary = `✅ ${done} importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} Fehler` : ''}`;
+        setStatus(summary, done > 0 ? '#32d74b' : '#ff3b30');
+
+        if (window.fetchSongsForPage) await window.fetchSongsForPage(true);
+        if (done > 0) setTimeout(processBackgroundSync, 1000);
     });
 }
 
 // ==========================================
-// 3. LIVE BACKGROUND SYNC LOGIK (Tags & Covers)
+// 3. BACKGROUND SYNC (3 parallel, iTunes Cover + Artist)
 // ==========================================
+let _syncRunning = false;
+
 async function processBackgroundSync() {
+    if (_syncRunning) return;
+    _syncRunning = true;
+
     const progressText = document.getElementById('sync-progress-text');
-    const progressBar = document.getElementById('sync-progress-bar');
+    const progressBar  = document.getElementById('sync-progress-bar');
     const statusDetail = document.getElementById('sync-status-detail');
 
     try {
         const response = await fetch(`${API_URL}/songs`);
         const songs = await response.json();
         const totalSongs = songs.length;
-        const unsyncedSongs = songs.filter(s => s.artist === "Unbekannt" || s.artist === "");
-        const syncedSongsCount = totalSongs - unsyncedSongs.length;
+        const unsyncedSongs = songs.filter(s => !s.cover_data && (s.artist === "Unbekannt" || s.artist === "" || s.artist === "Unbekannter Künstler"));
+        const syncedCount = totalSongs - unsyncedSongs.length;
 
-        if (progressText) progressText.innerText = `${syncedSongsCount} / ${totalSongs}`;
-        if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(syncedSongsCount / totalSongs) * 100}%` : '0%';
+        if (progressText) progressText.innerText = `${syncedCount} / ${totalSongs}`;
+        if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(syncedCount / totalSongs) * 100}%` : '0%';
 
         if (unsyncedSongs.length === 0) {
-            if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = "Alle Songs sind auf dem neuesten Stand."; statusDetail.style.color = '#32d74b'; }
-            return; 
+            if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = "Alle Songs synchronisiert ✓"; statusDetail.style.color = '#32d74b'; }
+            _syncRunning = false;
+            return;
         }
 
-        if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = `Synchronisiere noch ${unsyncedSongs.length} Songs... (App offen lassen)`; statusDetail.style.color = '#fa233b'; }
-        
-        const song = unsyncedSongs[0];
-        let searchTerm = song.title.replace(/(_|-)/g, " ").trim();
-        
-        try {
-            const itunesRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`);
-            const itunesData = await itunesRes.json();
-            
-            if (itunesData.results && itunesData.results.length > 0) {
-                const track = itunesData.results[0];
-                await fetch(`${API_URL}/songs/${song.id}`, {
-                    method: 'PUT', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ title: track.trackName, artist: track.artistName, cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb'), vibes: song.vibes || [] })
-                });
-            } else {
-                await fetch(`${API_URL}/songs/${song.id}`, {
-                    method: 'PUT', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ title: song.title, artist: "Unbekannter Künstler", cover_data: "", vibes: song.vibes || [] })
-                });
-            }
-        } catch(e) {}
-        
+        if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = `🔄 Synchronisiere ${unsyncedSongs.length} Songs...`; statusDetail.style.color = '#fa9a00'; }
+
+        // 3 Songs gleichzeitig über iTunes suchen
+        const SYNC_PARALLEL = 3;
+        const batch = unsyncedSongs.slice(0, SYNC_PARALLEL);
+
+        await Promise.all(batch.map(async (song) => {
+            const searchTerm = song.title.replace(/[_\-]/g, " ").trim();
+            try {
+                const itunesRes = await fetch(
+                    `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`,
+                    { signal: AbortSignal.timeout(5000) }
+                );
+                const itunesData = await itunesRes.json();
+
+                if (itunesData.results?.length > 0) {
+                    const track = itunesData.results[0];
+                    await fetch(`${API_URL}/songs/${song.id}`, {
+                        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            title: track.trackName,
+                            artist: track.artistName,
+                            cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb'),
+                            vibes: _parseVibes(song.vibes)
+                        })
+                    });
+                } else {
+                    await fetch(`${API_URL}/songs/${song.id}`, {
+                        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ title: song.title, artist: "Unbekannter Künstler", cover_data: "", vibes: _parseVibes(song.vibes) })
+                    });
+                }
+            } catch(e) {}
+        }));
+
         if (window.fetchSongsForPage) window.fetchSongsForPage(true);
+        _syncRunning = false;
         setTimeout(processBackgroundSync, 1500);
 
     } catch(err) { setTimeout(processBackgroundSync, 5000); }
