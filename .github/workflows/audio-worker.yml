@@ -44,4 +44,5 @@ jobs:
           R2_PUBLIC_DOMAIN:     ${{ secrets.R2_PUBLIC_DOMAIN }}
           D1_API_URL:           ${{ secrets.D1_API_URL }}
           D1_API_KEY:           ${{ secrets.D1_API_KEY }}
+          YOUTUBE_COOKIES:      ${{ secrets.YOUTUBE_COOKIES }}
         run: python src/extractor_worker.py
