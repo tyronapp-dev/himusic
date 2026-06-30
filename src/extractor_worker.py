@@ -41,7 +41,7 @@ def get_video_info(youtube_url: str) -> dict:
         "--no-download",
         "--quiet",
         "--no-warnings",
-        "--extractor-args", "youtube:player_client=ios",
+        "--extractor-args", "youtube:player_client=web_creator",
         youtube_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -83,8 +83,8 @@ def download_audio(youtube_url: str, output_dir: str) -> str:
         "--extract-audio",
         "--audio-format", "m4a",
         "--audio-quality", "0",
-        # iOS-Client umgeht Bot-Detection auf GitHub Actions ohne Cookies
-        "--extractor-args", "youtube:player_client=ios",
+        # web_creator Client – funktioniert oft ohne Cookies auf CI-Servern
+        "--extractor-args", "youtube:player_client=web_creator",
         "--output", output_template,
         "--no-progress",
         "--quiet",
