@@ -41,6 +41,7 @@ def get_video_info(youtube_url: str) -> dict:
         "--no-download",
         "--quiet",
         "--no-warnings",
+        "--extractor-args", "youtube:player_client=ios",
         youtube_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -61,10 +62,20 @@ def get_video_info(youtube_url: str) -> dict:
 def download_audio(youtube_url: str, output_dir: str) -> str:
     """
     Lädt beste Audio-Spur als .m4a herunter.
-    Nutzt android + web als Player-Clients für minimale Bot-Erkennung.
+    Nutzt iOS-Client – funktioniert auf CI-Servern ohne Cookies.
     Gibt den Pfad zur heruntergeladenen Datei zurück.
     """
     output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
+
+    # Cookies-Datei aus Umgebungsvariable schreiben (optional)
+    cookies_args = []
+    cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if cookies_content:
+        cookies_path = os.path.join(output_dir, "cookies.txt")
+        with open(cookies_path, "w") as f:
+            f.write(cookies_content)
+        cookies_args = ["--cookies", cookies_path]
+        print("[INFO] YouTube-Cookies werden verwendet.", flush=True)
 
     cmd = [
         "yt-dlp",
@@ -72,13 +83,13 @@ def download_audio(youtube_url: str, output_dir: str) -> str:
         "--extract-audio",
         "--audio-format", "m4a",
         "--audio-quality", "0",
-        # Android + Web Client → umgeht JS-Challenge ohne externe Deps
-        "--extractor-args", "youtube:player_client=android,web",
-        "--add-header", "User-Agent:com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+        # iOS-Client umgeht Bot-Detection auf GitHub Actions ohne Cookies
+        "--extractor-args", "youtube:player_client=ios",
         "--output", output_template,
         "--no-progress",
         "--quiet",
         "--no-warnings",
+        *cookies_args,
         youtube_url,
     ]
 
