@@ -133,11 +133,22 @@
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="#fa233b"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/></svg>
                         YouTube Import
                     </h3>
-                    <div style="position: relative; margin-bottom: 12px;">
-                        <input type="text" id="youtube-url-input" placeholder="YouTube Link einfügen..." style="width: 100%; box-sizing: border-box; padding: 14px; padding-right: 40px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; outline: none; font-size: 16px;">
-                        <button id="youtube-clear-btn" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #aaa; font-size: 24px; cursor: pointer; display: none; padding: 0;">&times;</button>
+                    <div style="position: relative; margin-bottom: 10px;">
+                        <input type="text" id="yt-search-input" placeholder="Songname suchen..." style="width: 100%; box-sizing: border-box; padding: 14px; padding-right: 40px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; outline: none; font-size: 16px;">
+                        <button id="yt-search-clear-btn" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #aaa; font-size: 24px; cursor: pointer; display: none; padding: 0;">&times;</button>
                     </div>
-                    <button id="youtube-import-btn" style="width: 100%; padding: 14px; border-radius: 10px; border: none; background: #fa233b; color: white; font-weight: bold; font-size: 16px; cursor: pointer;">Importieren</button>
+                    <button id="yt-search-btn" style="width: 100%; padding: 14px; border-radius: 10px; border: none; background: rgba(255,255,255,0.12); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); color: white; font-weight: bold; font-size: 16px; cursor: pointer; border: 0.5px solid rgba(255,255,255,0.18);">🔍 Suchen</button>
+                    <p id="yt-search-status" style="font-size: 13px; text-align: center; margin-top: 10px; display: none; color: #aaa;"></p>
+                    <div id="yt-search-results" style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px;"></div>
+
+                    <details style="margin-top: 16px;">
+                        <summary style="font-size: 13px; color: #aaa; cursor: pointer;">Oder YouTube-Link direkt einfügen</summary>
+                        <div style="position: relative; margin: 12px 0;">
+                            <input type="text" id="youtube-url-input" placeholder="YouTube Link einfügen..." style="width: 100%; box-sizing: border-box; padding: 14px; padding-right: 40px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; outline: none; font-size: 16px;">
+                            <button id="youtube-clear-btn" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #aaa; font-size: 24px; cursor: pointer; display: none; padding: 0;">&times;</button>
+                        </div>
+                        <button id="youtube-import-btn" style="width: 100%; padding: 14px; border-radius: 10px; border: none; background: #fa233b; color: white; font-weight: bold; font-size: 16px; cursor: pointer;">Importieren</button>
+                    </details>
                     <p id="youtube-status" style="font-size: 14px; font-weight: bold; text-align: center; margin-top: 15px; display: none;"></p>
                 </div>
 

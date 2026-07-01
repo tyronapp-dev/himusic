@@ -2853,7 +2853,38 @@ setTimeout(processBackgroundSync, 3000);
 // ==========================================
 // 4. YOUTUBE IMPORT (via GitHub Actions – fire & forget)
 // ==========================================
+async function startYoutubeImport(url, statusEl) {
+    if (!url) return;
+    if (statusEl) {
+        statusEl.style.display = 'block';
+        statusEl.innerText = 'Wird gestartet...';
+        statusEl.style.color = '#fff';
+    }
+    try {
+        const response = await fetch(`${API_URL}/dispatch-import`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ youtube_url: url })
+        });
+        if (!response.ok) throw new Error(`Server: ${response.status}`);
+        if (statusEl) {
+            statusEl.innerText = '⏳ Download im Hintergrund gestartet! Song erscheint in ~2 Min.';
+            statusEl.style.color = '#32d74b';
+            setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+        }
+        return true;
+    } catch (error) {
+        if (statusEl) {
+            statusEl.innerText = `❌ Fehler: ${error.message}`;
+            statusEl.style.color = '#ff3b30';
+            setTimeout(() => { statusEl.style.display = 'none'; }, 4000);
+        }
+        return false;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    // ── Manueller Link-Import (Fallback) ────────────────────
     const ytInput = document.getElementById('youtube-url-input');
     const ytBtn = document.getElementById('youtube-import-btn');
     const ytStatus = document.getElementById('youtube-status');
@@ -2868,36 +2899,81 @@ document.addEventListener('DOMContentLoaded', () => {
         ytBtn.addEventListener('click', async () => {
             const url = ytInput.value.trim();
             if (!url) return;
-
             ytBtn.disabled = true; ytBtn.style.opacity = '0.5';
-            ytStatus.style.display = 'block';
-            ytStatus.innerText = 'Wird gestartet...';
-            ytStatus.style.color = '#fff';
-
-            try {
-                const response = await fetch(`${API_URL}/dispatch-import`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ youtube_url: url })
-                });
-
-                if (!response.ok) throw new Error(`Server: ${response.status}`);
-
-                // Sofortiger Erfolg – der Runner läuft im Hintergrund weiter
-                ytInput.value = '';
-                if (ytClearBtn) ytClearBtn.style.display = 'none';
-                ytStatus.innerText = '⏳ Download im Hintergrund gestartet! Song erscheint in ~2 Min.';
-                ytStatus.style.color = '#32d74b';
-                // Nach 6 Sekunden ausblenden – kein nervöser Ladebalken mehr
-                setTimeout(() => { ytStatus.style.display = 'none'; }, 6000);
-
-            } catch (error) {
-                ytStatus.innerText = `❌ Fehler: ${error.message}`;
-                ytStatus.style.color = '#ff3b30';
-                setTimeout(() => { ytStatus.style.display = 'none'; }, 4000);
-            } finally {
-                ytBtn.disabled = false; ytBtn.style.opacity = '1';
-            }
+            await startYoutubeImport(url, ytStatus);
+            ytInput.value = '';
+            if (ytClearBtn) ytClearBtn.style.display = 'none';
+            ytBtn.disabled = false; ytBtn.style.opacity = '1';
         });
     }
+
+    // ── Songsuche: Name eingeben → YouTube-Ergebnisse → auswählen ──
+    const searchInput   = document.getElementById('yt-search-input');
+    const searchBtn      = document.getElementById('yt-search-btn');
+    const searchStatus   = document.getElementById('yt-search-status');
+    const searchClearBtn = document.getElementById('yt-search-clear-btn');
+    const resultsBox      = document.getElementById('yt-search-results');
+
+    if (searchInput && searchClearBtn) {
+        searchInput.addEventListener('input', () => { searchClearBtn.style.display = searchInput.value.length > 0 ? 'block' : 'none'; });
+        searchClearBtn.addEventListener('click', () => {
+            searchInput.value = ''; searchClearBtn.style.display = 'none'; searchInput.focus();
+            if (resultsBox) resultsBox.innerHTML = '';
+        });
+    }
+
+    async function runSearch() {
+        const q = searchInput.value.trim();
+        if (!q || !resultsBox) return;
+        searchBtn.disabled = true; searchBtn.style.opacity = '0.5';
+        searchStatus.style.display = 'block';
+        searchStatus.innerText = 'Suche läuft...';
+        searchStatus.style.color = '#aaa';
+        resultsBox.innerHTML = '';
+
+        try {
+            const res = await fetch(`${API_URL}/youtube-search?q=${encodeURIComponent(q)}`);
+            if (!res.ok) throw new Error(`Server: ${res.status}`);
+            const data = await res.json();
+            const items = data.results || [];
+
+            if (items.length === 0) {
+                searchStatus.innerText = 'Keine Ergebnisse gefunden.';
+                searchStatus.style.color = '#aaa';
+            } else {
+                searchStatus.style.display = 'none';
+            }
+
+            items.forEach(item => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex; align-items:center; gap:10px; padding:8px; border-radius:10px; background:rgba(255,255,255,0.06); backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%); border:0.5px solid rgba(255,255,255,0.1); cursor:pointer; transition:transform 0.15s, background 0.2s;';
+                row.innerHTML = `
+                    <img src="${item.thumbnail}" style="width:64px; height:48px; border-radius:6px; object-fit:cover; flex-shrink:0;">
+                    <div style="min-width:0; flex:1;">
+                        <div style="font-size:14px; font-weight:600; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${item.title}</div>
+                        <div style="font-size:12px; color:#aaa; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${item.channelTitle}${item.duration ? ' · ' + item.duration : ''}</div>
+                    </div>
+                `;
+                row.addEventListener('pointerdown', () => { row.style.transform = 'scale(0.97)'; row.style.background = 'rgba(255,255,255,0.12)'; });
+                row.addEventListener('pointerup',   () => { row.style.transform = 'scale(1)'; });
+                row.addEventListener('click', async () => {
+                    resultsBox.querySelectorAll('div').forEach(r => r.style.pointerEvents = 'none');
+                    searchStatus.style.display = 'block';
+                    await startYoutubeImport(`https://www.youtube.com/watch?v=${item.videoId}`, searchStatus);
+                    resultsBox.innerHTML = '';
+                    searchInput.value = '';
+                    if (searchClearBtn) searchClearBtn.style.display = 'none';
+                });
+                resultsBox.appendChild(row);
+            });
+        } catch (error) {
+            searchStatus.innerText = `❌ Fehler: ${error.message}`;
+            searchStatus.style.color = '#ff3b30';
+        } finally {
+            searchBtn.disabled = false; searchBtn.style.opacity = '1';
+        }
+    }
+
+    if (searchBtn) searchBtn.addEventListener('click', runSearch);
+    if (searchInput) searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
 });
