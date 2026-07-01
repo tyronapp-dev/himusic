@@ -1006,7 +1006,10 @@ let _bgCacheActive = false;
                 window._songIndex = new Map(all.map(s => [s.id, s]));
                 rerenderSongsList(window.globalSongsData);
                 saveSongsSnapshot(all);
-                startBackgroundCacheQueue(all);
+                // NUR wenn der Nutzer Offline-Modus aktiv gewählt hat, die ganze Bibliothek
+                // vorab herunterladen. Sonst zog das bei 2000+ Songs ~14 GB im Hintergrund und
+                // machte die App dauerhaft langsam. Offline-Downloads laufen jetzt nur auf Wunsch.
+                if (localStorage.getItem('himusic_offline') === '1') startBackgroundCacheQueue(all);
             }
         } catch (error) {
             const snapshot = loadSongsSnapshot();
@@ -2647,7 +2650,7 @@ if (oldSaveBtn) {
         }
 
         await fetch(`${API_URL}/songs/${window.currentEditSongId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedData) });
-        if(window.fetchSongsForPage) window.fetchSongsForPage(true);
+        if(window.applySongPatch) window.applySongPatch(window.currentEditSongId, updatedData);
     });
 }
 
@@ -2662,14 +2665,45 @@ window.addEventListener('online', async () => {
         } catch(e) {}
     }
     localStorage.setItem('offline_tags', JSON.stringify(offlineQueue));
-    if(hasUpdates && window.fetchSongsForPage && Object.keys(offlineQueue).length === 0) window.fetchSongsForPage(true);
+    if(hasUpdates && window.fetchSongsFromDatabase && Object.keys(offlineQueue).length === 0) window.fetchSongsFromDatabase(true);
 });
 
 // ==========================================
-// 2. SMART BULK IMPORT (Metadaten-Dedup ohne Datei-Lesen, Pipeline-Upload, Durchsatz/ETA)
+// 2. SMART BULK IMPORT (sofortiger Dateinamen-Abgleich, nur Neues wird hochgeladen)
 // ==========================================
 // AbortSignal.timeout gibt es erst ab Safari 16 – sicher kapseln
 function _mkTimeout(ms) { try { return AbortSignal.timeout(ms); } catch(e) { return undefined; } }
+
+// Normalisiert einen Namen auf reine Kleinbuchstaben+Ziffern (ohne Endung/Sonderzeichen).
+// Dadurch ist der Vergleich unempfindlich gegen die Sanitisierung beim Upload und gegen
+// Groß/Kleinschreibung. "My Song!.mp3" und "My_Song_.mp3" ergeben beide "mysong".
+function _normName(s) { return (s || '').replace(/\.[^.]+$/, '').replace(/[^a-z0-9]/gi, '').toLowerCase(); }
+
+// Eindeutiger Import-Schlüssel eines vorhandenen Songs. Der Original-Dateiname wird bevorzugt
+// aus file_url rekonstruiert (Muster fast_<zeit>_<zufall>_<name>), denn file_url ändert sich NIE –
+// auch nicht, wenn der Hintergrund-Sync den Titel später auf den iTunes-Namen umschreibt.
+// Fällt nur bei Alt-/YouTube-Einträgen ohne dieses Muster auf den Titel zurück.
+function _songImportKey(song) {
+    if (song && song.file_url) {
+        const seg = (song.file_url.split('/media/')[1]) || '';
+        const m = seg.match(/^fast_\d+_[a-z0-9]+_(.+)$/i);
+        if (m) return _normName(m[1]);
+    }
+    return _normName(song && song.title);
+}
+
+// Gezieltes In-Memory- + DOM-Update eines einzelnen Songs (statt die ganze Liste neu zu rendern).
+window.applySongPatch = function(id, patch) {
+    if (window._songIndex) { const s = window._songIndex.get(id); if (s) Object.assign(s, patch); }
+    document.querySelectorAll(`.song-item[data-id="${id}"]`).forEach(row => {
+        if (patch.title != null) { const t = row.querySelector('.song-title'); if (t && !t.dataset.originalTitle) t.textContent = patch.title; }
+        if (patch.artist != null) { const a = row.querySelector('.song-artist'); if (a) a.textContent = patch.artist; }
+        if (patch.cover_data) {
+            const c = row.querySelector('.song-cover');
+            if (c) { c.style.backgroundImage = `url('${patch.cover_data}')`; c.style.backgroundSize = 'cover'; c.style.backgroundPosition = 'center'; c.innerHTML = ''; }
+        }
+    });
+};
 
 const oldFileInput = document.getElementById('native-file-upload');
 if (oldFileInput) {
@@ -2689,10 +2723,39 @@ if (oldFileInput) {
         if (uploadLabel) uploadLabel.style.opacity = '0.5';
         window._importActive = true; // Sync pausieren, damit er den Import nicht stört
 
-        // KEINE Prüfung, KEINE Logik vorab. Jede ausgewählte Datei wird sofort hochgeladen.
-        // Duplikate werden ERST NACH dem Import serverseitig in der DB bereinigt
-        // (POST /songs/dedupe: pro Dateiname bleibt genau ein Eintrag erhalten, der Rest wird gelöscht).
-        const toUpload = files.map(file => ({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() }));
+        // SOFORTIGER Dateinamen-Abgleich (kein Datei-Lesen, keine Uploads für schon Vorhandenes).
+        // Existierende Songs kommen aus der bereits geladenen Liste (window.globalSongsData) –
+        // ist die leer, wird EINMAL frisch geladen. Verglichen wird der normalisierte Original-
+        // Dateiname, der aus file_url rekonstruiert wird (überlebt Sync-Umbenennungen).
+        let existing = Array.isArray(window.globalSongsData) ? window.globalSongsData : [];
+        if (existing.length === 0) {
+            setStatus(`⏳ Lade Bibliothek...`);
+            try {
+                const r = await fetch(`${API_URL}/songs`, { signal: _mkTimeout(20000) });
+                if (r.ok) existing = await r.json();
+            } catch(err) {}
+        }
+        const existingKeys = new Set(existing.map(_songImportKey));
+
+        const seenThisBatch = new Set();
+        const toUpload = [];
+        let alreadyThere = 0;
+        for (const file of files) {
+            const key = _normName(file.name);
+            if (!key) continue;
+            if (existingKeys.has(key)) { alreadyThere++; continue; }   // schon in der DB → überspringen
+            if (seenThisBatch.has(key)) { alreadyThere++; continue; }  // Doppelter Dateiname in dieser Auswahl
+            seenThisBatch.add(key);
+            toUpload.push({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() });
+        }
+
+        if (toUpload.length === 0) {
+            setStatus(`✅ Alles schon da – alle ${files.length} Songs sind bereits importiert.`, '#32d74b');
+            if (uploadLabel) uploadLabel.style.opacity = '1';
+            window._importActive = false;
+            setTimeout(processBackgroundSync, 1000);
+            return;
+        }
 
         // Upload startet SOFORT. Worker-Pool + Durchsatz + Restzeit-Anzeige.
         const CONCURRENT = 5;
@@ -2708,7 +2771,7 @@ if (oldFileInput) {
                 const secs = Math.round((totalBytes - uploadedBytes) / 1048576 / mbps);
                 eta = ` · noch ~${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
             }
-            setStatus(`⬆️ ${done}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}`);
+            setStatus(`⬆️ ${done}/${toUpload.length} neu · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${alreadyThere > 0 ? ` · ${alreadyThere} schon da` : ''}`);
         }
         updateProgress();
 
@@ -2752,38 +2815,26 @@ if (oldFileInput) {
         }
         await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
 
-        // Post-Import: JETZT die Duplikate serverseitig in der DB bereinigen (ein Rutsch, eine Anfrage).
-        let removed = 0;
-        if (done > 0) {
-            setStatus(`🧹 Prüfe auf Duplikate...`);
-            try {
-                const dRes = await fetch(`${API_URL}/songs/dedupe`, { method: 'POST', signal: _mkTimeout(120000) });
-                if (dRes.ok) { const d = await dRes.json().catch(() => ({})); removed = d.deleted || 0; }
-            } catch(err) {}
-        }
-
-        window._importActive = false; // erst NACH der Bereinigung wieder freigeben
+        window._importActive = false;
         if (uploadLabel) uploadLabel.style.opacity = '1';
-        const summary = `✅ ${done - removed} importiert${removed > 0 ? `, ${removed} Duplikate entfernt` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (einfach erneut auswählen)` : ''}`;
+        const summary = `✅ ${done} neu importiert${alreadyThere > 0 ? `, ${alreadyThere} waren schon da` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (einfach erneut auswählen)` : ''}`;
         setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
 
         // Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
-        if (window.fetchSongsForPage) await window.fetchSongsForPage(true);
+        if (window.fetchSongsFromDatabase) await window.fetchSongsFromDatabase(true);
         if (done > 0) setTimeout(processBackgroundSync, 1500);
     });
 }
 
 // ==========================================
-// 3. BACKGROUND SYNC (3 parallel, iTunes Cover + Artist)
+// 3. BACKGROUND SYNC (iTunes Cover + Artist) – ein Durchlauf lädt EINMAL, arbeitet in-place ab
 // ==========================================
 let _syncRunning = false;
 
 async function processBackgroundSync() {
     if (_syncRunning) return;
-    // Während Import UND anschließender Duplikat-Bereinigung komplett pausieren (window._importActive
-    // bleibt bis nach dem Dedupe true). Sonst würde der Sync Songs anfassen, die gerade gelöscht
-    // werden, oder mit den Uploads um Bandbreite/Verbindungen konkurrieren. Danach läuft er von
-    // selbst weiter (Auto-Reschedule) und synchronisiert alles, was noch offen ist.
+    // Während eines Imports komplett pausieren (window._importActive), damit der Sync weder Songs
+    // anfasst, die gerade hochgeladen werden, noch mit den Uploads um Bandbreite konkurriert.
     if (window._importActive) { setTimeout(processBackgroundSync, 4000); return; }
     _syncRunning = true;
 
@@ -2792,61 +2843,68 @@ async function processBackgroundSync() {
     const statusDetail = document.getElementById('sync-status-detail');
 
     try {
-        const response = await fetch(`${API_URL}/songs`);
+        // Bibliothek EINMAL pro Durchlauf laden (früher passierte das alle 1,5 s → bei 1300+ Songs
+        // dauerhaft langsam).
+        const response = await fetch(`${API_URL}/songs`, { signal: _mkTimeout(20000) });
         const songs = await response.json();
         const totalSongs = songs.length;
         const unsyncedSongs = songs.filter(s => !s.cover_data && (s.artist === "Unbekannt" || s.artist === "" || s.artist === "Unbekannter Künstler"));
-        const syncedCount = totalSongs - unsyncedSongs.length;
+        const alreadySynced = totalSongs - unsyncedSongs.length;
 
-        if (progressText) progressText.innerText = `${syncedCount} / ${totalSongs}`;
-        if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(syncedCount / totalSongs) * 100}%` : '0%';
+        if (progressText) progressText.innerText = `${alreadySynced} / ${totalSongs}`;
+        if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(alreadySynced / totalSongs) * 100}%` : '0%';
 
         if (unsyncedSongs.length === 0) {
             if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = "Alle Songs synchronisiert ✓"; statusDetail.style.color = '#32d74b'; }
             _syncRunning = false;
-            return;
+            return; // fertig – nächster Anstoß kommt bei App-Start oder nach dem nächsten Import
         }
 
         if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = `🔄 Synchronisiere ${unsyncedSongs.length} Songs...`; statusDetail.style.color = '#fa9a00'; }
 
-        // 3 Songs gleichzeitig über iTunes suchen
-        const SYNC_PARALLEL = 3;
-        const batch = unsyncedSongs.slice(0, SYNC_PARALLEL);
+        // GANZEN Rückstand in EINEM Durchlauf abarbeiten: 6 parallele Worker, jeder aktualisiert
+        // nur seinen Song gezielt in-place (kein Voll-Rerender der Liste mehr).
+        const PARALLEL = 6;
+        let idx = 0, syncedNow = 0;
 
-        await Promise.all(batch.map(async (song) => {
-            const searchTerm = song.title.replace(/[_\-]/g, " ").trim();
-            try {
-                const itunesRes = await fetch(
-                    `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`,
-                    { signal: AbortSignal.timeout(5000) }
-                );
-                const itunesData = await itunesRes.json();
-
-                if (itunesData.results?.length > 0) {
-                    const track = itunesData.results[0];
+        async function syncWorker() {
+            while (idx < unsyncedSongs.length) {
+                if (window._importActive) return; // Import hat Vorrang → Durchlauf abbrechen
+                const song = unsyncedSongs[idx++];
+                const searchTerm = song.title.replace(/[_\-]/g, " ").trim();
+                let patch = null;
+                try {
+                    const itunesRes = await fetch(
+                        `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`,
+                        { signal: _mkTimeout(5000) }
+                    );
+                    const itunesData = await itunesRes.json();
+                    if (itunesData.results?.length > 0) {
+                        const track = itunesData.results[0];
+                        patch = { title: track.trackName, artist: track.artistName, cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb') };
+                    } else {
+                        patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
+                    }
                     await fetch(`${API_URL}/songs/${song.id}`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            title: track.trackName,
-                            artist: track.artistName,
-                            cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb'),
-                            vibes: _parseVibes(song.vibes)
-                        })
+                        body: JSON.stringify({ ...patch, vibes: _parseVibes(song.vibes) }),
+                        signal: _mkTimeout(15000)
                     });
-                } else {
-                    await fetch(`${API_URL}/songs/${song.id}`, {
-                        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ title: song.title, artist: "Unbekannter Künstler", cover_data: "", vibes: _parseVibes(song.vibes) })
-                    });
-                }
-            } catch(e) {}
-        }));
+                    if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, patch);
+                    syncedNow++;
+                } catch(e) {}
+                if (progressText) progressText.innerText = `${alreadySynced + syncedNow} / ${totalSongs}`;
+                if (progressBar) progressBar.style.width = totalSongs > 0 ? `${((alreadySynced + syncedNow) / totalSongs) * 100}%` : '0%';
+            }
+        }
+        await Promise.all(Array.from({ length: PARALLEL }, syncWorker));
 
-        if (window.fetchSongsForPage) window.fetchSongsForPage(true);
         _syncRunning = false;
-        setTimeout(processBackgroundSync, 1500);
+        // Kurz durchatmen, dann prüfen ob noch was offen ist (z.B. neu dazugekommene YouTube-Importe).
+        // Endet automatisch, sobald 0 unsynced übrig sind.
+        setTimeout(processBackgroundSync, 3000);
 
-    } catch(err) { setTimeout(processBackgroundSync, 5000); }
+    } catch(err) { _syncRunning = false; setTimeout(processBackgroundSync, 15000); }
 }
 setTimeout(processBackgroundSync, 3000);
 
