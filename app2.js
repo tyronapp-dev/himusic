@@ -2827,9 +2827,13 @@ if (oldFileInput) {
 }
 
 // ==========================================
-// 3. BACKGROUND SYNC (iTunes Cover + Artist) – ein Durchlauf lädt EINMAL, arbeitet in-place ab
+// 3. BACKGROUND SYNC (iTunes primär + Spotify-Fallback) – ein Durchlauf lädt EINMAL, arbeitet in-place ab
 // ==========================================
 let _syncRunning = false;
+// Songs, die in DIESER Sitzung schon versucht wurden. Verhindert, dass nicht auffindbare Songs
+// jeden Durchlauf erneut iTunes/Spotify abfragen (Endlos-Schleife). Beim nächsten App-Start leer
+// → ein erneuter Versuch pro Sitzung (falls Spotify/iTunes inzwischen doch etwas hat).
+const _syncAttempted = new Set();
 
 async function processBackgroundSync() {
     if (_syncRunning) return;
@@ -2850,17 +2854,25 @@ async function processBackgroundSync() {
         const totalSongs = songs.length;
         const unsyncedSongs = songs.filter(s => !s.cover_data && (s.artist === "Unbekannt" || s.artist === "" || s.artist === "Unbekannter Künstler"));
         const alreadySynced = totalSongs - unsyncedSongs.length;
+        // Nur die, die wir diese Sitzung noch nicht versucht haben
+        const todo = unsyncedSongs.filter(s => !_syncAttempted.has(s.id));
 
         if (progressText) progressText.innerText = `${alreadySynced} / ${totalSongs}`;
         if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(alreadySynced / totalSongs) * 100}%` : '0%';
 
-        if (unsyncedSongs.length === 0) {
-            if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = "Alle Songs synchronisiert ✓"; statusDetail.style.color = '#32d74b'; }
+        if (todo.length === 0) {
+            // Nichts (mehr) zu tun: entweder alles hat schon ein Cover, oder alle Reste wurden diese
+            // Sitzung bereits erfolglos versucht. In beiden Fällen: STOPP (kein Reschedule → keine Last).
+            if (statusDetail) {
+                statusDetail.style.display = 'block';
+                if (unsyncedSongs.length === 0) { statusDetail.innerText = "Alle Songs synchronisiert ✓"; statusDetail.style.color = '#32d74b'; }
+                else { statusDetail.innerText = `${unsyncedSongs.length} ohne Treffer (später erneut versucht)`; statusDetail.style.color = '#8e8e93'; }
+            }
             _syncRunning = false;
-            return; // fertig – nächster Anstoß kommt bei App-Start oder nach dem nächsten Import
+            return;
         }
 
-        if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = `🔄 Synchronisiere ${unsyncedSongs.length} Songs...`; statusDetail.style.color = '#fa9a00'; }
+        if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = `🔄 Synchronisiere ${todo.length} Songs...`; statusDetail.style.color = '#fa9a00'; }
 
         // GANZEN Rückstand in EINEM Durchlauf abarbeiten: 6 parallele Worker, jeder aktualisiert
         // nur seinen Song gezielt in-place (kein Voll-Rerender der Liste mehr).
@@ -2868,12 +2880,14 @@ async function processBackgroundSync() {
         let idx = 0, syncedNow = 0;
 
         async function syncWorker() {
-            while (idx < unsyncedSongs.length) {
+            while (idx < todo.length) {
                 if (window._importActive) return; // Import hat Vorrang → Durchlauf abbrechen
-                const song = unsyncedSongs[idx++];
+                const song = todo[idx++];
+                _syncAttempted.add(song.id); // gilt als versucht, egal ob Treffer oder nicht
                 const searchTerm = song.title.replace(/[_\-]/g, " ").trim();
                 let patch = null;
                 try {
+                    // 1. iTunes (primär, kostenlos, kein Key)
                     const itunesRes = await fetch(
                         `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`,
                         { signal: _mkTimeout(5000) }
@@ -2881,9 +2895,19 @@ async function processBackgroundSync() {
                     const itunesData = await itunesRes.json();
                     if (itunesData.results?.length > 0) {
                         const track = itunesData.results[0];
-                        patch = { title: track.trackName, artist: track.artistName, cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb') };
+                        patch = { title: track.trackName, artist: track.artistName, album: track.collectionName || "", cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb') };
                     } else {
-                        patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
+                        // 2. Spotify-Fallback (über den Worker), wenn iTunes nichts findet
+                        let sp = null;
+                        try {
+                            const spRes = await fetch(`${API_URL}/spotify-search?q=${encodeURIComponent(searchTerm)}`, { signal: _mkTimeout(6000) });
+                            if (spRes.ok) { const spData = await spRes.json(); sp = spData.result; }
+                        } catch(e) {}
+                        if (sp && sp.cover_data) {
+                            patch = { title: sp.title, artist: sp.artist, album: sp.album || "", cover_data: sp.cover_data };
+                        } else {
+                            patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
+                        }
                     }
                     await fetch(`${API_URL}/songs/${song.id}`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -2891,7 +2915,7 @@ async function processBackgroundSync() {
                         signal: _mkTimeout(15000)
                     });
                     if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, patch);
-                    syncedNow++;
+                    if (patch.cover_data) syncedNow++;
                 } catch(e) {}
                 if (progressText) progressText.innerText = `${alreadySynced + syncedNow} / ${totalSongs}`;
                 if (progressBar) progressBar.style.width = totalSongs > 0 ? `${((alreadySynced + syncedNow) / totalSongs) * 100}%` : '0%';
@@ -2900,8 +2924,8 @@ async function processBackgroundSync() {
         await Promise.all(Array.from({ length: PARALLEL }, syncWorker));
 
         _syncRunning = false;
-        // Kurz durchatmen, dann prüfen ob noch was offen ist (z.B. neu dazugekommene YouTube-Importe).
-        // Endet automatisch, sobald 0 unsynced übrig sind.
+        // Kurz durchatmen, dann nächster Durchlauf (fängt neu importierte Songs). Endet automatisch,
+        // sobald nichts Unversuchtes mehr übrig ist (todo.length === 0 oben).
         setTimeout(processBackgroundSync, 3000);
 
     } catch(err) { _syncRunning = false; setTimeout(processBackgroundSync, 15000); }
