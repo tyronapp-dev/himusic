@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import boto3
@@ -33,7 +34,29 @@ def require_env(key: str) -> str:
     return val
 
 
-def get_video_info(youtube_url: str) -> dict:
+# Mehrere YouTube-Player-Clients in EINEM yt-dlp-Aufruf anbieten. YouTube blockt einzelne
+# Client-Typen wechselnd und unvorhersehbar (mal "web_creator", mal "ios", ...) – ein einzelner
+# fest verdrahteter Client war die Hauptursache für die zuletzt komplett fehlgeschlagenen Importe.
+# yt-dlp probiert bei einer Komma-Liste intern alle durch und nutzt, was tatsächlich antwortet.
+PLAYER_CLIENTS = "ios,android,web_creator,tv,mweb"
+
+
+def _cookies_args(output_dir: str) -> list:
+    cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if not cookies_content:
+        # Kein Fehler, aber im Log sichtbar machen – das war zuletzt der wahrscheinlichste Grund
+        # für Ausfälle (manche Videos verlangen einen angemeldeten Client) und war bisher nur an
+        # der ABWESENHEIT der "Cookies werden verwendet"-Zeile zu erahnen, nicht explizit sichtbar.
+        print("[WARN] Kein YOUTUBE_COOKIES-Secret gesetzt – ohne Anmeldung blockt YouTube manche Videos/Clients.", flush=True)
+        return []
+    cookies_path = os.path.join(output_dir, "cookies.txt")
+    with open(cookies_path, "w") as f:
+        f.write(cookies_content)
+    print("[INFO] YouTube-Cookies werden verwendet.", flush=True)
+    return ["--cookies", cookies_path]
+
+
+def get_video_info(youtube_url: str, cookies_args: list) -> dict:
     """Holt Titel und Dauer ohne Download."""
     cmd = [
         "yt-dlp",
@@ -41,10 +64,11 @@ def get_video_info(youtube_url: str) -> dict:
         "--no-download",
         "--quiet",
         "--no-warnings",
-        "--extractor-args", "youtube:player_client=web_creator",
+        "--extractor-args", f"youtube:player_client={PLAYER_CLIENTS}",
+        *cookies_args,
         youtube_url,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     if result.returncode != 0 or not result.stdout.strip():
         print(f"[WARN] Konnte Metadaten nicht abrufen: {result.stderr.strip()}", flush=True)
         return {"title": "YouTube Import", "duration": 0}
@@ -59,32 +83,14 @@ def get_video_info(youtube_url: str) -> dict:
     return {"title": title, "duration": duration}
 
 
-def download_audio(youtube_url: str, output_dir: str) -> str:
-    """
-    Lädt beste Audio-Spur als .m4a herunter.
-    Nutzt iOS-Client – funktioniert auf CI-Servern ohne Cookies.
-    Gibt den Pfad zur heruntergeladenen Datei zurück.
-    """
-    output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
-
-    # Cookies-Datei aus Umgebungsvariable schreiben (optional)
-    cookies_args = []
-    cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
-    if cookies_content:
-        cookies_path = os.path.join(output_dir, "cookies.txt")
-        with open(cookies_path, "w") as f:
-            f.write(cookies_content)
-        cookies_args = ["--cookies", cookies_path]
-        print("[INFO] YouTube-Cookies werden verwendet.", flush=True)
-
+def _run_ytdlp_download(youtube_url: str, output_template: str, cookies_args: list) -> subprocess.CompletedProcess:
     cmd = [
         "yt-dlp",
         "--no-playlist",
         "--extract-audio",
         "--audio-format", "m4a",
         "--audio-quality", "0",
-        # web_creator Client – funktioniert oft ohne Cookies auf CI-Servern
-        "--extractor-args", "youtube:player_client=web_creator",
+        "--extractor-args", f"youtube:player_client={PLAYER_CLIENTS}",
         "--output", output_template,
         "--no-progress",
         "--quiet",
@@ -92,12 +98,31 @@ def download_audio(youtube_url: str, output_dir: str) -> str:
         *cookies_args,
         youtube_url,
     ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=420)
 
-    print("[INFO] yt-dlp startet Download...", flush=True)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+def download_audio(youtube_url: str, output_dir: str, cookies_args: list) -> str:
+    """
+    Lädt beste Audio-Spur als .m4a herunter. Probiert mehrere YouTube-Player-Clients
+    (siehe PLAYER_CLIENTS) und nutzt Cookies, falls konfiguriert.
+    Ein Fehlversuch wird einmal automatisch wiederholt (kurzer Backoff), da YouTube
+    gelegentlich nur kurzzeitig/transient blockt statt dauerhaft.
+    Gibt den Pfad zur heruntergeladenen Datei zurück.
+    """
+    output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
+
+    result = None
+    for attempt in range(1, 3):
+        print(f"[INFO] yt-dlp startet Download (Versuch {attempt}/2, Clients: {PLAYER_CLIENTS})...", flush=True)
+        result = _run_ytdlp_download(youtube_url, output_template, cookies_args)
+        if result.returncode == 0:
+            break
+        print(f"[WARN] Versuch {attempt} fehlgeschlagen:\nSTDOUT: {result.stdout.strip()}\nSTDERR: {result.stderr.strip()}", flush=True)
+        if attempt < 2:
+            time.sleep(8)
 
     if result.returncode != 0:
-        print(f"[ERROR] yt-dlp fehlgeschlagen:\n{result.stderr}", flush=True)
+        print(f"[ERROR] yt-dlp endgültig fehlgeschlagen nach 2 Versuchen.\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}", flush=True)
         sys.exit(1)
 
     # Datei finden
@@ -234,15 +259,18 @@ def main() -> None:
 
     print(f"[INFO] Job {job_id} gestartet: {youtube_url}", flush=True)
 
-    # 1. Metadaten abrufen
-    info = get_video_info(youtube_url)
-    title    = info["title"]
-    duration = info["duration"]
-    print(f"[INFO] Titel: {title} | Dauer: {duration}s", flush=True)
-
-    # 2. Audio herunterladen
     with tempfile.TemporaryDirectory() as tmpdir:
-        audio_path = download_audio(youtube_url, tmpdir)
+        # Cookies EINMAL schreiben, für Metadaten- und Download-Aufruf gemeinsam nutzen
+        cookies_args = _cookies_args(tmpdir)
+
+        # 1. Metadaten abrufen
+        info = get_video_info(youtube_url, cookies_args)
+        title    = info["title"]
+        duration = info["duration"]
+        print(f"[INFO] Titel: {title} | Dauer: {duration}s", flush=True)
+
+        # 2. Audio herunterladen
+        audio_path = download_audio(youtube_url, tmpdir, cookies_args)
 
         # 3. R2-Schlüssel aufbauen (job_id sorgt für Eindeutigkeit)
         safe_job = re.sub(r"[^a-zA-Z0-9\-]", "", job_id)[:36]
