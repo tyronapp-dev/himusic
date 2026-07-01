@@ -2688,56 +2688,31 @@ if (oldFileInput) {
 
         if (uploadLabel) uploadLabel.style.opacity = '0.5';
         window._importActive = true; // Hintergrund-Sync pausieren, damit er keine Bandbreite/Verbindungen klaut
-        setStatus(`⏳ Lade Bibliothek...`);
 
-        // 1. Duplikat-Set aus DB laden (einmalig, nur Titel + Größe nötig)
-        let existingSongs = [];
-        try {
-            const dbRes = await fetch(`${API_URL}/songs`, { signal: _mkTimeout(20000) });
-            if (dbRes.ok) existingSongs = await dbRes.json();
-        } catch(err) {}
-
-        const dupKey = (title, size) => `${(title || '').toLowerCase().trim()}::${size}`;
-        const existingKeys = new Set(existingSongs.map(s => dupKey(s.title, s.file_size)));
-        const existingTitleCounts = {};
-        existingSongs.forEach(s => {
-            const t = (s.title || '').toLowerCase().trim();
-            existingTitleCounts[t] = (existingTitleCounts[t] || 0) + 1;
-        });
-
-        // 2. SOFORT filtern – nur Metadaten (Dateiname + Größe), KEIN Lesen der Dateien.
-        //    Das Vorab-Lesen war der Grund für "es passiert nichts": auf iOS lädt schon ein
-        //    Teil-Lesen einer iCloud-Datei die GANZE Datei herunter. Jetzt wird jede Datei
-        //    genau einmal angefasst – direkt beim Upload. Duplikat = gleicher Name + Größe.
+        // KEIN Vorab-Scan gegen die DB mehr → der Upload startet sofort.
+        // Der einzige Dublettenschutz ist der exakte Dateiname; er wird SERVERSEITIG direkt
+        // vor dem DB-Insert geprüft (POST /songs meldet {duplicate:true} zurück).
+        // Doppelte Dateinamen innerhalb DIESER Auswahl fangen wir sofort clientseitig ab (kostenlos).
         const seenThisBatch = new Set();
         const toUpload = [];
         for (const file of files) {
-            let rawTitle = file.name.replace(/\.[^/.]+$/, "").trim();
-            const key = dupKey(rawTitle, file.size);
-            if (existingKeys.has(key) || seenThisBatch.has(key)) continue; // echtes Duplikat → überspringen
+            const title = file.name.replace(/\.[^/.]+$/, "").trim();
+            const key = title.toLowerCase();
+            if (!key || seenThisBatch.has(key)) continue;
             seenThisBatch.add(key);
-
-            const titleLower = rawTitle.toLowerCase().trim();
-            if (existingTitleCounts[titleLower]) {
-                existingTitleCounts[titleLower]++;
-                rawTitle = `${rawTitle} (${existingTitleCounts[titleLower]})`;
-            } else {
-                existingTitleCounts[titleLower] = 1;
-            }
-            toUpload.push({ file, title: rawTitle });
+            toUpload.push({ file, title });
         }
 
-        const skipped = files.length - toUpload.length;
         if (toUpload.length === 0) {
-            setStatus(`✅ Alle ${files.length} Songs bereits vorhanden – nichts zu importieren.`, '#32d74b');
+            setStatus(`Keine gültigen Dateien ausgewählt.`, '#ff9f0a');
             if (uploadLabel) uploadLabel.style.opacity = '1';
             window._importActive = false;
             return;
         }
 
-        // 3. Upload startet SOFORT (kein Vorab-Scan mehr). Worker-Pool + Durchsatz + Restzeit-Anzeige.
+        // Upload startet SOFORT. Worker-Pool + Durchsatz + Restzeit-Anzeige.
         const CONCURRENT = 5;
-        let done = 0, failed = 0, uploadedBytes = 0;
+        let done = 0, dupes = 0, failed = 0, uploadedBytes = 0;
         const totalBytes = toUpload.reduce((a, x) => a + x.file.size, 0);
         const t0 = Date.now();
         const fmtMB = (b) => (b / 1048576).toFixed(0);
@@ -2749,7 +2724,8 @@ if (oldFileInput) {
                 const secs = Math.round((totalBytes - uploadedBytes) / 1048576 / mbps);
                 eta = ` · noch ~${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
             }
-            setStatus(`⬆️ ${done}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${skipped > 0 ? ` · ${skipped} übersprungen` : ''}`);
+            const processed = done + dupes;
+            setStatus(`⬆️ ${processed}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${dupes > 0 ? ` · ${dupes} Duplikate` : ''}`);
         }
         updateProgress();
 
@@ -2775,7 +2751,9 @@ if (oldFileInput) {
                     signal: _mkTimeout(30000)
                 });
                 if (!songRes.ok) throw new Error('song create failed');
-                done++; uploadedBytes += file.size;
+                const result = await songRes.json().catch(() => ({}));
+                if (result && result.duplicate) dupes++; else done++;
+                uploadedBytes += file.size;
             } catch(err) {
                 if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
                 failed++;
@@ -2795,7 +2773,7 @@ if (oldFileInput) {
 
         window._importActive = false;
         if (uploadLabel) uploadLabel.style.opacity = '1';
-        const summary = `✅ ${done} importiert${skipped > 0 ? `, ${skipped} übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (einfach erneut auswählen)` : ''}`;
+        const summary = `✅ ${done} importiert${dupes > 0 ? `, ${dupes} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (einfach erneut auswählen)` : ''}`;
         setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
 
         // Post-Import: Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund

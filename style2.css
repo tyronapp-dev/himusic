@@ -7,8 +7,12 @@
     --text-secondary: rgba(255,255,255,0.55);
     --text-tertiary:  rgba(255,255,255,0.28);
     --glass-bg:      rgba(255,255,255,0.09);
-    --glass-heavy:   rgba(18,18,22,0.78);
-    --glass-border:  rgba(255,255,255,0.16);
+    --glass-heavy:   rgba(18,18,22,0.72);
+    --glass-border:  rgba(255,255,255,0.18);
+    /* Lichtverlauf von oben – gibt den Glasflächen den "von oben beleuchteten" Apple-Look */
+    --glass-sheen:   linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.04) 34%, rgba(255,255,255,0) 100%);
+    /* Verstärkter Frosted-Glass-Filter zum Wiederverwenden */
+    --glass-blur:    blur(64px) saturate(240%) brightness(1.08);
     --accent:        #fc3c44;
     --accent-soft:   rgba(252,60,68,0.16);
     --danger:        #ff3b30;
@@ -61,9 +65,9 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 
 /* ─── Glass Utility ─────────────────────────────────────────────────────────── */
 .glass-panel {
-    background: var(--glass-heavy);
-    backdrop-filter: blur(60px) saturate(220%);
-    -webkit-backdrop-filter: blur(60px) saturate(220%);
+    background: var(--glass-sheen), var(--glass-heavy);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border-top: 0.5px solid var(--glass-border);
     position: fixed;
     z-index: 10;
@@ -107,11 +111,11 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     height: var(--nav-h);
     padding-bottom: 0;
     border-radius: 18px;
-    border: 0.5px solid rgba(255,255,255,0.2);
-    background: rgba(24,24,28,0.72);
-    backdrop-filter: blur(64px) saturate(240%);
-    -webkit-backdrop-filter: blur(64px) saturate(240%);
-    box-shadow: 0 8px 32px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.12) inset;
+    border: 0.5px solid rgba(255,255,255,0.22);
+    background: var(--glass-sheen), rgba(24,24,28,0.6);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.18) inset;
     display: flex;
     justify-content: space-around;
     align-items: center;
@@ -145,11 +149,11 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     width: auto;
     height: var(--mini-h);
     border-radius: 14px;
-    background: rgba(30,30,35,0.7);
-    backdrop-filter: blur(64px) saturate(240%);
-    -webkit-backdrop-filter: blur(64px) saturate(240%);
-    border: 0.5px solid rgba(255,255,255,0.2);
-    box-shadow: 0 10px 40px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.12) inset;
+    background: var(--glass-sheen), rgba(30,30,35,0.58);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 0.5px solid rgba(255,255,255,0.22);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.18) inset;
     display: none;
     flex-direction: row;
     align-items: center;
@@ -214,9 +218,9 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 /* ─── Fullscreen Player ─────────────────────────────────────────────────────── */
 #fullscreen-player {
     position: fixed; inset: 0;
-    background: rgba(0,0,0,0.1);
-    backdrop-filter: blur(75px) saturate(200%);
-    -webkit-backdrop-filter: blur(75px) saturate(200%);
+    background: rgba(0,0,0,0.08);
+    backdrop-filter: blur(80px) saturate(220%) brightness(1.05);
+    -webkit-backdrop-filter: blur(80px) saturate(220%) brightness(1.05);
     z-index: 100;
     transform: translateY(100%);
     transition: transform 0.5s var(--spring);
@@ -381,8 +385,10 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 }
 .mix-btn {
     flex: 1;
-    background: rgba(255,255,255,0.1);
-    border: 0.5px solid rgba(255,255,255,0.12);
+    background: var(--glass-sheen), rgba(255,255,255,0.09);
+    backdrop-filter: blur(30px) saturate(200%);
+    -webkit-backdrop-filter: blur(30px) saturate(200%);
+    border: 0.5px solid rgba(255,255,255,0.16);
     border-radius: 12px;
     padding: 12px 15px;
     color: var(--text-primary);
@@ -392,8 +398,9 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     align-items: center; justify-content: center; gap: 7px;
     transition: transform 0.15s var(--spring), background 0.2s;
     min-height: 62px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.1) inset;
 }
-.mix-btn:active { transform: scale(0.94); background: rgba(255,255,255,0.18); }
+.mix-btn:active { transform: scale(0.93); background: var(--glass-sheen), rgba(255,255,255,0.2); }
 
 /* ─── Search ────────────────────────────────────────────────────────────────── */
 .search-container { margin-top: 16px; width: 100%; }
@@ -438,14 +445,14 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 }
 
 .sheet-content {
-    background: rgba(36,36,42,0.8);
-    backdrop-filter: blur(48px) saturate(200%);
-    -webkit-backdrop-filter: blur(48px) saturate(200%);
+    background: var(--glass-sheen), rgba(36,36,42,0.62);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border-radius: 16px;
     margin-bottom: 10px;
     overflow: hidden;
-    border: 0.5px solid rgba(255,255,255,0.16);
-    box-shadow: 0 1px 0 rgba(255,255,255,0.1) inset;
+    border: 0.5px solid rgba(255,255,255,0.2);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.16) inset, 0 12px 40px rgba(0,0,0,0.5);
 }
 .sheet-btn {
     width: 100%; background: transparent; border: none;
@@ -461,15 +468,17 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 .sheet-btn.text-danger { color: var(--danger); }
 
 .cancel-btn {
-    background: rgba(36,36,42,0.8) !important;
-    backdrop-filter: blur(48px) saturate(200%);
-    -webkit-backdrop-filter: blur(48px) saturate(200%);
+    background: var(--glass-sheen), rgba(36,36,42,0.62) !important;
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border-radius: 16px !important;
     justify-content: center !important;
     font-weight: 600 !important;
-    border: 0.5px solid rgba(255,255,255,0.16) !important;
-    border-bottom: 0.5px solid rgba(255,255,255,0.16) !important;
+    border: 0.5px solid rgba(255,255,255,0.2) !important;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.16) inset;
+    transition: transform 0.15s var(--spring), background 0.2s;
 }
+.cancel-btn:active { transform: scale(0.97); }
 
 /* ─── Song List & Grid ──────────────────────────────────────────────────────── */
 .song-container { margin-top: 16px; padding-bottom: 8px; }
@@ -583,13 +592,13 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 
 /* ─── Alert (iOS Dialog) ────────────────────────────────────────────────────── */
 .ios-alert {
-    background: rgba(40,40,46,0.82);
-    backdrop-filter: blur(50px) saturate(200%);
-    -webkit-backdrop-filter: blur(50px) saturate(200%);
+    background: var(--glass-sheen), rgba(40,40,46,0.64);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border-radius: 16px; width: 100%; max-width: 300px;
     text-align: center; overflow: hidden;
-    border: 0.5px solid rgba(255,255,255,0.18);
-    box-shadow: 0 1px 0 rgba(255,255,255,0.1) inset;
+    border: 0.5px solid rgba(255,255,255,0.2);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.16) inset, 0 20px 50px rgba(0,0,0,0.55);
 }
 .ios-alert h3 { font-size: 17px; font-weight: 600; margin: 22px 0 6px 0; }
 .ios-alert p { font-size: 13px; color: var(--text-secondary); padding: 0 16px 22px 16px; }
@@ -610,12 +619,12 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     letter-spacing: 0.8px; padding-left: 6px;
 }
 .settings-list {
-    background: rgba(255,255,255,0.08);
-    backdrop-filter: blur(40px) saturate(200%);
-    -webkit-backdrop-filter: blur(40px) saturate(200%);
-    border: 0.5px solid rgba(255,255,255,0.16);
+    background: var(--glass-sheen), rgba(255,255,255,0.07);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 0.5px solid rgba(255,255,255,0.18);
     border-radius: 14px; padding: 0 16px; overflow: hidden;
-    box-shadow: 0 1px 0 rgba(255,255,255,0.08) inset;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.12) inset;
 }
 .settings-row {
     display: flex; justify-content: space-between; align-items: center;
@@ -654,17 +663,18 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 /* ─── Secondary / Action Buttons ────────────────────────────────────────────── */
 .action-button-container { display: flex; justify-content: center; margin: 16px 0 20px 0; }
 .secondary-btn {
-    background: rgba(255,255,255,0.1);
-    backdrop-filter: blur(30px) saturate(200%);
-    -webkit-backdrop-filter: blur(30px) saturate(200%);
+    background: var(--glass-sheen), rgba(255,255,255,0.1);
+    backdrop-filter: blur(34px) saturate(220%);
+    -webkit-backdrop-filter: blur(34px) saturate(220%);
     color: var(--text-primary);
-    border: 0.5px solid rgba(255,255,255,0.18);
+    border: 0.5px solid rgba(255,255,255,0.2);
     padding: 13px 26px; border-radius: 14px;
     font-size: 16px; font-weight: 600; cursor: pointer;
-    transition: transform 0.12s, background 0.2s;
+    transition: transform 0.15s var(--spring), background 0.2s;
     font-family: inherit;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.12) inset;
 }
-.secondary-btn:active { transform: scale(0.95); background: rgba(255,255,255,0.16); }
+.secondary-btn:active { transform: scale(0.94); background: var(--glass-sheen), rgba(255,255,255,0.18); }
 
 /* ─── Home: Station / Card Scroll ───────────────────────────────────────────── */
 .stations-scroll-container {
@@ -776,23 +786,25 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 
 /* ─── Now Playing Card (Home) ───────────────────────────────────────────────── */
 #home-now-playing-card {
-    background: rgba(255,255,255,0.09) !important;
-    backdrop-filter: blur(48px) saturate(220%) !important;
-    -webkit-backdrop-filter: blur(48px) saturate(220%) !important;
-    border: 0.5px solid rgba(255,255,255,0.18) !important;
-    box-shadow: 0 8px 28px rgba(0,0,0,0.3), 0 1px 0 rgba(255,255,255,0.1) inset !important;
+    background: var(--glass-sheen), rgba(255,255,255,0.08) !important;
+    backdrop-filter: var(--glass-blur) !important;
+    -webkit-backdrop-filter: var(--glass-blur) !important;
+    border: 0.5px solid rgba(255,255,255,0.2) !important;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.3), 0 1px 0 rgba(255,255,255,0.16) inset !important;
+    transition: transform 0.18s var(--spring) !important;
 }
+#home-now-playing-card:active { transform: scale(0.98) !important; }
 
 /* ─── Setting Cards ─────────────────────────────────────────────────────────── */
 .setting-card {
-    background: rgba(255,255,255,0.08) !important;
-    backdrop-filter: blur(40px) saturate(200%) !important;
-    -webkit-backdrop-filter: blur(40px) saturate(200%) !important;
-    border: 0.5px solid rgba(255,255,255,0.16) !important;
+    background: var(--glass-sheen), rgba(255,255,255,0.07) !important;
+    backdrop-filter: var(--glass-blur) !important;
+    -webkit-backdrop-filter: var(--glass-blur) !important;
+    border: 0.5px solid rgba(255,255,255,0.18) !important;
     border-radius: 16px !important;
     padding: 20px !important;
     margin-top: 16px !important;
-    box-shadow: 0 1px 0 rgba(255,255,255,0.08) inset !important;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.12) inset !important;
 }
 
 /* ─── Offline Button ────────────────────────────────────────────────────────── */
@@ -806,3 +818,54 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 
 /* ─── Scroll track colors ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar { display: none; }
+
+/* ─── Reaktives Druck-Feedback (überall, Glassmorphism-Stil) ─────────────────── */
+/* Jedes drückbare Element federt beim Antippen leicht ein und wieder zurück. */
+.nav-btn, .sheet-btn, .seg-btn, .vibe-pill, .station-card,
+.list-view .song-item, .grid-view .song-item, .settings-row,
+.sel-btn, .cover-play-btn, .drag-handle, .header-action-btn,
+.track-options-btn, .icon-btn, .sheet-handle {
+    transition: transform 0.15s var(--spring), background 0.2s var(--ease), opacity 0.2s;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.nav-btn:active            { transform: scale(0.9); }
+.seg-btn:active            { transform: scale(0.95); }
+.vibe-pill:active          { transform: scale(0.92); }
+.station-card:active       { transform: scale(0.95); }
+.sel-btn:active            { transform: scale(0.9); opacity: 0.6; }
+.header-action-btn:active  { transform: scale(0.88); }
+
+/* Listen-/Grid-Zeilen: kurzes Glas-Aufleuchten + leichtes Einsinken */
+.list-view .song-item:active {
+    background: rgba(255,255,255,0.09);
+    border-radius: 10px;
+    transform: scale(0.985);
+}
+.grid-view .song-item:active { transform: scale(0.95); opacity: 0.75; }
+
+/* Settings-Zeilen: Glas-Aufleuchten beim Tippen */
+.settings-row { border-radius: 8px; }
+.settings-row:active { background: rgba(255,255,255,0.07); }
+
+/* Sheet-Buttons: kräftigeres Glas-Feedback */
+.sheet-btn:active { background: rgba(255,255,255,0.14); }
+
+/* ─── Segmented Control – glasiger + reaktiv ────────────────────────────────── */
+.segmented-control {
+    background: var(--glass-sheen), rgba(255,255,255,0.08);
+    backdrop-filter: blur(24px) saturate(200%);
+    -webkit-backdrop-filter: blur(24px) saturate(200%);
+    border: 0.5px solid rgba(255,255,255,0.12);
+}
+.seg-btn.active {
+    background: var(--glass-sheen), rgba(255,255,255,0.24);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3), 0 1px 0 rgba(255,255,255,0.2) inset;
+}
+
+/* ─── Vibe-Pills – glasiger ─────────────────────────────────────────────────── */
+.vibe-pill {
+    background: var(--glass-sheen), rgba(255,255,255,0.07);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
