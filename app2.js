@@ -2666,18 +2666,10 @@ window.addEventListener('online', async () => {
 });
 
 // ==========================================
-// 2. SMART BULK IMPORT (content-hash dedup, safe concurrency, retry, decoupled post-processing)
+// 2. SMART BULK IMPORT (Metadaten-Dedup ohne Datei-Lesen, Pipeline-Upload, Durchsatz/ETA)
 // ==========================================
-async function _fingerprint(file) {
-    // Schnelle Signatur für Duplikat-Erkennung: Dateigröße + SHA-256 der ersten 128 KB.
-    // Liest bewusst NICHT die ganze Datei – genau das machte den Import bei vielen Songs
-    // langsam (jede Datei wurde komplett in den Speicher gelesen, oft mehrere GB gesamt).
-    // 128 KB genügen, um wirklich identische Dateien zuverlässig zu erkennen.
-    const head = await file.slice(0, 131072).arrayBuffer();
-    const digest = await crypto.subtle.digest('SHA-256', head);
-    const hex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
-    return `${file.size}-${hex}`;
-}
+// AbortSignal.timeout gibt es erst ab Safari 16 – sicher kapseln
+function _mkTimeout(ms) { try { return AbortSignal.timeout(ms); } catch(e) { return undefined; } }
 
 const oldFileInput = document.getElementById('native-file-upload');
 if (oldFileInput) {
@@ -2695,59 +2687,35 @@ if (oldFileInput) {
         };
 
         if (uploadLabel) uploadLabel.style.opacity = '0.5';
-        setStatus(`⏳ Lade Datenbank...`);
+        window._importActive = true; // Hintergrund-Sync pausieren, damit er keine Bandbreite/Verbindungen klaut
+        setStatus(`⏳ Lade Bibliothek...`);
 
-        // 1. DB laden: vorhandene content_hash-Werte (falls Backend sie liefert) + Titel/Größe als Fallback
+        // 1. Duplikat-Set aus DB laden (einmalig, nur Titel + Größe nötig)
         let existingSongs = [];
         try {
-            const dbRes = await fetch(`${API_URL}/songs`);
+            const dbRes = await fetch(`${API_URL}/songs`, { signal: _mkTimeout(20000) });
             if (dbRes.ok) existingSongs = await dbRes.json();
         } catch(err) {}
 
-        const dupKey = (title, size) => `${title.toLowerCase().trim()}::${size}`;
+        const dupKey = (title, size) => `${(title || '').toLowerCase().trim()}::${size}`;
         const existingKeys = new Set(existingSongs.map(s => dupKey(s.title, s.file_size)));
-        const existingHashes = new Set(existingSongs.filter(s => s.content_hash).map(s => s.content_hash));
         const existingTitleCounts = {};
         existingSongs.forEach(s => {
-            const t = s.title.toLowerCase().trim();
+            const t = (s.title || '').toLowerCase().trim();
             existingTitleCounts[t] = (existingTitleCounts[t] || 0) + 1;
         });
 
-        // 2. Phase 1: schnelle Signaturen berechnen (erkennt echte Duplikate auch INNERHALB
-        //    der gleichen Auswahl, nicht nur gegen die DB — das war der Bug bei 200-400 Songs).
-        //    Dank 128-KB-Signatur statt Voll-Hash geht das jetzt in Sekunden.
-        const HASH_CONCURRENT = 12;
-        const hashed = new Array(files.length);
-        let hashedCount = 0;
-        let hashIdx = 0;
-        async function hashWorker() {
-            while (hashIdx < files.length) {
-                const myIdx = hashIdx++;
-                const file = files[myIdx];
-                try {
-                    hashed[myIdx] = { file, hash: await _fingerprint(file) };
-                } catch(err) {
-                    hashed[myIdx] = { file, hash: null }; // Signatur fehlgeschlagen → wird importiert, nur nicht dedupliziert
-                }
-                hashedCount++;
-                if (hashedCount % 5 === 0 || hashedCount === files.length) setStatus(`🔢 Prüfe Dateien: ${hashedCount} / ${files.length}...`);
-            }
-        }
-        await Promise.all(Array.from({ length: HASH_CONCURRENT }, hashWorker));
-
-        // 3. Dateien filtern: erst gegen DB-Hashes, dann gegen bereits in dieser Auswahl gesehene Hashes
-        const seenHashesThisBatch = new Set();
+        // 2. SOFORT filtern – nur Metadaten (Dateiname + Größe), KEIN Lesen der Dateien.
+        //    Das Vorab-Lesen war der Grund für "es passiert nichts": auf iOS lädt schon ein
+        //    Teil-Lesen einer iCloud-Datei die GANZE Datei herunter. Jetzt wird jede Datei
+        //    genau einmal angefasst – direkt beim Upload. Duplikat = gleicher Name + Größe.
+        const seenThisBatch = new Set();
         const toUpload = [];
-        for (const { file, hash } of hashed) {
-            if (hash) {
-                if (existingHashes.has(hash) || seenHashesThisBatch.has(hash)) continue; // echtes Duplikat → überspringen
-                seenHashesThisBatch.add(hash);
-            }
-
+        for (const file of files) {
             let rawTitle = file.name.replace(/\.[^/.]+$/, "").trim();
-
-            // Fallback für Songs ohne Hash-Match in der DB (alte Einträge ohne content_hash): Titel+Größe
-            if (!hash && existingKeys.has(dupKey(rawTitle, file.size))) continue;
+            const key = dupKey(rawTitle, file.size);
+            if (existingKeys.has(key) || seenThisBatch.has(key)) continue; // echtes Duplikat → überspringen
+            seenThisBatch.add(key);
 
             const titleLower = rawTitle.toLowerCase().trim();
             if (existingTitleCounts[titleLower]) {
@@ -2756,29 +2724,43 @@ if (oldFileInput) {
             } else {
                 existingTitleCounts[titleLower] = 1;
             }
-            toUpload.push({ file, title: rawTitle, hash });
+            toUpload.push({ file, title: rawTitle });
         }
 
         const skipped = files.length - toUpload.length;
         if (toUpload.length === 0) {
             setStatus(`✅ Alle ${files.length} Songs bereits vorhanden – nichts zu importieren.`, '#32d74b');
             if (uploadLabel) uploadLabel.style.opacity = '1';
+            window._importActive = false;
             return;
         }
 
-        setStatus(`⬆️ 0 / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} Duplikate übersprungen)` : ''}...`);
+        // 3. Upload startet SOFORT (kein Vorab-Scan mehr). Worker-Pool + Durchsatz + Restzeit-Anzeige.
+        const CONCURRENT = 5;
+        let done = 0, failed = 0, uploadedBytes = 0;
+        const totalBytes = toUpload.reduce((a, x) => a + x.file.size, 0);
+        const t0 = Date.now();
+        const fmtMB = (b) => (b / 1048576).toFixed(0);
+        function updateProgress() {
+            const el = (Date.now() - t0) / 1000;
+            const mbps = el > 0 ? (uploadedBytes / 1048576 / el) : 0;
+            let eta = '';
+            if (mbps > 0.05 && uploadedBytes > 0) {
+                const secs = Math.round((totalBytes - uploadedBytes) / 1048576 / mbps);
+                eta = ` · noch ~${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
+            }
+            setStatus(`⬆️ ${done}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${skipped > 0 ? ` · ${skipped} übersprungen` : ''}`);
+        }
+        updateProgress();
 
-        // 4. Phase 2: Parallel-Upload mit Echtzeit-Fortschritt + 1 Retry bei Netzwerkfehlern
-        const CONCURRENT = 8;
-        let done = 0, failed = 0;
-
-        async function uploadOne(file, title, hash, attempt = 1) {
+        async function uploadOne(file, title, attempt = 1) {
             const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
             try {
                 const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': file.type || 'audio/mpeg' },
-                    body: file
+                    body: file,
+                    signal: _mkTimeout(180000) // fängt hängende Verbindungen ab, damit der Pool nie festfriert
                 });
                 if (!uploadRes.ok) throw new Error('upload failed');
                 const uploadData = await uploadRes.json();
@@ -2788,38 +2770,37 @@ if (oldFileInput) {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         title, artist: "Unbekannt", cover_data: "",
-                        file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [],
-                        content_hash: hash || undefined
-                    })
+                        file_url: uploadData.url, file_size: file.size, duration: 0, vibes: []
+                    }),
+                    signal: _mkTimeout(30000)
                 });
                 if (!songRes.ok) throw new Error('song create failed');
-                done++;
+                done++; uploadedBytes += file.size;
             } catch(err) {
-                if (attempt < 2) { await uploadOne(file, title, hash, attempt + 1); return; }
+                if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
                 failed++;
             }
-            setStatus(`⬆️ ${done} / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} übersprungen)` : ''}...`);
+            updateProgress();
         }
 
-        // Worker-Pool: hält immer CONCURRENT Uploads gleichzeitig aktiv. Vorher wartete jeder
-        // Batch auf seine langsamste Datei, bevor der nächste startete (Head-of-Line-Blocking)
-        // → dieser Pool nutzt die Bandbreite durchgehend aus.
+        // Worker-Pool: hält immer CONCURRENT Uploads gleichzeitig aktiv, ohne Head-of-Line-Blocking.
         let uploadIdx = 0;
         async function uploadWorker() {
             while (uploadIdx < toUpload.length) {
-                const { file, title, hash } = toUpload[uploadIdx++];
-                await uploadOne(file, title, hash);
+                const { file, title } = toUpload[uploadIdx++];
+                await uploadOne(file, title);
             }
         }
         await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
 
+        window._importActive = false;
         if (uploadLabel) uploadLabel.style.opacity = '1';
-        const summary = `✅ ${done} importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} Fehler` : ''}`;
-        setStatus(summary, done > 0 ? '#32d74b' : '#ff3b30');
+        const summary = `✅ ${done} importiert${skipped > 0 ? `, ${skipped} übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (einfach erneut auswählen)` : ''}`;
+        setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
 
-        // 5. Post-Import-Logik (Cover/Artist-Sync) läuft komplett entkoppelt im Hintergrund
+        // Post-Import: Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
         if (window.fetchSongsForPage) await window.fetchSongsForPage(true);
-        if (done > 0) setTimeout(processBackgroundSync, 1000);
+        if (done > 0) setTimeout(processBackgroundSync, 1500);
     });
 }
 
@@ -2830,6 +2811,9 @@ let _syncRunning = false;
 
 async function processBackgroundSync() {
     if (_syncRunning) return;
+    // Während eines laufenden Imports komplett pausieren – sonst konkurriert der Sync
+    // (ständige GET /songs + iTunes-Abfragen) mit den Uploads um Bandbreite/Verbindungen.
+    if (window._importActive) { setTimeout(processBackgroundSync, 4000); return; }
     _syncRunning = true;
 
     const progressText = document.getElementById('sync-progress-text');
