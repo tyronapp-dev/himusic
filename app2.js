@@ -2887,24 +2887,24 @@ async function processBackgroundSync() {
                 const searchTerm = song.title.replace(/[_\-]/g, " ").trim();
                 let patch = null;
                 try {
-                    // 1. iTunes (primär, kostenlos, kein Key)
-                    const itunesRes = await fetch(
-                        `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`,
-                        { signal: _mkTimeout(5000) }
-                    );
-                    const itunesData = await itunesRes.json();
-                    if (itunesData.results?.length > 0) {
-                        const track = itunesData.results[0];
-                        patch = { title: track.trackName, artist: track.artistName, album: track.collectionName || "", cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb') };
+                    // 1. Spotify (primär, über den Worker – braucht die SPOTIFY_*-Secrets)
+                    let sp = null;
+                    try {
+                        const spRes = await fetch(`${API_URL}/spotify-search?q=${encodeURIComponent(searchTerm)}`, { signal: _mkTimeout(6000) });
+                        if (spRes.ok) { const spData = await spRes.json(); sp = spData.result; }
+                    } catch(e) {}
+                    if (sp && sp.cover_data) {
+                        patch = { title: sp.title, artist: sp.artist, album: sp.album || "", cover_data: sp.cover_data };
                     } else {
-                        // 2. Spotify-Fallback (über den Worker), wenn iTunes nichts findet
-                        let sp = null;
-                        try {
-                            const spRes = await fetch(`${API_URL}/spotify-search?q=${encodeURIComponent(searchTerm)}`, { signal: _mkTimeout(6000) });
-                            if (spRes.ok) { const spData = await spRes.json(); sp = spData.result; }
-                        } catch(e) {}
-                        if (sp && sp.cover_data) {
-                            patch = { title: sp.title, artist: sp.artist, album: sp.album || "", cover_data: sp.cover_data };
+                        // 2. iTunes-Fallback (direkt, kostenlos, kein Key), wenn Spotify nichts findet
+                        const itunesRes = await fetch(
+                            `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`,
+                            { signal: _mkTimeout(5000) }
+                        );
+                        const itunesData = await itunesRes.json();
+                        if (itunesData.results?.length > 0) {
+                            const track = itunesData.results[0];
+                            patch = { title: track.trackName, artist: track.artistName, album: track.collectionName || "", cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb') };
                         } else {
                             patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
                         }
