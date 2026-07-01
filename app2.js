@@ -7,6 +7,11 @@ function _parseVibes(v) {
     return [];
 }
 
+// Kurzer haptischer Tick (Vibration API). Funktioniert nur auf Android-Browsern – iOS Safari/
+// PWAs unterstützen navigator.vibrate() nicht (Apple bietet dafür keine Web-API). Dort greift
+// automatisch nur das visuelle Feedback (Puls-Animation), ganz ohne Fehler oder Crash.
+function _hapticTick(ms = 12) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch(e) {} }
+
 async function apiGetAllSongs() {
   const response = await fetch(`${API_URL}/songs`);
   if (!response.ok) throw new Error('Failed to fetch songs');
@@ -1051,17 +1056,29 @@ let _bgCacheActive = false;
 
         if (playlistSongId) songDiv.dataset.psId = playlistSongId;
 
-        let songStartX = 0; let isSwiping = false;
-        songDiv.addEventListener('touchstart', (e) => { songStartX = e.touches[0].clientX; isSwiping = false; }, {passive: true});
-        songDiv.addEventListener('touchmove', (e) => { if (!songStartX) return; if (Math.abs(songStartX - e.touches[0].clientX) > 20) isSwiping = true; }, {passive: true});
+        let songStartX = 0; let isSwiping = false; let queueArmed = false;
+        songDiv.addEventListener('touchstart', (e) => { songStartX = e.touches[0].clientX; isSwiping = false; queueArmed = false; }, {passive: true});
+        songDiv.addEventListener('touchmove', (e) => {
+            if (!songStartX) return;
+            const diffX = songStartX - e.touches[0].clientX;
+            if (Math.abs(diffX) > 20) isSwiping = true;
+            // Rechts-Swipe (diffX < 0) über der Aktions-Schwelle: genau JETZT vibrieren, wie bei
+            // Spotify – nicht erst beim Loslassen. Zieht der Finger wieder zurück, wird scharf
+            // gestellt für einen erneuten Tick, falls die Schwelle nochmal überschritten wird.
+            if (diffX < -60 && !queueArmed) { queueArmed = true; _hapticTick(); songDiv.classList.add('song-item-armed'); }
+            else if (diffX >= -60 && queueArmed) { queueArmed = false; songDiv.classList.remove('song-item-armed'); }
+        }, {passive: true});
         songDiv.addEventListener('touchend', (e) => {
+            songDiv.classList.remove('song-item-armed');
             if (!songStartX || !isSwiping) return;
             let diffX = songStartX - e.changedTouches[0].clientX;
             if (Math.abs(diffX) > 60) {
-                if (diffX < 0) { 
+                if (diffX < 0) {
                     playbackQueue.unshift(song); savePlayerState();
-                    const originalBg = songDiv.style.background; songDiv.style.background = 'rgba(250, 35, 59, 0.2)'; setTimeout(() => songDiv.style.background = originalBg, 300);
-                } else { 
+                    songDiv.classList.remove('song-item-added'); void songDiv.offsetWidth; // Reflow: Animation erneut abspielbar machen
+                    songDiv.classList.add('song-item-added');
+                    setTimeout(() => songDiv.classList.remove('song-item-added'), 400);
+                } else {
                     const titleDiv = songDiv.querySelector('.song-title');
                     const vibesText = song.vibes && song.vibes.length > 0 ? _parseVibes(song.vibes).join(' • ') : 'Keine Vibes';
                     if (!titleDiv.dataset.originalTitle) { titleDiv.dataset.originalTitle = titleDiv.innerText; titleDiv.innerHTML = `${titleDiv.dataset.originalTitle} <span style="color: var(--accent); font-size: 11px; margin-left: 8px; font-weight: 500; border: 1px solid var(--accent); padding: 1px 6px; border-radius: 10px;">${vibesText}</span>`; } 
