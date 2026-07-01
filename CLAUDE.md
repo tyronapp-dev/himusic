@@ -58,3 +58,6 @@ The `vibes` column from the API can arrive as a JSON string, a JS array, or null
 
 ### Service Worker update
 Bumping `CACHE_NAME` in `sw.js` triggers cache invalidation on next load. The SW uses `skipWaiting()` + `clients.claim()` so updates apply immediately.
+
+## Git workflow
+The user has authorized automatic `git add` / `git commit` / `git push` to `origin/main` after making requested code changes in this repo, without asking for confirmation each time. Still confirm before destructive/irreversible git operations (force-push, reset --hard, history rewrites, deleting branches).
