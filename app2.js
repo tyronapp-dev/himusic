@@ -2687,32 +2687,16 @@ if (oldFileInput) {
         };
 
         if (uploadLabel) uploadLabel.style.opacity = '0.5';
-        window._importActive = true; // Hintergrund-Sync pausieren, damit er keine Bandbreite/Verbindungen klaut
+        window._importActive = true; // Sync pausieren, damit er den Import nicht stört
 
-        // KEIN Vorab-Scan gegen die DB mehr → der Upload startet sofort.
-        // Der einzige Dublettenschutz ist der exakte Dateiname; er wird SERVERSEITIG direkt
-        // vor dem DB-Insert geprüft (POST /songs meldet {duplicate:true} zurück).
-        // Doppelte Dateinamen innerhalb DIESER Auswahl fangen wir sofort clientseitig ab (kostenlos).
-        const seenThisBatch = new Set();
-        const toUpload = [];
-        for (const file of files) {
-            const title = file.name.replace(/\.[^/.]+$/, "").trim();
-            const key = title.toLowerCase();
-            if (!key || seenThisBatch.has(key)) continue;
-            seenThisBatch.add(key);
-            toUpload.push({ file, title });
-        }
-
-        if (toUpload.length === 0) {
-            setStatus(`Keine gültigen Dateien ausgewählt.`, '#ff9f0a');
-            if (uploadLabel) uploadLabel.style.opacity = '1';
-            window._importActive = false;
-            return;
-        }
+        // KEINE Prüfung, KEINE Logik vorab. Jede ausgewählte Datei wird sofort hochgeladen.
+        // Duplikate werden ERST NACH dem Import serverseitig in der DB bereinigt
+        // (POST /songs/dedupe: pro Dateiname bleibt genau ein Eintrag erhalten, der Rest wird gelöscht).
+        const toUpload = files.map(file => ({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() }));
 
         // Upload startet SOFORT. Worker-Pool + Durchsatz + Restzeit-Anzeige.
         const CONCURRENT = 5;
-        let done = 0, dupes = 0, failed = 0, uploadedBytes = 0;
+        let done = 0, failed = 0, uploadedBytes = 0;
         const totalBytes = toUpload.reduce((a, x) => a + x.file.size, 0);
         const t0 = Date.now();
         const fmtMB = (b) => (b / 1048576).toFixed(0);
@@ -2724,8 +2708,7 @@ if (oldFileInput) {
                 const secs = Math.round((totalBytes - uploadedBytes) / 1048576 / mbps);
                 eta = ` · noch ~${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
             }
-            const processed = done + dupes;
-            setStatus(`⬆️ ${processed}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${dupes > 0 ? ` · ${dupes} Duplikate` : ''}`);
+            setStatus(`⬆️ ${done}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}`);
         }
         updateProgress();
 
@@ -2751,9 +2734,7 @@ if (oldFileInput) {
                     signal: _mkTimeout(30000)
                 });
                 if (!songRes.ok) throw new Error('song create failed');
-                const result = await songRes.json().catch(() => ({}));
-                if (result && result.duplicate) dupes++; else done++;
-                uploadedBytes += file.size;
+                done++; uploadedBytes += file.size;
             } catch(err) {
                 if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
                 failed++;
@@ -2771,12 +2752,22 @@ if (oldFileInput) {
         }
         await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
 
-        window._importActive = false;
+        // Post-Import: JETZT die Duplikate serverseitig in der DB bereinigen (ein Rutsch, eine Anfrage).
+        let removed = 0;
+        if (done > 0) {
+            setStatus(`🧹 Prüfe auf Duplikate...`);
+            try {
+                const dRes = await fetch(`${API_URL}/songs/dedupe`, { method: 'POST', signal: _mkTimeout(120000) });
+                if (dRes.ok) { const d = await dRes.json().catch(() => ({})); removed = d.deleted || 0; }
+            } catch(err) {}
+        }
+
+        window._importActive = false; // erst NACH der Bereinigung wieder freigeben
         if (uploadLabel) uploadLabel.style.opacity = '1';
-        const summary = `✅ ${done} importiert${dupes > 0 ? `, ${dupes} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (einfach erneut auswählen)` : ''}`;
+        const summary = `✅ ${done - removed} importiert${removed > 0 ? `, ${removed} Duplikate entfernt` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (einfach erneut auswählen)` : ''}`;
         setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
 
-        // Post-Import: Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
+        // Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
         if (window.fetchSongsForPage) await window.fetchSongsForPage(true);
         if (done > 0) setTimeout(processBackgroundSync, 1500);
     });
@@ -2789,8 +2780,10 @@ let _syncRunning = false;
 
 async function processBackgroundSync() {
     if (_syncRunning) return;
-    // Während eines laufenden Imports komplett pausieren – sonst konkurriert der Sync
-    // (ständige GET /songs + iTunes-Abfragen) mit den Uploads um Bandbreite/Verbindungen.
+    // Während Import UND anschließender Duplikat-Bereinigung komplett pausieren (window._importActive
+    // bleibt bis nach dem Dedupe true). Sonst würde der Sync Songs anfassen, die gerade gelöscht
+    // werden, oder mit den Uploads um Bandbreite/Verbindungen konkurrieren. Danach läuft er von
+    // selbst weiter (Auto-Reschedule) und synchronisiert alles, was noch offen ist.
     if (window._importActive) { setTimeout(processBackgroundSync, 4000); return; }
     _syncRunning = true;
 
