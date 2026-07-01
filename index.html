@@ -10,10 +10,10 @@
     <title>Himusic Cloud</title>
     
     <link rel="manifest" href="manifest.json">
-    <link rel="apple-touch-icon" href="icon-wave.png">
-    <link rel="apple-touch-icon" sizes="180x180" href="icon-wave.png">
-    <link rel="apple-touch-icon" sizes="192x192" href="icon-wave.png">
-    <link rel="shortcut icon" href="icon-wave.png">
+    <link rel="apple-touch-icon" href="icon-180.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
+    <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
+    <link rel="shortcut icon" href="icon-192.png">
     <link rel="stylesheet" href="style2.css">
 </head>
 <body>
@@ -167,10 +167,6 @@
                 <div class="settings-section">
                     <h3 class="section-title">System & Auto</h3>
                     <div class="settings-list">
-                        <div class="settings-row">
-                            <div class="settings-row-info"><h4>HD Audio & Loudness</h4><p>Maximale Klarheit und volle Lautstärke</p></div>
-                            <label class="ios-toggle"><input type="checkbox" id="setting-hd-audio" checked><span class="toggle-slider"></span></label>
-                        </div>
                         <div class="settings-row" id="btn-carplay" style="cursor: pointer;">
                             <div class="settings-row-info"><h4>Apple CarPlay</h4><p>Auto-Verbindung verwalten</p></div>
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="3" y="8" width="18" height="12" rx="2"></rect><path d="M4 8l2-4h12l2 4"></path><circle cx="7" cy="16" r="1.5" fill="currentColor"></circle><circle cx="17" cy="16" r="1.5" fill="currentColor"></circle></svg>
@@ -291,22 +287,22 @@
                 <div class="time-labels"><span class="time-current">0:00</span><span class="time-total">-0:00</span></div>
             </div>
 
-            <!-- Hauptsteuerung: Shuffle | Zurück | Play/Pause | Vor | Repeat -->
+            <!-- Hauptsteuerung wie im Bild: Shuffle | ◀◀ | ▶/❚❚ | ▶▶ | Repeat -->
             <div class="main-controls">
                 <button class="icon-btn secondary-control" id="btn-shuffle">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>
                 </button>
                 <button class="icon-btn play-ctrl" id="btn-prev">
-                    <svg width="38" height="38" viewBox="0 0 24 24" fill="currentColor"><path d="M7 6c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1s1-.45 1-1V7c0-.55-.45-1-1-1zm3.66 6.73l6.5 4.33c.66.44 1.54-.03 1.54-.82V7.76c0-.79-.88-1.26-1.54-.82l-6.5 4.33c-.42.28-.42.89 0 1.18z"/></svg>
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6v12l-8-6 8-6zM12 6v12l-8-6 8-6z"/></svg>
                 </button>
                 <button class="icon-btn play-ctrl play-large">
                     <svg width="58" height="58" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                 </button>
                 <button class="icon-btn play-ctrl" id="btn-next">
-                    <svg width="38" height="38" viewBox="0 0 24 24" fill="currentColor"><path d="M17 6c.55 0 1 .45 1 1v10c0 .55-.45 1-1 1s-1-.45-1-1V7c0-.55.45-1 1-1zm-3.66 6.73l-6.5 4.33C6.18 17.5 5.3 17.03 5.3 16.24V7.76c0-.79.88-1.26 1.54-.82l6.5 4.33c.42.28.42.89 0 1.18z"/></svg>
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor"><path d="M4 6v12l8-6-8-6zM12 6v12l8-6-8-6z"/></svg>
                 </button>
                 <button class="icon-btn secondary-control" id="btn-repeat">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
                 </button>
             </div>
 
@@ -583,27 +579,30 @@
         <div class="action-sheet" style="padding-top: 20px;">
             <div class="sheet-handle"></div>
             <div class="sheet-content" style="padding: 20px; background: rgba(30,30,30,0.9);">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
-                    <h3 style="margin:0;">Equalizer</h3>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <h3 style="margin:0;">Equalizer & Verstärker</h3>
                     <label class="ios-toggle"><input type="checkbox" id="eq-power-toggle"><span class="toggle-slider"></span></label>
                 </div>
+                <p style="font-size: 11px; color: var(--text-secondary); margin: 0 0 18px 0; line-height: 1.4;">
+                    Hinweis: Bei aktivem EQ kann die Wiedergabe im Hintergrund (Bildschirm gesperrt) pausieren. Für unterbrechungsfreies Hintergrund-Audio ausgeschaltet lassen.
+                </p>
                 <div style="margin-bottom: 15px;">
                     <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 5px; display: flex; justify-content: space-between;">
-                        <span>Vorverstärker (Preamp)</span>
+                        <span>Lautstärke-Verstärker (Preamp)</span>
                         <span id="eq-preamp-val" style="color: var(--text-primary); font-weight: 600;">0 dB</span>
                     </p>
                     <input type="range" id="eq-preamp" class="volume-slider" min="-12" max="12" step="1" value="0">
                 </div>
                 <h4 style="font-size: 14px; margin-bottom: 10px; color: var(--text-secondary);">Modus wählen</h4>
                 <div class="vibes-container" id="eq-presets-container">
-                    <div class="vibe-pill eq-preset" data-mode="classic">Classic (Flat)</div>
+                    <div class="vibe-pill eq-preset active" data-mode="classic">Classic (Flat)</div>
+                    <div class="vibe-pill eq-preset" data-mode="dance">Dance</div>
+                    <div class="vibe-pill eq-preset" data-mode="hiphop">HipHop</div>
                     <div class="vibe-pill eq-preset" data-mode="bass">Bass Booster</div>
                     <div class="vibe-pill eq-preset" data-mode="treble">Treble Booster</div>
                     <div class="vibe-pill eq-preset" data-mode="vocal">Vocal Booster</div>
-                    <div class="vibe-pill eq-preset" data-mode="amapiano">Amapiano</div>
-                    <div class="vibe-pill eq-preset" data-mode="rap">Rap / HipHop</div>
                     <div class="vibe-pill eq-preset" data-mode="rnb">R&B</div>
-                    <div class="vibe-pill eq-preset" data-mode="spoken">Spoken Word</div>
+                    <div class="vibe-pill eq-preset" data-mode="electro">Electro</div>
                 </div>
             </div>
             <button class="sheet-btn cancel-btn close-sub-sheet">Schließen</button>

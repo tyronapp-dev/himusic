@@ -1,7 +1,7 @@
 // Himusic Cloud - Service Worker v1.0
 // Komplett optimiert für das neue Cloudflare / Firebase Setup
 
-const CACHE_NAME  = 'himusic-app-shell-v1.0';
+const CACHE_NAME  = 'himusic-app-shell-v1.2';
 const COVER_CACHE = 'himusic-covers-v1';
 const AUDIO_CACHE = 'himusic-audio-v1';
 
@@ -16,7 +16,6 @@ const APP_SHELL = [
     './manifest.json',
     './firebase-config.js',
     './config.js',
-    './icon-wave.png',
     './icon-180.png',
     './icon-192.png',
     './icon-512.png',
@@ -101,7 +100,11 @@ self.addEventListener('fetch', (event) => {
                                 'Content-Type':  cached.headers.get('Content-Type') || 'audio/mpeg',
                                 'Content-Range': `bytes ${start}-${end}/${total}`,
                                 'Content-Length': String(end - start + 1),
-                                'Accept-Ranges': 'bytes'
+                                'Accept-Ranges': 'bytes',
+                                // CORS-Header nötig, damit der Web-Audio-Equalizer (crossOrigin) den
+                                // gecachten Range-Response nicht als "tainted" verwirft → sonst Stille
+                                'Access-Control-Allow-Origin': '*',
+                                'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges'
                             }
                         });
                     }
