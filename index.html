@@ -306,18 +306,10 @@
                 </button>
             </div>
 
-            <!-- Untere Leiste: Warteschlange | Vorverstärker | EQ -->
+            <!-- Untere Leiste: Warteschlange -->
             <div class="player-bottom-bar">
                 <button class="icon-btn secondary-control" id="btn-queue-menu">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><polygon points="3 6 3 12 6 9" fill="currentColor" stroke="none"/></svg>
-                </button>
-                <div class="preamp-bar">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" opacity="0.5"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
-                    <input type="range" id="player-preamp" class="preamp-slider" min="-12" max="12" step="1" value="0">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" opacity="0.9"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
-                </div>
-                <button class="icon-btn secondary-control" id="btn-eq-open">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
                 </button>
             </div>
             <input type="range" id="volume-slider" style="display:none;" min="0" max="1" step="0.01" value="1">
@@ -572,40 +564,6 @@
                 <button class="sheet-btn" id="pdo-sort"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="21" y1="10" x2="7" y2="10"></line><line x1="21" y1="6" x2="3" y2="6"></line><line x1="21" y1="14" x2="11" y2="14"></line><line x1="21" y1="18" x2="15" y2="18"></line></svg> Sortieren</button>
             </div>
             <button class="sheet-btn cancel-btn close-sub-sheet">Abbrechen</button>
-        </div>
-    </div>
-
-    <div id="eq-overlay" class="action-sheet-overlay">
-        <div class="action-sheet" style="padding-top: 20px;">
-            <div class="sheet-handle"></div>
-            <div class="sheet-content" style="padding: 20px; background: rgba(30,30,30,0.9);">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                    <h3 style="margin:0;">Equalizer & Verstärker</h3>
-                    <label class="ios-toggle"><input type="checkbox" id="eq-power-toggle"><span class="toggle-slider"></span></label>
-                </div>
-                <p style="font-size: 11px; color: var(--text-secondary); margin: 0 0 18px 0; line-height: 1.4;">
-                    Hinweis: Bei aktivem EQ kann die Wiedergabe im Hintergrund (Bildschirm gesperrt) pausieren. Für unterbrechungsfreies Hintergrund-Audio ausgeschaltet lassen.
-                </p>
-                <div style="margin-bottom: 15px;">
-                    <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 5px; display: flex; justify-content: space-between;">
-                        <span>Lautstärke-Verstärker (Preamp)</span>
-                        <span id="eq-preamp-val" style="color: var(--text-primary); font-weight: 600;">0 dB</span>
-                    </p>
-                    <input type="range" id="eq-preamp" class="volume-slider" min="-12" max="12" step="1" value="0">
-                </div>
-                <h4 style="font-size: 14px; margin-bottom: 10px; color: var(--text-secondary);">Modus wählen</h4>
-                <div class="vibes-container" id="eq-presets-container">
-                    <div class="vibe-pill eq-preset active" data-mode="classic">Classic (Flat)</div>
-                    <div class="vibe-pill eq-preset" data-mode="dance">Dance</div>
-                    <div class="vibe-pill eq-preset" data-mode="hiphop">HipHop</div>
-                    <div class="vibe-pill eq-preset" data-mode="bass">Bass Booster</div>
-                    <div class="vibe-pill eq-preset" data-mode="treble">Treble Booster</div>
-                    <div class="vibe-pill eq-preset" data-mode="vocal">Vocal Booster</div>
-                    <div class="vibe-pill eq-preset" data-mode="rnb">R&B</div>
-                    <div class="vibe-pill eq-preset" data-mode="electro">Electro</div>
-                </div>
-            </div>
-            <button class="sheet-btn cancel-btn close-sub-sheet">Schließen</button>
         </div>
     </div>
 

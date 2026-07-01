@@ -7,144 +7,6 @@ function _parseVibes(v) {
     return [];
 }
 
-// ==========================================
-// AUDIO ENGINE: 7-Band Equalizer + Lautstärke-Verstärker (Web Audio API)
-//
-// WICHTIG (iOS): Ein <audio>-Element durch die Web Audio API zu leiten
-// (createMediaElementSource) bricht auf iOS das Hintergrund-Audio, weil iOS den
-// AudioContext im Hintergrund einfriert. Deshalb ist die Engine standardmäßig AUS:
-// Solange der Nutzer den EQ nicht aktiv einschaltet, läuft reine <audio>-Wiedergabe
-// (perfektes Hintergrund-Audio). Erst beim Aktivieren wird der Graph EINMALIG gebaut.
-//
-// Graph: source -> preamp(Gain) -> 7x Biquad-Filter -> Limiter(Compressor) -> destination
-// Der Preamp ist der echte Lautstärke-Verstärker (bis +12 dB), der Limiter fängt Peaks
-// ab, damit lautere Einstellungen nicht clippen/verzerren.
-// ==========================================
-window.AudioEngine = (function () {
-    const BANDS = [60, 150, 400, 1000, 2400, 6000, 14000]; // Hz
-    const PRESETS = {
-        classic:  [0, 0, 0, 0, 0, 0, 0],
-        dance:    [6, 5, 2, 0, 1, 3, 4],
-        hiphop:   [7, 5, 1, -1, 0, 2, 2],
-        bass:     [8, 6, 3, 0, -1, -1, 0],
-        treble:   [-2, -1, 0, 1, 3, 5, 7],
-        vocal:    [-2, -1, 1, 4, 4, 2, 0],
-        rnb:      [5, 4, 1, 1, 2, 2, 1],
-        electro:  [6, 4, 1, 0, 2, 4, 5]
-    };
-
-    let ctx = null, preampNode = null, filters = [], limiter = null;
-    let ready = false, failed = false, enabled = false;
-    let currentPreampDb = 0, currentPreset = 'classic';
-
-    function build() {
-        if (ready || failed) return ready;
-        const audioPlayer = document.getElementById('main-audio-player');
-        if (!audioPlayer) return false;
-        try {
-            ctx = new (window.AudioContext || window.webkitAudioContext)();
-            const source = ctx.createMediaElementSource(audioPlayer);
-
-            preampNode = ctx.createGain();
-            preampNode.gain.value = 1;
-
-            filters = BANDS.map((freq, i) => {
-                const f = ctx.createBiquadFilter();
-                f.frequency.value = freq;
-                f.gain.value = 0;
-                if (i === 0) f.type = 'lowshelf';
-                else if (i === BANDS.length - 1) f.type = 'highshelf';
-                else { f.type = 'peaking'; f.Q.value = 1; }
-                return f;
-            });
-
-            // Limiter: fängt nur Spitzen ab (Threshold nahe 0, hohe Ratio, schneller Attack),
-            // damit ein hoch gedrehter Preamp nicht clippt. Bei normaler Lautstärke transparent.
-            limiter = ctx.createDynamicsCompressor();
-            limiter.threshold.value = -1.5;
-            limiter.knee.value = 0;
-            limiter.ratio.value = 20;
-            limiter.attack.value = 0.002;
-            limiter.release.value = 0.1;
-
-            let node = source.connect(preampNode);
-            filters.forEach(f => { node = node.connect(f); });
-            node.connect(limiter).connect(ctx.destination);
-
-            ready = true;
-            return true;
-        } catch (err) {
-            console.warn('[AudioEngine] Web Audio Graph nicht möglich (evtl. CORS/iOS):', err);
-            failed = true;
-            return false;
-        }
-    }
-
-    // Baut den Graph einmalig auf. Setzt crossOrigin für CORS und lädt die Quelle neu,
-    // BEVOR createMediaElementSource läuft (sonst wäre der Node stumm/tainted).
-    function ensure() {
-        if (ready) return true;
-        if (failed) return false;
-        const audioPlayer = document.getElementById('main-audio-player');
-        if (!audioPlayer) return false;
-
-        if (audioPlayer.crossOrigin !== 'anonymous' && audioPlayer.src) {
-            const wasPlaying = !audioPlayer.paused;
-            const t = audioPlayer.currentTime || 0;
-            const src = audioPlayer.src;
-            audioPlayer.crossOrigin = 'anonymous';
-            audioPlayer.src = src;
-            audioPlayer.load();
-            const resumePlayback = () => {
-                try { audioPlayer.currentTime = t; } catch(e) {}
-                if (wasPlaying) audioPlayer.play().catch(() => {});
-                audioPlayer.removeEventListener('canplay', resumePlayback);
-            };
-            audioPlayer.addEventListener('canplay', resumePlayback);
-        } else if (!audioPlayer.crossOrigin) {
-            audioPlayer.crossOrigin = 'anonymous';
-        }
-        return build();
-    }
-
-    function resumeCtx() { if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {}); }
-
-    function applyState() {
-        if (!ready) return;
-        resumeCtx();
-        preampNode.gain.value = enabled ? Math.pow(10, currentPreampDb / 20) : 1;
-        const gains = enabled ? (PRESETS[currentPreset] || PRESETS.classic) : PRESETS.classic;
-        filters.forEach((f, i) => { f.gain.value = gains[i] || 0; });
-    }
-
-    // Schaltet die gesamte Klangverarbeitung ein/aus. Erst hier wird der Graph gebaut.
-    function setEnabled(on) {
-        enabled = !!on;
-        if (enabled) { if (!ensure()) return false; }
-        applyState();
-        return !failed;
-    }
-
-    function setPreamp(db) {
-        currentPreampDb = Number(db) || 0;
-        if (!enabled) { if (!setEnabled(true)) return false; return true; }
-        applyState();
-        return !failed;
-    }
-
-    function setPreset(mode) {
-        currentPreset = mode || 'classic';
-        if (!enabled) { if (!setEnabled(true)) return false; return true; }
-        applyState();
-        return !failed;
-    }
-
-    function isEnabled() { return enabled; }
-    function isFailed() { return failed; }
-
-    return { setEnabled, setPreamp, setPreset, resumeCtx, isEnabled, isFailed };
-})();
-
 async function apiGetAllSongs() {
   const response = await fetch(`${API_URL}/songs`);
   if (!response.ok) throw new Error('Failed to fetch songs');
@@ -362,12 +224,7 @@ function initApp() {
             playingPlaylistId: window.currentPlayingPlaylistId || null,
             currentTime: document.getElementById('main-audio-player')?.currentTime || 0,
             queue: (playbackQueue || []).slice(0, 100),
-            volume: document.getElementById('volume-slider')?.value || 1,
-            eq: {
-                isOn: document.getElementById('eq-power-toggle')?.checked || false,
-                preamp: document.getElementById('eq-preamp')?.value || 0,
-                preset: document.querySelector('.eq-preset.active')?.dataset.mode || 'classic'
-            }
+            volume: document.getElementById('volume-slider')?.value || 1
         };
         try { localStorage.setItem('heatbox_state', JSON.stringify(state)); } catch(e) {}
     }
@@ -447,26 +304,6 @@ function initApp() {
             }
 
             if (state.queue) playbackQueue = state.queue;
-
-            if (state.eq) {
-                // Nur die Werte in der UI wiederherstellen. Der EQ (Web Audio) bleibt beim Start
-                // bewusst AUS, damit reine <audio>-Wiedergabe läuft = zuverlässiges Hintergrund-Audio.
-                // Der Nutzer aktiviert den EQ pro Sitzung selbst.
-                const eqPreamp = document.getElementById('eq-preamp');
-                const playerPreamp = document.getElementById('player-preamp');
-                if (state.eq.preamp && eqPreamp) {
-                    eqPreamp.value = state.eq.preamp;
-                    if (playerPreamp) playerPreamp.value = state.eq.preamp;
-                    updateSliderFill(eqPreamp, -12, 12);
-                    const valEl = document.getElementById('eq-preamp-val');
-                    if(valEl) valEl.innerText = (state.eq.preamp > 0 ? '+' : '') + state.eq.preamp + ' dB';
-                }
-                if (state.eq.preset) {
-                    document.querySelectorAll('.eq-preset').forEach(b => b.classList.remove('active'));
-                    const presetBtn = document.querySelector(`.eq-preset[data-mode="${state.eq.preset}"]`);
-                    if(presetBtn) presetBtn.classList.add('active');
-                }
-            }
         } catch(e) {}
     }
 
@@ -560,13 +397,10 @@ function initApp() {
         if (document.visibilityState === 'hidden') {
             savePlayerState();
         } else {
-            // iOS pausiert AudioContext wenn App in den Hintergrund geht → wieder aufwecken
-            window.AudioEngine.resumeCtx();
             // iOS braucht mehrere Versuche nach dem Entsperren
             const tryResume = (attempts) => {
                 if (!audioPlayer || !window._shouldBePlaying || !audioPlayer.src) return;
                 if (!audioPlayer.paused) return;
-                window.AudioEngine.resumeCtx();
                 audioPlayer.play().catch(() => {
                     if (attempts > 0) setTimeout(() => tryResume(attempts - 1), 800);
                 });
@@ -2212,78 +2046,6 @@ async function createNewPlaylistProcess() {
     const volSlider = document.getElementById('volume-slider');
     if(volSlider && audioPlayer) { updateSliderFill(volSlider, 0, 1); volSlider.addEventListener('input', (e) => { audioPlayer.volume = e.target.value; updateSliderFill(e.target, 0, 1); }); }
 
-    // ── Equalizer / Lautstärke-Verstärker (Web Audio, opt-in) ──────────────────
-    const eqPreamp = document.getElementById('eq-preamp');
-    const playerPreamp = document.getElementById('player-preamp');
-    const eqPowerToggle = document.getElementById('eq-power-toggle');
-
-    function eqCurrentPreset() { return document.querySelector('.eq-preset.active')?.dataset.mode || 'classic'; }
-
-    function eqSyncPreampUI(db) {
-        db = Number(db) || 0;
-        if (eqPreamp) { eqPreamp.value = db; updateSliderFill(eqPreamp, -12, 12); }
-        if (playerPreamp) playerPreamp.value = db;
-        const valDisplay = document.getElementById('eq-preamp-val');
-        if (valDisplay) valDisplay.innerText = (db > 0 ? '+' : '') + db + ' dB';
-    }
-
-    function eqWarnIfFailed() {
-        if (window.AudioEngine.isFailed()) {
-            if (eqPowerToggle) eqPowerToggle.checked = false;
-            alert("Klangverbesserung für diesen Titel nicht verfügbar (Quelle erlaubt keine Audio-Verarbeitung).");
-            return true;
-        }
-        return false;
-    }
-
-    if (eqPreamp) updateSliderFill(eqPreamp, -12, 12);
-
-    // Power-Schalter im EQ-Overlay
-    if (eqPowerToggle) {
-        eqPowerToggle.addEventListener('change', (e) => {
-            if (e.target.checked) {
-                window.AudioEngine.setPreset(eqCurrentPreset());
-                window.AudioEngine.setPreamp(eqPreamp ? Number(eqPreamp.value) : 0);
-                window.AudioEngine.setEnabled(true);
-                eqWarnIfFailed();
-            } else {
-                window.AudioEngine.setEnabled(false);
-            }
-            savePlayerState();
-        });
-    }
-
-    // Vorverstärker (beide Slider – Overlay + Player – teilen sich die Logik).
-    // Am Slider ziehen aktiviert die Klangverarbeitung automatisch.
-    function eqHandlePreamp(db) {
-        eqSyncPreampUI(db);
-        if (eqPowerToggle && !eqPowerToggle.checked) eqPowerToggle.checked = true;
-        window.AudioEngine.setPreset(eqCurrentPreset());
-        window.AudioEngine.setPreamp(db);
-        eqWarnIfFailed();
-    }
-    if (eqPreamp) {
-        eqPreamp.addEventListener('input', (e) => eqHandlePreamp(Number(e.target.value)));
-        eqPreamp.addEventListener('change', savePlayerState);
-    }
-    if (playerPreamp) {
-        playerPreamp.addEventListener('input', (e) => eqHandlePreamp(Number(e.target.value)));
-        playerPreamp.addEventListener('change', savePlayerState);
-    }
-
-    // Modus-Auswahl (Classic, Dance, HipHop, …)
-    document.querySelectorAll('.eq-preset').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('.eq-preset').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            if (eqPowerToggle && !eqPowerToggle.checked) eqPowerToggle.checked = true;
-            window.AudioEngine.setPreamp(eqPreamp ? Number(eqPreamp.value) : 0);
-            window.AudioEngine.setPreset(btn.dataset.mode);
-            eqWarnIfFailed();
-            savePlayerState();
-        });
-    });
-
     let isShuffle = false; let isRepeat = false;
     document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; });
     document.getElementById('btn-shuffle')?.addEventListener('click', (e) => { isShuffle = !isShuffle; e.currentTarget.classList.toggle('ctrl-active', isShuffle); if(isShuffle) { playbackQueue = playbackQueue.sort(() => 0.5 - Math.random()); } });
@@ -2338,11 +2100,6 @@ async function createNewPlaylistProcess() {
         }
         return div;
     }
-
-    document.getElementById('btn-eq-open')?.addEventListener('click', () => {
-        const eqOverlay = document.getElementById('eq-overlay');
-        if (eqOverlay) eqOverlay.classList.add('active');
-    });
 
     document.getElementById('btn-queue-menu')?.addEventListener('click', () => {
         const qContainer = document.getElementById('queue-list'); qContainer.innerHTML = '';
@@ -2911,10 +2668,15 @@ window.addEventListener('online', async () => {
 // ==========================================
 // 2. SMART BULK IMPORT (content-hash dedup, safe concurrency, retry, decoupled post-processing)
 // ==========================================
-async function _hashFile(file) {
-    const buf = await file.arrayBuffer();
-    const digest = await crypto.subtle.digest('SHA-256', buf);
-    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+async function _fingerprint(file) {
+    // Schnelle Signatur für Duplikat-Erkennung: Dateigröße + SHA-256 der ersten 128 KB.
+    // Liest bewusst NICHT die ganze Datei – genau das machte den Import bei vielen Songs
+    // langsam (jede Datei wurde komplett in den Speicher gelesen, oft mehrere GB gesamt).
+    // 128 KB genügen, um wirklich identische Dateien zuverlässig zu erkennen.
+    const head = await file.slice(0, 131072).arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', head);
+    const hex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return `${file.size}-${hex}`;
 }
 
 const oldFileInput = document.getElementById('native-file-upload');
@@ -2951,23 +2713,27 @@ if (oldFileInput) {
             existingTitleCounts[t] = (existingTitleCounts[t] || 0) + 1;
         });
 
-        // 2. Phase 1: Hashes berechnen (erkennt echte Duplikate auch INNERHALB der gleichen Auswahl,
-        //    nicht nur gegen die DB — das war der Bug bei 200-400 Songs auf einmal)
-        const HASH_CONCURRENT = 8;
+        // 2. Phase 1: schnelle Signaturen berechnen (erkennt echte Duplikate auch INNERHALB
+        //    der gleichen Auswahl, nicht nur gegen die DB — das war der Bug bei 200-400 Songs).
+        //    Dank 128-KB-Signatur statt Voll-Hash geht das jetzt in Sekunden.
+        const HASH_CONCURRENT = 12;
         const hashed = new Array(files.length);
         let hashedCount = 0;
-        for (let i = 0; i < files.length; i += HASH_CONCURRENT) {
-            const batch = files.slice(i, i + HASH_CONCURRENT);
-            await Promise.all(batch.map(async (file, j) => {
+        let hashIdx = 0;
+        async function hashWorker() {
+            while (hashIdx < files.length) {
+                const myIdx = hashIdx++;
+                const file = files[myIdx];
                 try {
-                    hashed[i + j] = { file, hash: await _hashFile(file) };
+                    hashed[myIdx] = { file, hash: await _fingerprint(file) };
                 } catch(err) {
-                    hashed[i + j] = { file, hash: null }; // Hash fehlgeschlagen → wird nie als Duplikat erkannt, aber trotzdem importiert
+                    hashed[myIdx] = { file, hash: null }; // Signatur fehlgeschlagen → wird importiert, nur nicht dedupliziert
                 }
                 hashedCount++;
-                setStatus(`🔢 Prüfe Dateien: ${hashedCount} / ${files.length}...`);
-            }));
+                if (hashedCount % 5 === 0 || hashedCount === files.length) setStatus(`🔢 Prüfe Dateien: ${hashedCount} / ${files.length}...`);
+            }
         }
+        await Promise.all(Array.from({ length: HASH_CONCURRENT }, hashWorker));
 
         // 3. Dateien filtern: erst gegen DB-Hashes, dann gegen bereits in dieser Auswahl gesehene Hashes
         const seenHashesThisBatch = new Set();
@@ -3003,7 +2769,7 @@ if (oldFileInput) {
         setStatus(`⬆️ 0 / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} Duplikate übersprungen)` : ''}...`);
 
         // 4. Phase 2: Parallel-Upload mit Echtzeit-Fortschritt + 1 Retry bei Netzwerkfehlern
-        const CONCURRENT = 6;
+        const CONCURRENT = 8;
         let done = 0, failed = 0;
 
         async function uploadOne(file, title, hash, attempt = 1) {
@@ -3035,10 +2801,17 @@ if (oldFileInput) {
             setStatus(`⬆️ ${done} / ${toUpload.length} hochgeladen${skipped > 0 ? ` (${skipped} übersprungen)` : ''}...`);
         }
 
-        for (let i = 0; i < toUpload.length; i += CONCURRENT) {
-            const batch = toUpload.slice(i, i + CONCURRENT);
-            await Promise.all(batch.map(({ file, title, hash }) => uploadOne(file, title, hash)));
+        // Worker-Pool: hält immer CONCURRENT Uploads gleichzeitig aktiv. Vorher wartete jeder
+        // Batch auf seine langsamste Datei, bevor der nächste startete (Head-of-Line-Blocking)
+        // → dieser Pool nutzt die Bandbreite durchgehend aus.
+        let uploadIdx = 0;
+        async function uploadWorker() {
+            while (uploadIdx < toUpload.length) {
+                const { file, title, hash } = toUpload[uploadIdx++];
+                await uploadOne(file, title, hash);
+            }
         }
+        await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
 
         if (uploadLabel) uploadLabel.style.opacity = '1';
         const summary = `✅ ${done} importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} Fehler` : ''}`;
