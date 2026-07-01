@@ -743,7 +743,12 @@ let _bgCacheActive = false;
                     audioPlayer.load();
                     audioPlayer.addEventListener('canplay', function swap() { audioPlayer.currentTime = t; audioPlayer.play().catch(() => {}); audioPlayer.removeEventListener('canplay', swap); });
                 } else { audioPlayer.src = localUrl; audioPlayer.load(); }
-            } else { downloadToLocal(fileUrl, title); }
+            } else if (localStorage.getItem('himusic_offline') === '1') {
+                // Nur im Offline-Modus im Hintergrund cachen. Sonst lud jeder gespielte Song
+                // parallel komplett herunter und konkurrierte mit dem Streaming um Bandbreite →
+                // Ursache fürs Stocken/Einschlafen. Ohne Offline-Modus wird jetzt nur gestreamt.
+                downloadToLocal(fileUrl, title);
+            }
         });
 
         if (playPromise === undefined) playPromise = Promise.resolve();
@@ -2738,7 +2743,10 @@ function _normName(s) { return (s || '').replace(/\.[^.]+$/, '').replace(/[^a-z0
 function _songImportKey(song) {
     if (song && song.file_url) {
         const seg = (song.file_url.split('/media/')[1]) || '';
-        const m = seg.match(/^fast_\d+_[a-z0-9]+_(.+)$/i);
+        // Beide Upload-Schemata abdecken: mit UND ohne "fast_"-Präfix. Genau das war der Bug –
+        // 1014 ältere Songs heißen <zeit>_<zufall>_<name> OHNE "fast_", wurden vom alten Regex
+        // nicht erkannt und darum beim Import als "neu" behandelt → doppelt hochgeladen.
+        const m = seg.match(/^(?:fast_)?\d+_[a-z0-9]+_(.+)$/i);
         if (m) return _normName(m[1]);
     }
     return _normName(song && song.title);
@@ -2787,16 +2795,20 @@ if (oldFileInput) {
                 if (r.ok) existing = await r.json();
             } catch(err) {}
         }
-        const existingKeys = new Set(existing.map(_songImportKey));
+        // Schlüssel = normalisierter Original-Dateiname + Dateigröße. Die Größe verhindert, dass
+        // zwei WIRKLICH verschiedene Dateien mit zufällig gleichem Namen fälschlich übersprungen
+        // werden – identisch ist nur, was Name UND Größe teilt (deckt sich mit der Server-Dedupe).
+        const existingKeys = new Set(existing.map(s => _songImportKey(s) + '::' + (s.file_size || '')));
 
         const seenThisBatch = new Set();
         const toUpload = [];
         let alreadyThere = 0;
         for (const file of files) {
-            const key = _normName(file.name);
-            if (!key) continue;
+            const base = _normName(file.name);
+            if (!base) continue;
+            const key = base + '::' + (file.size || '');
             if (existingKeys.has(key)) { alreadyThere++; continue; }   // schon in der DB → überspringen
-            if (seenThisBatch.has(key)) { alreadyThere++; continue; }  // Doppelter Dateiname in dieser Auswahl
+            if (seenThisBatch.has(key)) { alreadyThere++; continue; }  // exakt gleiche Datei doppelt in dieser Auswahl
             seenThisBatch.add(key);
             toUpload.push({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() });
         }
@@ -2867,9 +2879,21 @@ if (oldFileInput) {
         }
         await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
 
+        // Sicherheitsnetz: serverseitige Duplikat-Bereinigung (nach Original-Dateiname + Größe,
+        // NICHT nach Titel – der Sync benennt Titel um und würde sonst echte, verschiedene Songs
+        // löschen). Fängt alles ab, was der Vorab-Filter evtl. verpasst hat, und räumt Altbestand auf.
+        let removed = 0;
+        if (done > 0) {
+            setStatus(`🧹 Prüfe auf Duplikate...`);
+            try {
+                const dRes = await fetch(`${API_URL}/songs/dedupe`, { method: 'POST', signal: _mkTimeout(120000) });
+                if (dRes.ok) { const d = await dRes.json().catch(() => ({})); removed = d.deleted || 0; }
+            } catch(err) {}
+        }
+
         window._importActive = false;
         if (uploadLabel) uploadLabel.style.opacity = '1';
-        const summary = `✅ ${done} neu importiert${alreadyThere > 0 ? `, ${alreadyThere} waren schon da` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (einfach erneut auswählen)` : ''}`;
+        const summary = `✅ ${done - removed} neu importiert${alreadyThere > 0 ? `, ${alreadyThere} schon da` : ''}${removed > 0 ? `, ${removed} Duplikate entfernt` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}`;
         setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
 
         // Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
