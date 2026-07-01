@@ -131,6 +131,27 @@ function addLongPressListener(element, callback) {
     element.addEventListener('touchcancel', cancel);
 }
 
+async function fetchCoverFromSpotify(title, artist, retryCount = 0) {
+    let queryParts = [];
+    if (title && title.trim() !== "") queryParts.push(title.trim());
+    if (artist && artist.trim() !== "" && artist !== "Unbekannter Künstler") queryParts.push(artist.trim());
+    if (queryParts.length === 0) return null;
+
+    try {
+        const query = encodeURIComponent(queryParts.join(" "));
+        const response = await fetch(`${API_URL}/spotify-search?q=${query}`, { signal: AbortSignal.timeout(6000) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        return data.result?.cover_data || null;
+    } catch (e) {
+        if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            return fetchCoverFromSpotify(title, artist, retryCount + 1);
+        }
+        return null;
+    }
+}
+
 async function fetchCoverFromiTunes(title, artist, retryCount = 0) {
     let queryParts = [];
     if (title && title.trim() !== "") queryParts.push(title.trim());
@@ -1312,6 +1333,7 @@ const titleNorm = title.toLowerCase().trim();
     const editCoverUpload = document.getElementById('edit-cover-upload');
     const editVibesContainer = document.getElementById('edit-vibes-container');
     const btnSearchItunes = document.getElementById('btn-search-itunes');
+    const btnSearchSpotify = document.getElementById('btn-search-spotify');
     const btnSaveTags = document.getElementById('btn-save-tags');
 
     let currentEditCoverData = "";
@@ -1352,13 +1374,26 @@ const titleNorm = title.toLowerCase().trim();
         });
     }
 
+    const ITUNES_BTN_HTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px; margin-top: -2px;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>iTunes`;
+    const SPOTIFY_BTN_HTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="#1DB954" style="vertical-align: middle; margin-right: 4px; margin-top: -2px;"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141 4.32-1.32 9.719-.66 13.439 1.621.361.181.54.78.301 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.1 9.301c-.6.18-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>Spotify`;
+
     if (btnSearchItunes) {
         btnSearchItunes.addEventListener('click', async () => {
             btnSearchItunes.innerText = "Suche...";
             const newUrl = await fetchCoverFromiTunes(editTitle.value, editArtist.value);
-            if (newUrl) { currentEditCoverData = newUrl; editCoverPreview.src = newUrl; btnSearchItunes.innerHTML = "Cover gefunden!"; } 
-            else { btnSearchItunes.innerHTML = "Nichts gefunden"; }
-            setTimeout(() => btnSearchItunes.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 5px; margin-top: -2px;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg> In iTunes suchen`, 2000);
+            if (newUrl) { currentEditCoverData = newUrl; editCoverPreview.src = newUrl; btnSearchItunes.innerText = "Gefunden!"; }
+            else { btnSearchItunes.innerText = "Nichts gefunden"; }
+            setTimeout(() => btnSearchItunes.innerHTML = ITUNES_BTN_HTML, 2000);
+        });
+    }
+
+    if (btnSearchSpotify) {
+        btnSearchSpotify.addEventListener('click', async () => {
+            btnSearchSpotify.innerText = "Suche...";
+            const newUrl = await fetchCoverFromSpotify(editTitle.value, editArtist.value);
+            if (newUrl) { currentEditCoverData = newUrl; editCoverPreview.src = newUrl; btnSearchSpotify.innerText = "Gefunden!"; }
+            else { btnSearchSpotify.innerText = "Nichts gefunden"; }
+            setTimeout(() => btnSearchSpotify.innerHTML = SPOTIFY_BTN_HTML, 2000);
         });
     }
 
