@@ -8,26 +8,34 @@ function _parseVibes(v) {
 }
 
 // ==========================================
-// AUDIO ENGINE: 7-Band Equalizer + Loudness Booster (Web Audio API, lazy-init)
-// Graph: source -> preamp(gain) -> 7x biquad filter -> compressor(limiter) -> destination
-// Built lazily on first user gesture to satisfy autoplay policy and to avoid
-// breaking plain <audio> playback if createMediaElementSource throws (e.g. CORS).
+// AUDIO ENGINE: 7-Band Equalizer + Lautstärke-Verstärker (Web Audio API)
+//
+// WICHTIG (iOS): Ein <audio>-Element durch die Web Audio API zu leiten
+// (createMediaElementSource) bricht auf iOS das Hintergrund-Audio, weil iOS den
+// AudioContext im Hintergrund einfriert. Deshalb ist die Engine standardmäßig AUS:
+// Solange der Nutzer den EQ nicht aktiv einschaltet, läuft reine <audio>-Wiedergabe
+// (perfektes Hintergrund-Audio). Erst beim Aktivieren wird der Graph EINMALIG gebaut.
+//
+// Graph: source -> preamp(Gain) -> 7x Biquad-Filter -> Limiter(Compressor) -> destination
+// Der Preamp ist der echte Lautstärke-Verstärker (bis +12 dB), der Limiter fängt Peaks
+// ab, damit lautere Einstellungen nicht clippen/verzerren.
 // ==========================================
 window.AudioEngine = (function () {
     const BANDS = [60, 150, 400, 1000, 2400, 6000, 14000]; // Hz
     const PRESETS = {
         classic:  [0, 0, 0, 0, 0, 0, 0],
-        bass:     [7, 5, 2, 0, -1, -1, 0],
-        treble:   [-1, -1, 0, 1, 3, 5, 6],
+        dance:    [6, 5, 2, 0, 1, 3, 4],
+        hiphop:   [7, 5, 1, -1, 0, 2, 2],
+        bass:     [8, 6, 3, 0, -1, -1, 0],
+        treble:   [-2, -1, 0, 1, 3, 5, 7],
         vocal:    [-2, -1, 1, 4, 4, 2, 0],
-        amapiano: [5, 3, 0, -1, 1, 2, 1],
-        rap:      [6, 4, 1, -1, 0, 2, 1],
-        rnb:      [4, 3, 1, 1, 2, 2, 1],
-        spoken:   [-3, -1, 2, 5, 4, 1, -1]
+        rnb:      [5, 4, 1, 1, 2, 2, 1],
+        electro:  [6, 4, 1, 0, 2, 4, 5]
     };
 
-    let ctx = null, preampNode = null, filters = [], compressor = null;
-    let ready = false, failed = false, loudnessOn = false;
+    let ctx = null, preampNode = null, filters = [], limiter = null;
+    let ready = false, failed = false, enabled = false;
+    let currentPreampDb = 0, currentPreset = 'classic';
 
     function build() {
         if (ready || failed) return ready;
@@ -50,83 +58,91 @@ window.AudioEngine = (function () {
                 return f;
             });
 
-            compressor = ctx.createDynamicsCompressor();
-            compressor.threshold.value = -3;
-            compressor.knee.value = 12;
-            compressor.ratio.value = 4;
-            compressor.attack.value = 0.003;
-            compressor.release.value = 0.25;
+            // Limiter: fängt nur Spitzen ab (Threshold nahe 0, hohe Ratio, schneller Attack),
+            // damit ein hoch gedrehter Preamp nicht clippt. Bei normaler Lautstärke transparent.
+            limiter = ctx.createDynamicsCompressor();
+            limiter.threshold.value = -1.5;
+            limiter.knee.value = 0;
+            limiter.ratio.value = 20;
+            limiter.attack.value = 0.002;
+            limiter.release.value = 0.1;
 
             let node = source.connect(preampNode);
             filters.forEach(f => { node = node.connect(f); });
-            node.connect(compressor).connect(ctx.destination);
+            node.connect(limiter).connect(ctx.destination);
 
             ready = true;
             return true;
         } catch (err) {
-            console.warn('[AudioEngine] Web Audio Graph konnte nicht erstellt werden (evtl. CORS-Einschränkung der Audioquelle):', err);
+            console.warn('[AudioEngine] Web Audio Graph nicht möglich (evtl. CORS/iOS):', err);
             failed = true;
             return false;
         }
     }
 
+    // Baut den Graph einmalig auf. Setzt crossOrigin für CORS und lädt die Quelle neu,
+    // BEVOR createMediaElementSource läuft (sonst wäre der Node stumm/tainted).
     function ensure() {
+        if (ready) return true;
+        if (failed) return false;
         const audioPlayer = document.getElementById('main-audio-player');
-        if (!audioPlayer || ready || failed) return build();
-        // CORS-Vorbereitung: crossOrigin setzen + Quelle neu laden, BEVOR der Graph gebaut wird.
-        // Schlägt das fehl, bleibt die normale <audio>-Wiedergabe unangetastet (failed=true, kein Graph).
-        if (!audioPlayer.crossOrigin) {
+        if (!audioPlayer) return false;
+
+        if (audioPlayer.crossOrigin !== 'anonymous' && audioPlayer.src) {
             const wasPlaying = !audioPlayer.paused;
-            const t = audioPlayer.currentTime;
+            const t = audioPlayer.currentTime || 0;
             const src = audioPlayer.src;
             audioPlayer.crossOrigin = 'anonymous';
             audioPlayer.src = src;
             audioPlayer.load();
             const resumePlayback = () => {
-                audioPlayer.currentTime = t;
+                try { audioPlayer.currentTime = t; } catch(e) {}
                 if (wasPlaying) audioPlayer.play().catch(() => {});
                 audioPlayer.removeEventListener('canplay', resumePlayback);
             };
             audioPlayer.addEventListener('canplay', resumePlayback);
+        } else if (!audioPlayer.crossOrigin) {
+            audioPlayer.crossOrigin = 'anonymous';
         }
         return build();
     }
 
     function resumeCtx() { if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {}); }
 
-    function setPreamp(db) {
-        if (!ensure()) return;
+    function applyState() {
+        if (!ready) return;
         resumeCtx();
-        preampNode.gain.value = Math.pow(10, (Number(db) || 0) / 20);
-    }
-
-    function setPreset(mode) {
-        if (!ensure()) return;
-        resumeCtx();
-        const gains = PRESETS[mode] || PRESETS.classic;
+        preampNode.gain.value = enabled ? Math.pow(10, currentPreampDb / 20) : 1;
+        const gains = enabled ? (PRESETS[currentPreset] || PRESETS.classic) : PRESETS.classic;
         filters.forEach((f, i) => { f.gain.value = gains[i] || 0; });
     }
 
-    function disable() {
-        if (!ready) return;
-        preampNode.gain.value = 1;
-        filters.forEach(f => f.gain.value = 0);
+    // Schaltet die gesamte Klangverarbeitung ein/aus. Erst hier wird der Graph gebaut.
+    function setEnabled(on) {
+        enabled = !!on;
+        if (enabled) { if (!ensure()) return false; }
+        applyState();
+        return !failed;
     }
 
-    function setLoudnessBoost(on) {
-        if (!ensure()) return;
-        resumeCtx();
-        loudnessOn = !!on;
-        // Stärkerer Limiter + Makeup-Gain, damit lauter werden kann ohne zu clippen
-        compressor.threshold.value = loudnessOn ? -20 : -3;
-        compressor.ratio.value = loudnessOn ? 8 : 4;
-        compressor.release.value = loudnessOn ? 0.15 : 0.25;
+    function setPreamp(db) {
+        currentPreampDb = Number(db) || 0;
+        if (!enabled) { if (!setEnabled(true)) return false; return true; }
+        applyState();
+        return !failed;
     }
 
-    function isLoudnessOn() { return loudnessOn; }
+    function setPreset(mode) {
+        currentPreset = mode || 'classic';
+        if (!enabled) { if (!setEnabled(true)) return false; return true; }
+        applyState();
+        return !failed;
+    }
+
+    function isEnabled() { return enabled; }
     function isFailed() { return failed; }
 
-    return { ensure, setPreamp, setPreset, disable, setLoudnessBoost, isLoudnessOn, isFailed, resumeCtx };
+    return { setEnabled, setPreamp, setPreset, resumeCtx, isEnabled, isFailed };
 })();
 
 async function apiGetAllSongs() {
@@ -433,9 +449,14 @@ function initApp() {
             if (state.queue) playbackQueue = state.queue;
 
             if (state.eq) {
+                // Nur die Werte in der UI wiederherstellen. Der EQ (Web Audio) bleibt beim Start
+                // bewusst AUS, damit reine <audio>-Wiedergabe läuft = zuverlässiges Hintergrund-Audio.
+                // Der Nutzer aktiviert den EQ pro Sitzung selbst.
                 const eqPreamp = document.getElementById('eq-preamp');
+                const playerPreamp = document.getElementById('player-preamp');
                 if (state.eq.preamp && eqPreamp) {
                     eqPreamp.value = state.eq.preamp;
+                    if (playerPreamp) playerPreamp.value = state.eq.preamp;
                     updateSliderFill(eqPreamp, -12, 12);
                     const valEl = document.getElementById('eq-preamp-val');
                     if(valEl) valEl.innerText = (state.eq.preamp > 0 ? '+' : '') + state.eq.preamp + ' dB';
@@ -444,10 +465,6 @@ function initApp() {
                     document.querySelectorAll('.eq-preset').forEach(b => b.classList.remove('active'));
                     const presetBtn = document.querySelector(`.eq-preset[data-mode="${state.eq.preset}"]`);
                     if(presetBtn) presetBtn.classList.add('active');
-                }
-               if (state.eq.isOn) {
-                    const eqToggle = document.getElementById('eq-power-toggle');
-                    if(eqToggle) { eqToggle.checked = true; } 
                 }
             }
         } catch(e) {}
@@ -2195,64 +2212,77 @@ async function createNewPlaylistProcess() {
     const volSlider = document.getElementById('volume-slider');
     if(volSlider && audioPlayer) { updateSliderFill(volSlider, 0, 1); volSlider.addEventListener('input', (e) => { audioPlayer.volume = e.target.value; updateSliderFill(e.target, 0, 1); }); }
 
+    // ── Equalizer / Lautstärke-Verstärker (Web Audio, opt-in) ──────────────────
     const eqPreamp = document.getElementById('eq-preamp');
+    const playerPreamp = document.getElementById('player-preamp');
     const eqPowerToggle = document.getElementById('eq-power-toggle');
-    if(eqPreamp) {
-        updateSliderFill(eqPreamp, -12, 12);
-        eqPreamp.addEventListener('input', (e) => {
-            if (eqPowerToggle && eqPowerToggle.checked) window.AudioEngine.setPreamp(e.target.value);
-            const valStr = (e.target.value > 0 ? '+' : '') + e.target.value + ' dB';
-            const valDisplay = document.getElementById('eq-preamp-val');
-            if(valDisplay) valDisplay.innerText = valStr;
-            updateSliderFill(e.target, -12, 12);
-        });
-        eqPreamp.addEventListener('change', savePlayerState);
+
+    function eqCurrentPreset() { return document.querySelector('.eq-preset.active')?.dataset.mode || 'classic'; }
+
+    function eqSyncPreampUI(db) {
+        db = Number(db) || 0;
+        if (eqPreamp) { eqPreamp.value = db; updateSliderFill(eqPreamp, -12, 12); }
+        if (playerPreamp) playerPreamp.value = db;
+        const valDisplay = document.getElementById('eq-preamp-val');
+        if (valDisplay) valDisplay.innerText = (db > 0 ? '+' : '') + db + ' dB';
     }
 
+    function eqWarnIfFailed() {
+        if (window.AudioEngine.isFailed()) {
+            if (eqPowerToggle) eqPowerToggle.checked = false;
+            alert("Klangverbesserung für diesen Titel nicht verfügbar (Quelle erlaubt keine Audio-Verarbeitung).");
+            return true;
+        }
+        return false;
+    }
+
+    if (eqPreamp) updateSliderFill(eqPreamp, -12, 12);
+
+    // Power-Schalter im EQ-Overlay
     if (eqPowerToggle) {
         eqPowerToggle.addEventListener('change', (e) => {
             if (e.target.checked) {
-                const preset = document.querySelector('.eq-preset.active')?.dataset.mode || 'classic';
-                window.AudioEngine.setPreset(preset);
-                window.AudioEngine.setPreamp(eqPreamp ? eqPreamp.value : 0);
-                if (window.AudioEngine.isFailed()) {
-                    e.target.checked = false;
-                    alert("Equalizer für diesen Song nicht verfügbar (Audioquelle erlaubt keine Verarbeitung).");
-                }
+                window.AudioEngine.setPreset(eqCurrentPreset());
+                window.AudioEngine.setPreamp(eqPreamp ? Number(eqPreamp.value) : 0);
+                window.AudioEngine.setEnabled(true);
+                eqWarnIfFailed();
             } else {
-                window.AudioEngine.disable();
+                window.AudioEngine.setEnabled(false);
             }
             savePlayerState();
         });
     }
 
+    // Vorverstärker (beide Slider – Overlay + Player – teilen sich die Logik).
+    // Am Slider ziehen aktiviert die Klangverarbeitung automatisch.
+    function eqHandlePreamp(db) {
+        eqSyncPreampUI(db);
+        if (eqPowerToggle && !eqPowerToggle.checked) eqPowerToggle.checked = true;
+        window.AudioEngine.setPreset(eqCurrentPreset());
+        window.AudioEngine.setPreamp(db);
+        eqWarnIfFailed();
+    }
+    if (eqPreamp) {
+        eqPreamp.addEventListener('input', (e) => eqHandlePreamp(Number(e.target.value)));
+        eqPreamp.addEventListener('change', savePlayerState);
+    }
+    if (playerPreamp) {
+        playerPreamp.addEventListener('input', (e) => eqHandlePreamp(Number(e.target.value)));
+        playerPreamp.addEventListener('change', savePlayerState);
+    }
+
+    // Modus-Auswahl (Classic, Dance, HipHop, …)
     document.querySelectorAll('.eq-preset').forEach(btn => {
         btn.addEventListener('click', () => {
             document.querySelectorAll('.eq-preset').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            if (eqPowerToggle && eqPowerToggle.checked) window.AudioEngine.setPreset(btn.dataset.mode);
+            if (eqPowerToggle && !eqPowerToggle.checked) eqPowerToggle.checked = true;
+            window.AudioEngine.setPreamp(eqPreamp ? Number(eqPreamp.value) : 0);
+            window.AudioEngine.setPreset(btn.dataset.mode);
+            eqWarnIfFailed();
             savePlayerState();
         });
     });
-
-    // Vorverstärker-Slider direkt im Player (synchronisiert mit EQ-Overlay-Slider)
-    const playerPreamp = document.getElementById('player-preamp');
-    if (playerPreamp) {
-        playerPreamp.addEventListener('input', (e) => {
-            window.AudioEngine.setPreamp(e.target.value);
-            // Overlay-Slider synchron halten
-            if (eqPreamp) { eqPreamp.value = e.target.value; updateSliderFill(eqPreamp, -12, 12); }
-            const valDisplay = document.getElementById('eq-preamp-val');
-            if (valDisplay) valDisplay.innerText = (e.target.value > 0 ? '+' : '') + e.target.value + ' dB';
-            // EQ einschalten falls noch aus
-            if (eqPowerToggle && !eqPowerToggle.checked) {
-                eqPowerToggle.checked = true;
-                const preset = document.querySelector('.eq-preset.active')?.dataset.mode || 'classic';
-                window.AudioEngine.setPreset(preset);
-            }
-        });
-        playerPreamp.addEventListener('change', savePlayerState);
-    }
 
     let isShuffle = false; let isRepeat = false;
     document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; });
@@ -2345,18 +2375,6 @@ async function createNewPlaylistProcess() {
         } catch(e) { outList.innerHTML = 'Fehler beim Laden der Geräte.'; }
         document.getElementById('audio-out-overlay').classList.add('active');
     });
-
-    const hdAudioToggle = document.getElementById('setting-hd-audio');
-    if (hdAudioToggle) {
-        hdAudioToggle.addEventListener('change', (e) => {
-            if(audioPlayer) audioPlayer.volume = 1.0;
-            window.AudioEngine.setLoudnessBoost(e.target.checked);
-            if (e.target.checked && window.AudioEngine.isFailed()) {
-                e.target.checked = false;
-                alert("Lautstärke-Verstärker für diesen Song nicht verfügbar (Audioquelle erlaubt keine Verarbeitung).");
-            }
-        });
-    }
 
     const bigCover = document.getElementById('big-player-cover');
     if(bigCover) {
