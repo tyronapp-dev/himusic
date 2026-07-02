@@ -2896,7 +2896,8 @@ if (oldFileInput) {
 }
 
 // ==========================================
-// 3. BACKGROUND SYNC (iTunes primär + Spotify-Fallback) – ein Durchlauf lädt EINMAL, arbeitet in-place ab
+// 3. BACKGROUND SYNC (nur iTunes – Spotify ist bewusst der manuellen Suche im Tag-Editor
+//    vorbehalten, damit der Massen-Sync nie wieder Spotifys Rate-Limit auslöst)
 // ==========================================
 let _syncRunning = false;
 // Songs, die in DIESER Sitzung schon versucht wurden. Verhindert, dass nicht auffindbare Songs
@@ -2956,19 +2957,10 @@ async function processBackgroundSync() {
                 _syncAttempted.add(song.id); // gilt als versucht, egal ob Treffer oder nicht
                 let patch = null;
                 try {
-                    // 1. Spotify (primär) – aber nur, wenn sie uns nicht gerade drosselt (Cooldown
-                    //    wird von searchSongMetaSpotify bei 429 gesetzt). Sonst direkt iTunes.
-                    let meta = null;
-                    if (!(window._spotifyCooldownUntil && Date.now() < window._spotifyCooldownUntil)) {
-                        const sp = await searchSongMetaSpotify(song.title, song.artist);
-                        if (sp && !sp.rateLimited && sp.cover) meta = sp;
-                    }
-                    // 2. iTunes-Fallback (direkt, kostenlos, kein Key)
-                    if (!meta) {
-                        const it = await searchSongMetaItunes(song.title, song.artist);
-                        if (it && it.cover) meta = it;
-                    }
-                    patch = meta
+                    // Nur iTunes (direkt, kostenlos, praktisch kein Rate-Limit bei 3 parallelen
+                    // Anfragen). Spotify wird im Sync NICHT angefragt.
+                    const meta = await searchSongMetaItunes(song.title, song.artist);
+                    patch = (meta && meta.cover)
                         ? { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover }
                         : { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
                     await fetch(`${API_URL}/songs/${song.id}`, {
