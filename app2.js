@@ -2752,6 +2752,25 @@ function _songImportKey(song) {
     return _normName(song && song.title);
 }
 
+// Inhalts-Fingerabdruck einer Datei: SHA-256 über ersten + letzten 128-KB-Block + Dateigröße.
+// Liest also nur max. 256 KB statt der ganzen Datei (schnell auch bei 400 Songs) und identifiziert
+// den INHALT unabhängig vom Dateinamen. Wird bei jedem Upload als content_hash mitgespeichert,
+// damit die Duplikat-Bereinigung Gleichheit am Inhalt festmachen kann statt nur an Name+Größe.
+async function _contentFingerprint(file) {
+    try {
+        const CHUNK = 131072; // 128 KB
+        const head = await file.slice(0, CHUNK).arrayBuffer();
+        const tail = file.size > CHUNK ? await file.slice(file.size - CHUNK).arrayBuffer() : new ArrayBuffer(0);
+        const sizeBytes = new TextEncoder().encode(String(file.size));
+        const buf = new Uint8Array(head.byteLength + tail.byteLength + sizeBytes.length);
+        buf.set(new Uint8Array(head), 0);
+        buf.set(new Uint8Array(tail), head.byteLength);
+        buf.set(sizeBytes, head.byteLength + tail.byteLength);
+        const digest = await crypto.subtle.digest('SHA-256', buf);
+        return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch(e) { return null; } // z.B. ältere Browser ohne SubtleCrypto → Upload läuft trotzdem
+}
+
 // Gezieltes In-Memory- + DOM-Update eines einzelnen Songs (statt die ganze Liste neu zu rendern).
 window.applySongPatch = function(id, patch) {
     if (window._songIndex) { const s = window._songIndex.get(id); if (s) Object.assign(s, patch); }
@@ -2839,7 +2858,7 @@ if (oldFileInput) {
         }
         updateProgress();
 
-        async function uploadOne(file, title, attempt = 1) {
+        async function uploadOne(file, title, contentHash, attempt = 1) {
             const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
             try {
                 const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
@@ -2856,14 +2875,15 @@ if (oldFileInput) {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         title, artist: "Unbekannt", cover_data: "",
-                        file_url: uploadData.url, file_size: file.size, duration: 0, vibes: []
+                        file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [],
+                        content_hash: contentHash
                     }),
                     signal: _mkTimeout(30000)
                 });
                 if (!songRes.ok) throw new Error('song create failed');
                 done++; uploadedBytes += file.size;
             } catch(err) {
-                if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
+                if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, contentHash, attempt + 1); }
                 failed++;
             }
             updateProgress();
@@ -2874,14 +2894,16 @@ if (oldFileInput) {
         async function uploadWorker() {
             while (uploadIdx < toUpload.length) {
                 const { file, title } = toUpload[uploadIdx++];
-                await uploadOne(file, title);
+                // Fingerprint einmal pro Datei berechnen (max. 256 KB Lesezugriff), Retries erben ihn
+                const contentHash = await _contentFingerprint(file);
+                await uploadOne(file, title, contentHash);
             }
         }
         await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
 
-        // Sicherheitsnetz: serverseitige Duplikat-Bereinigung (nach Original-Dateiname + Größe,
-        // NICHT nach Titel – der Sync benennt Titel um und würde sonst echte, verschiedene Songs
-        // löschen). Fängt alles ab, was der Vorab-Filter evtl. verpasst hat, und räumt Altbestand auf.
+        // Sicherheitsnetz: serverseitige Duplikat-Bereinigung. Gelöscht wird NUR bei bewiesener
+        // Inhaltsgleichheit: identischer content_hash ODER identischer R2-ETag (Byte-Prüfsumme).
+        // Gleicher Name/Name+Größe allein ist nur ein KANDIDAT und löst nie eine Löschung aus.
         let removed = 0;
         if (done > 0) {
             setStatus(`🧹 Prüfe auf Duplikate...`);
