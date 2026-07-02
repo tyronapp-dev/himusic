@@ -131,47 +131,72 @@ function addLongPressListener(element, callback) {
     element.addEventListener('touchcancel', cancel);
 }
 
-async function fetchCoverFromSpotify(title, artist, retryCount = 0) {
-    let queryParts = [];
-    if (title && title.trim() !== "") queryParts.push(title.trim());
-    if (artist && artist.trim() !== "" && artist !== "Unbekannter Künstler") queryParts.push(artist.trim());
-    if (queryParts.length === 0) return null;
+// Baut aus Titel + Künstler einen sauberen Suchbegriff. Rohe Import-Titel wie
+// "Chris_Brown___Gimme_That___ezmp3.cc__" scheitern sonst besonders bei Spotify (strenge Suche):
+// Unterstriche/Bindestriche → Leerzeichen, Download-Seiten-Müll und "(Official Video)"-Zusätze weg,
+// und Platzhalter-Künstler ("Unbekannt"/"Unbekannter Künstler") werden NIE mitgesucht.
+function _cleanSearchTerm(title, artist) {
+    let t = (title || '').replace(/\.[^/.]+$/, '');
+    t = t.replace(/[_\-]+/g, ' ');
+    t = t.replace(/\b(ezmp3|ytmp3|y2mate|mp3juice|flvto|snappea)(\s*\.?\s*(cc|com|net|org|io))?\b/gi, '');
+    t = t.replace(/[\(\[][^\)\]]*(official|video|audio|lyric|visuali|clip|prod\.?|hd|4k|remaster)[^\)\]]*[\)\]]/gi, '');
+    t = t.replace(/\bofficial\s+(music\s+)?(video|audio|visualizer|lyric(s)?(\s+video)?)\b/gi, '');
+    t = t.replace(/\s{2,}/g, ' ').trim();
+    let a = (artist || '').trim();
+    if (/^unbekannt/i.test(a)) a = '';
+    return (t + ' ' + a).trim();
+}
 
+// Spotify-Suche über den Worker. Liefert das volle Metadaten-Objekt {title, artist, cover}
+// oder null. data.error === "rate_limited" → Spotify drosselt gerade unsere App-Kennung;
+// der Aufrufer kann das anzeigen bzw. auf iTunes ausweichen.
+async function searchSongMetaSpotify(title, artist, retryCount = 0) {
+    const q = _cleanSearchTerm(title, artist);
+    if (!q) return null;
     try {
-        const query = encodeURIComponent(queryParts.join(" "));
-        const response = await fetch(`${API_URL}/spotify-search?q=${query}`, { signal: AbortSignal.timeout(6000) });
+        const response = await fetch(`${API_URL}/spotify-search?q=${encodeURIComponent(q)}`, { signal: AbortSignal.timeout(6000) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        return data.result?.cover_data || null;
+        if (data.error === 'rate_limited') { window._spotifyCooldownUntil = Date.now() + 15 * 60 * 1000; return { rateLimited: true }; }
+        if (!data.result) return null;
+        return { title: data.result.title, artist: data.result.artist, album: data.result.album || "", cover: data.result.cover_data || null };
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
             await new Promise(resolve => setTimeout(resolve, 1000));
-            return fetchCoverFromSpotify(title, artist, retryCount + 1);
+            return searchSongMetaSpotify(title, artist, retryCount + 1);
         }
         return null;
     }
 }
 
-async function fetchCoverFromiTunes(title, artist, retryCount = 0) {
-    let queryParts = [];
-    if (title && title.trim() !== "") queryParts.push(title.trim());
-    if (artist && artist.trim() !== "" && artist !== "Unbekannter Künstler") queryParts.push(artist.trim());
-    if (queryParts.length === 0) return null; 
-
+// iTunes-Suche (direkt, kein Key). Liefert {title, artist, cover} oder null.
+async function searchSongMetaItunes(title, artist, retryCount = 0) {
+    const q = _cleanSearchTerm(title, artist);
+    if (!q) return null;
     try {
-        const query = encodeURIComponent(queryParts.join(" "));
-        const response = await fetch(`https://itunes.apple.com/search?term=${query}&entity=song&limit=1`, { signal: AbortSignal.timeout(5000) });
+        const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=1`, { signal: AbortSignal.timeout(5000) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        if (data.results && data.results.length > 0) return data.results[0].artworkUrl100.replace('100x100bb.jpg', '600x600bb.jpg');
-        return null;
+        const t = data.results && data.results[0];
+        if (!t) return null;
+        return { title: t.trackName, artist: t.artistName, album: t.collectionName || "", cover: (t.artworkUrl100 || '').replace('100x100bb', '600x600bb') || null };
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
             await new Promise(resolve => setTimeout(resolve, 1000));
-            return fetchCoverFromiTunes(title, artist, retryCount + 1);
+            return searchSongMetaItunes(title, artist, retryCount + 1);
         }
         return null;
     }
+}
+
+async function fetchCoverFromSpotify(title, artist) {
+    const meta = await searchSongMetaSpotify(title, artist);
+    return (meta && !meta.rateLimited && meta.cover) ? meta.cover : null;
+}
+
+async function fetchCoverFromiTunes(title, artist) {
+    const meta = await searchSongMetaItunes(title, artist);
+    return (meta && meta.cover) ? meta.cover : null;
 }
 
 const AVAILABLE_VIBES = ["Afro", "Ghana", "RnB", "Old School", "Deepdream", "LD", "Calm", "SAD", "Gym", "HYPE", "Carpool", "Amapiano", "Hard rap", "Dancehall", "Rap", "Summer", "Latenight", "Dance", "Christ", "Soul", "Exotic", "N-rei"];
@@ -1382,12 +1407,22 @@ const titleNorm = title.toLowerCase().trim();
     const ITUNES_BTN_HTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px; margin-top: -2px;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>iTunes`;
     const SPOTIFY_BTN_HTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="#1DB954" style="vertical-align: middle; margin-right: 4px; margin-top: -2px;"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141 4.32-1.32 9.719-.66 13.439 1.621.361.181.54.78.301 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.1 9.301c-.6.18-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>Spotify`;
 
+    // Ein Treffer füllt ALLE Felder: Songname + Künstler werden in die Eingabefelder
+    // geschrieben, das Cover in die Vorschau. Gesucht wird mit dem bereinigten Inhalt
+    // beider Felder – egal in welchem Feld etwas steht.
+    function _applyEditorMeta(meta) {
+        if (!meta) return false;
+        if (meta.title) editTitle.value = meta.title;
+        if (meta.artist) editArtist.value = meta.artist;
+        if (meta.cover) { currentEditCoverData = meta.cover; editCoverPreview.src = meta.cover; }
+        return !!(meta.title || meta.artist || meta.cover);
+    }
+
     if (btnSearchItunes) {
         btnSearchItunes.addEventListener('click', async () => {
             btnSearchItunes.innerText = "Suche...";
-            const newUrl = await fetchCoverFromiTunes(editTitle.value, editArtist.value);
-            if (newUrl) { currentEditCoverData = newUrl; editCoverPreview.src = newUrl; btnSearchItunes.innerText = "Gefunden!"; }
-            else { btnSearchItunes.innerText = "Nichts gefunden"; }
+            const meta = await searchSongMetaItunes(editTitle.value, editArtist.value);
+            btnSearchItunes.innerText = _applyEditorMeta(meta) ? "Gefunden!" : "Nichts gefunden";
             setTimeout(() => btnSearchItunes.innerHTML = ITUNES_BTN_HTML, 2000);
         });
     }
@@ -1395,9 +1430,14 @@ const titleNorm = title.toLowerCase().trim();
     if (btnSearchSpotify) {
         btnSearchSpotify.addEventListener('click', async () => {
             btnSearchSpotify.innerText = "Suche...";
-            const newUrl = await fetchCoverFromSpotify(editTitle.value, editArtist.value);
-            if (newUrl) { currentEditCoverData = newUrl; editCoverPreview.src = newUrl; btnSearchSpotify.innerText = "Gefunden!"; }
-            else { btnSearchSpotify.innerText = "Nichts gefunden"; }
+            const meta = await searchSongMetaSpotify(editTitle.value, editArtist.value);
+            if (meta && meta.rateLimited) {
+                // Spotify drosselt gerade → dem Nutzer sagen, was los ist, statt "nichts gefunden"
+                btnSearchSpotify.innerText = "Spotify überlastet – nutze iTunes";
+                setTimeout(() => btnSearchSpotify.innerHTML = SPOTIFY_BTN_HTML, 3000);
+                return;
+            }
+            btnSearchSpotify.innerText = _applyEditorMeta(meta) ? "Gefunden!" : "Nichts gefunden";
             setTimeout(() => btnSearchSpotify.innerHTML = SPOTIFY_BTN_HTML, 2000);
         });
     }
@@ -2726,50 +2766,10 @@ window.addEventListener('online', async () => {
 });
 
 // ==========================================
-// 2. SMART BULK IMPORT (sofortiger Dateinamen-Abgleich, nur Neues wird hochgeladen)
+// 2. BULK IMPORT (Staging-Prinzip: roh hochladen, Server entscheidet über Duplikate am Inhalt)
 // ==========================================
 // AbortSignal.timeout gibt es erst ab Safari 16 – sicher kapseln
 function _mkTimeout(ms) { try { return AbortSignal.timeout(ms); } catch(e) { return undefined; } }
-
-// Normalisiert einen Namen auf reine Kleinbuchstaben+Ziffern (ohne Endung/Sonderzeichen).
-// Dadurch ist der Vergleich unempfindlich gegen die Sanitisierung beim Upload und gegen
-// Groß/Kleinschreibung. "My Song!.mp3" und "My_Song_.mp3" ergeben beide "mysong".
-function _normName(s) { return (s || '').replace(/\.[^.]+$/, '').replace(/[^a-z0-9]/gi, '').toLowerCase(); }
-
-// Eindeutiger Import-Schlüssel eines vorhandenen Songs. Der Original-Dateiname wird bevorzugt
-// aus file_url rekonstruiert (Muster fast_<zeit>_<zufall>_<name>), denn file_url ändert sich NIE –
-// auch nicht, wenn der Hintergrund-Sync den Titel später auf den iTunes-Namen umschreibt.
-// Fällt nur bei Alt-/YouTube-Einträgen ohne dieses Muster auf den Titel zurück.
-function _songImportKey(song) {
-    if (song && song.file_url) {
-        const seg = (song.file_url.split('/media/')[1]) || '';
-        // Beide Upload-Schemata abdecken: mit UND ohne "fast_"-Präfix. Genau das war der Bug –
-        // 1014 ältere Songs heißen <zeit>_<zufall>_<name> OHNE "fast_", wurden vom alten Regex
-        // nicht erkannt und darum beim Import als "neu" behandelt → doppelt hochgeladen.
-        const m = seg.match(/^(?:fast_)?\d+_[a-z0-9]+_(.+)$/i);
-        if (m) return _normName(m[1]);
-    }
-    return _normName(song && song.title);
-}
-
-// Inhalts-Fingerabdruck einer Datei: SHA-256 über ersten + letzten 128-KB-Block + Dateigröße.
-// Liest also nur max. 256 KB statt der ganzen Datei (schnell auch bei 400 Songs) und identifiziert
-// den INHALT unabhängig vom Dateinamen. Wird bei jedem Upload als content_hash mitgespeichert,
-// damit die Duplikat-Bereinigung Gleichheit am Inhalt festmachen kann statt nur an Name+Größe.
-async function _contentFingerprint(file) {
-    try {
-        const CHUNK = 131072; // 128 KB
-        const head = await file.slice(0, CHUNK).arrayBuffer();
-        const tail = file.size > CHUNK ? await file.slice(file.size - CHUNK).arrayBuffer() : new ArrayBuffer(0);
-        const sizeBytes = new TextEncoder().encode(String(file.size));
-        const buf = new Uint8Array(head.byteLength + tail.byteLength + sizeBytes.length);
-        buf.set(new Uint8Array(head), 0);
-        buf.set(new Uint8Array(tail), head.byteLength);
-        buf.set(sizeBytes, head.byteLength + tail.byteLength);
-        const digest = await crypto.subtle.digest('SHA-256', buf);
-        return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
-    } catch(e) { return null; } // z.B. ältere Browser ohne SubtleCrypto → Upload läuft trotzdem
-}
 
 // Gezieltes In-Memory- + DOM-Update eines einzelnen Songs (statt die ganze Liste neu zu rendern).
 window.applySongPatch = function(id, patch) {
@@ -2802,47 +2802,18 @@ if (oldFileInput) {
         if (uploadLabel) uploadLabel.style.opacity = '0.5';
         window._importActive = true; // Sync pausieren, damit er den Import nicht stört
 
-        // SOFORTIGER Dateinamen-Abgleich (kein Datei-Lesen, keine Uploads für schon Vorhandenes).
-        // Existierende Songs kommen aus der bereits geladenen Liste (window.globalSongsData) –
-        // ist die leer, wird EINMAL frisch geladen. Verglichen wird der normalisierte Original-
-        // Dateiname, der aus file_url rekonstruiert wird (überlebt Sync-Umbenennungen).
-        let existing = Array.isArray(window.globalSongsData) ? window.globalSongsData : [];
-        if (existing.length === 0) {
-            setStatus(`⏳ Lade Bibliothek...`);
-            try {
-                const r = await fetch(`${API_URL}/songs`, { signal: _mkTimeout(20000) });
-                if (r.ok) existing = await r.json();
-            } catch(err) {}
-        }
-        // Schlüssel = normalisierter Original-Dateiname + Dateigröße. Die Größe verhindert, dass
-        // zwei WIRKLICH verschiedene Dateien mit zufällig gleichem Namen fälschlich übersprungen
-        // werden – identisch ist nur, was Name UND Größe teilt (deckt sich mit der Server-Dedupe).
-        const existingKeys = new Set(existing.map(s => _songImportKey(s) + '::' + (s.file_size || '')));
-
-        const seenThisBatch = new Set();
-        const toUpload = [];
-        let alreadyThere = 0;
-        for (const file of files) {
-            const base = _normName(file.name);
-            if (!base) continue;
-            const key = base + '::' + (file.size || '');
-            if (existingKeys.has(key)) { alreadyThere++; continue; }   // schon in der DB → überspringen
-            if (seenThisBatch.has(key)) { alreadyThere++; continue; }  // exakt gleiche Datei doppelt in dieser Auswahl
-            seenThisBatch.add(key);
-            toUpload.push({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() });
-        }
-
-        if (toUpload.length === 0) {
-            setStatus(`✅ Alles schon da – alle ${files.length} Songs sind bereits importiert.`, '#32d74b');
-            if (uploadLabel) uploadLabel.style.opacity = '1';
-            window._importActive = false;
-            setTimeout(processBackgroundSync, 1000);
-            return;
-        }
+        // STAGING-PRINZIP – bewusst KEINE clientseitige Duplikat-Logik mehr:
+        // Jede Datei wird roh nach R2 hochgeladen (R2 = Zwischenlager). Die Duplikat-Entscheidung
+        // trifft ausschließlich der SERVER beim Registrieren (POST /songs): er liest die
+        // Inhalts-Prüfsumme (ETag), die Cloudflare beim Upload über die BYTES berechnet hat,
+        // vergleicht sie mit der Haupt-DB und verwirft Duplikate ({duplicate:true} + Datei wird
+        // im Zwischenlager sofort gelöscht). Namen sind egal – nur der Inhalt zählt. Dadurch kann
+        // hier clientseitig nichts mehr schiefgehen (alte Namensschemata, umbenannte Dateien etc.).
+        const toUpload = files.map(file => ({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() }));
 
         // Upload startet SOFORT. Worker-Pool + Durchsatz + Restzeit-Anzeige.
         const CONCURRENT = 5;
-        let done = 0, failed = 0, uploadedBytes = 0;
+        let done = 0, dupes = 0, failed = 0, uploadedBytes = 0;
         const totalBytes = toUpload.reduce((a, x) => a + x.file.size, 0);
         const t0 = Date.now();
         const fmtMB = (b) => (b / 1048576).toFixed(0);
@@ -2854,11 +2825,11 @@ if (oldFileInput) {
                 const secs = Math.round((totalBytes - uploadedBytes) / 1048576 / mbps);
                 eta = ` · noch ~${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
             }
-            setStatus(`⬆️ ${done}/${toUpload.length} neu · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${alreadyThere > 0 ? ` · ${alreadyThere} schon da` : ''}`);
+            setStatus(`⬆️ ${done + dupes}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${dupes > 0 ? ` · ${dupes} Duplikate` : ''}`);
         }
         updateProgress();
 
-        async function uploadOne(file, title, contentHash, attempt = 1) {
+        async function uploadOne(file, title, attempt = 1) {
             const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
             try {
                 const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
@@ -2875,15 +2846,17 @@ if (oldFileInput) {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         title, artist: "Unbekannt", cover_data: "",
-                        file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [],
-                        content_hash: contentHash
+                        file_url: uploadData.url, file_size: file.size, duration: 0, vibes: []
                     }),
                     signal: _mkTimeout(30000)
                 });
                 if (!songRes.ok) throw new Error('song create failed');
-                done++; uploadedBytes += file.size;
+                const result = await songRes.json().catch(() => ({}));
+                // Server-Tor hat entschieden: Datei war inhaltsgleich schon da → nicht doppelt gespeichert
+                if (result && result.duplicate) dupes++; else done++;
+                uploadedBytes += file.size;
             } catch(err) {
-                if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, contentHash, attempt + 1); }
+                if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
                 failed++;
             }
             updateProgress();
@@ -2894,16 +2867,13 @@ if (oldFileInput) {
         async function uploadWorker() {
             while (uploadIdx < toUpload.length) {
                 const { file, title } = toUpload[uploadIdx++];
-                // Fingerprint einmal pro Datei berechnen (max. 256 KB Lesezugriff), Retries erben ihn
-                const contentHash = await _contentFingerprint(file);
-                await uploadOne(file, title, contentHash);
+                await uploadOne(file, title);
             }
         }
         await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
 
-        // Sicherheitsnetz: serverseitige Duplikat-Bereinigung. Gelöscht wird NUR bei bewiesener
-        // Inhaltsgleichheit: identischer content_hash ODER identischer R2-ETag (Byte-Prüfsumme).
-        // Gleicher Name/Name+Größe allein ist nur ein KANDIDAT und löst nie eine Löschung aus.
+        // Sicherheitsnetz: Inhalts-Dedupe der Haupt-DB (fängt z.B. zwei zeitgleiche Uploads
+        // derselben Datei im selben Batch ab). Löscht ausschließlich Byte-identische Einträge.
         let removed = 0;
         if (done > 0) {
             setStatus(`🧹 Prüfe auf Duplikate...`);
@@ -2915,7 +2885,8 @@ if (oldFileInput) {
 
         window._importActive = false;
         if (uploadLabel) uploadLabel.style.opacity = '1';
-        const summary = `✅ ${done - removed} neu importiert${alreadyThere > 0 ? `, ${alreadyThere} schon da` : ''}${removed > 0 ? `, ${removed} Duplikate entfernt` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}`;
+        const skipped = dupes + removed;
+        const summary = `✅ ${done - removed} neu importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}`;
         setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
 
         // Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
@@ -2972,9 +2943,10 @@ async function processBackgroundSync() {
 
         if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = `🔄 Synchronisiere ${todo.length} Songs...`; statusDetail.style.color = '#fa9a00'; }
 
-        // GANZEN Rückstand in EINEM Durchlauf abarbeiten: 6 parallele Worker, jeder aktualisiert
-        // nur seinen Song gezielt in-place (kein Voll-Rerender der Liste mehr).
-        const PARALLEL = 6;
+        // Rückstand abarbeiten: 3 parallele Worker (6 haben Spotifys Rate-Limit ausgelöst → alle
+        // Suchen schlugen mit 429 fehl, auch die manuellen). Jeder Worker aktualisiert nur seinen
+        // Song gezielt in-place (kein Voll-Rerender der Liste).
+        const PARALLEL = 3;
         let idx = 0, syncedNow = 0;
 
         async function syncWorker() {
@@ -2982,31 +2954,23 @@ async function processBackgroundSync() {
                 if (window._importActive) return; // Import hat Vorrang → Durchlauf abbrechen
                 const song = todo[idx++];
                 _syncAttempted.add(song.id); // gilt als versucht, egal ob Treffer oder nicht
-                const searchTerm = song.title.replace(/[_\-]/g, " ").trim();
                 let patch = null;
                 try {
-                    // 1. Spotify (primär, über den Worker – braucht die SPOTIFY_*-Secrets)
-                    let sp = null;
-                    try {
-                        const spRes = await fetch(`${API_URL}/spotify-search?q=${encodeURIComponent(searchTerm)}`, { signal: _mkTimeout(6000) });
-                        if (spRes.ok) { const spData = await spRes.json(); sp = spData.result; }
-                    } catch(e) {}
-                    if (sp && sp.cover_data) {
-                        patch = { title: sp.title, artist: sp.artist, album: sp.album || "", cover_data: sp.cover_data };
-                    } else {
-                        // 2. iTunes-Fallback (direkt, kostenlos, kein Key), wenn Spotify nichts findet
-                        const itunesRes = await fetch(
-                            `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=1`,
-                            { signal: _mkTimeout(5000) }
-                        );
-                        const itunesData = await itunesRes.json();
-                        if (itunesData.results?.length > 0) {
-                            const track = itunesData.results[0];
-                            patch = { title: track.trackName, artist: track.artistName, album: track.collectionName || "", cover_data: track.artworkUrl100.replace('100x100bb', '500x500bb') };
-                        } else {
-                            patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
-                        }
+                    // 1. Spotify (primär) – aber nur, wenn sie uns nicht gerade drosselt (Cooldown
+                    //    wird von searchSongMetaSpotify bei 429 gesetzt). Sonst direkt iTunes.
+                    let meta = null;
+                    if (!(window._spotifyCooldownUntil && Date.now() < window._spotifyCooldownUntil)) {
+                        const sp = await searchSongMetaSpotify(song.title, song.artist);
+                        if (sp && !sp.rateLimited && sp.cover) meta = sp;
                     }
+                    // 2. iTunes-Fallback (direkt, kostenlos, kein Key)
+                    if (!meta) {
+                        const it = await searchSongMetaItunes(song.title, song.artist);
+                        if (it && it.cover) meta = it;
+                    }
+                    patch = meta
+                        ? { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover }
+                        : { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
                     await fetch(`${API_URL}/songs/${song.id}`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ ...patch, vibes: _parseVibes(song.vibes) }),
