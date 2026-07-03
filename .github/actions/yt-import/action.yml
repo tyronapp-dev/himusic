@@ -1,0 +1,91 @@
+name: "YouTube Import Versuch"
+description: >
+  Ein kompletter Download-Versuch auf DIESEM Runner (= dieser IP): Setup, PO-Token-Provider,
+  yt-dlp-Extraktion, R2-Upload, D1-Registrierung. Wird vom Workflow als Kette von bis zu
+  8 Jobs aufgerufen — jeder Job ist ein frischer Runner mit NEUER zufälliger IP, was der
+  eigentliche Hebel gegen YouTubes IP-Reputations-Blocks ist.
+inputs:
+  youtube_url:
+    required: true
+    description: "YouTube-Video-URL"
+  job_id:
+    required: true
+    description: "Eindeutige Job-ID (bestimmt den R2-Schlüssel yt/<id>.m4a)"
+  r2_account_id:
+    required: true
+    description: "Cloudflare Account-ID"
+  r2_access_key_id:
+    required: true
+    description: "R2 Access Key"
+  r2_secret_access_key:
+    required: true
+    description: "R2 Secret Key"
+  r2_bucket_name:
+    required: true
+    description: "R2 Bucket-Name"
+  r2_public_domain:
+    required: true
+    description: "Öffentliche Medien-Domain"
+  d1_api_url:
+    required: true
+    description: "Worker-Basis-URL für /internal/register"
+  d1_api_key:
+    required: true
+    description: "Interner API-Key"
+  youtube_cookies:
+    required: false
+    default: ""
+    description: "Optional: Cookies für altersbeschränkte Inhalte"
+runs:
+  using: "composite"
+  steps:
+    # ffmpeg für Audio-Konvertierung
+    - name: Install ffmpeg
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y ffmpeg
+
+    # Deno – wird von yt-dlp für JavaScript-Challenge-Entschlüsselung genutzt
+    - name: Install Deno
+      uses: denoland/setup-deno@v2
+      with:
+        deno-version: v2.x
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # yt-dlp nightly (YouTube-Fixes landen dort zuerst) + curl_cffi (--impersonate chrome)
+    # + bgutil-Plugin (spricht mit dem PO-Token-Server unten)
+    - name: Install Python dependencies
+      shell: bash
+      run: pip install --quiet -U --pre "yt-dlp[default]" "yt-dlp[curl_cffi]" bgutil-ytdlp-pot-provider boto3 requests
+
+    # PO-Token-Provider: löst YouTubes BotGuard-Challenge live in einer echten JS-Umgebung
+    # und liefert den "Proof of Origin"-Token, den yt-dlp automatisch abholt (Port 4416).
+    - name: PO-Token-Provider starten und auf Bereitschaft warten
+      shell: bash
+      run: |
+        docker run --name bgutil-provider -d --init -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
+        for i in $(seq 1 20); do
+          (echo > /dev/tcp/127.0.0.1/4416) >/dev/null 2>&1 && echo "Provider bereit nach ${i}s" && exit 0
+          sleep 1
+        done
+        echo "::warning::PO-Token-Provider nach 20s nicht erreichbar – yt-dlp faellt auf Multi-Client-Fallback zurueck"
+
+    - name: Run extractor
+      shell: bash
+      env:
+        YOUTUBE_URL:          ${{ inputs.youtube_url }}
+        JOB_ID:               ${{ inputs.job_id }}
+        R2_ACCOUNT_ID:        ${{ inputs.r2_account_id }}
+        R2_ACCESS_KEY_ID:     ${{ inputs.r2_access_key_id }}
+        R2_SECRET_ACCESS_KEY: ${{ inputs.r2_secret_access_key }}
+        R2_BUCKET_NAME:       ${{ inputs.r2_bucket_name }}
+        R2_PUBLIC_DOMAIN:     ${{ inputs.r2_public_domain }}
+        D1_API_URL:           ${{ inputs.d1_api_url }}
+        D1_API_KEY:           ${{ inputs.d1_api_key }}
+        YOUTUBE_COOKIES:      ${{ inputs.youtube_cookies }}
+      run: python src/extractor_worker.py
