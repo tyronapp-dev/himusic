@@ -1,0 +1,4 @@
+{
+  "youtube_url": "https://www.youtube.com/watch?v=9bZkp7q19f0",
+  "comment": "PAT-unabhängiger Import-Auslöser: Diese Datei mit neuer youtube_url committen startet einen Import. Normalerweise läuft der Import über die App (Worker-Dispatch); diese Datei ist der Test-/Notfallweg."
+}
