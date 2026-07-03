@@ -55,6 +55,7 @@ jobs:
           echo "::warning::PO-Token-Provider nach 20s nicht erreichbar – yt-dlp faellt auf Multi-Client-Fallback zurueck"
 
       - name: Run extractor
+        id: extractor
         env:
           YOUTUBE_URL:          ${{ github.event.client_payload.youtube_url }}
           JOB_ID:               ${{ github.event.client_payload.job_id }}
@@ -67,3 +68,37 @@ jobs:
           D1_API_KEY:           ${{ secrets.D1_API_KEY }}
           YOUTUBE_COOKIES:      ${{ secrets.YOUTUBE_COOKIES }}
         run: python src/extractor_worker.py
+
+      # Root-Cause-Fix gegen IP-Reputations-Blocks: Der Retry in extractor_worker.py wiederholt
+      # INNERHALB desselben Jobs – also auf DERSELBEN Azure-IP. Das hilft nichts gegen "diese IP
+      # ist gerade verbrannt". Hier wird bei Fehlschlag der GANZE Job neu ausgelöst → ein frischer
+      # Runner bekommt eine NEUE zufällige IP. Empirisch ~25% Erfolgschance pro IP → bei 8 Versuchen
+      # in Folge >90% Gesamterfolgschance, komplett kostenlos auf bestehender Infrastruktur.
+      - name: Bei Fehlschlag mit frischer IP automatisch neu ausloesen
+        if: failure() && steps.extractor.outcome == 'failure'
+        env:
+          GH_RETRY_PAT: ${{ secrets.GH_RETRY_PAT }}
+          YOUTUBE_URL:  ${{ github.event.client_payload.youtube_url }}
+          JOB_ID:       ${{ github.event.client_payload.job_id }}
+          RETRY_COUNT:  ${{ github.event.client_payload.retry_count }}
+        run: |
+          RETRY_COUNT=${RETRY_COUNT:-0}
+          MAX_RETRIES=8
+          if [ -z "$GH_RETRY_PAT" ]; then
+            echo "::warning::GH_RETRY_PAT-Secret fehlt - automatischer Neuversuch uebersprungen."
+            exit 0
+          fi
+          if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
+            echo "::error::Maximale Anzahl automatischer Neuversuche ($MAX_RETRIES) erreicht fuer Job $JOB_ID - endgueltig fehlgeschlagen."
+            exit 0
+          fi
+          NEXT_RETRY=$((RETRY_COUNT + 1))
+          echo "Automatischer Neuversuch $NEXT_RETRY/$MAX_RETRIES (frischer Runner = neue IP)..."
+          sleep $((RANDOM % 8 + 4))
+          PAYLOAD=$(jq -n --arg url "$YOUTUBE_URL" --arg jid "$JOB_ID" --argjson retry "$NEXT_RETRY" \
+            '{event_type: "youtube-import-event", client_payload: {youtube_url: $url, job_id: $jid, retry_count: $retry}}')
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_RETRY_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/dispatches" \
+            -d "$PAYLOAD"
