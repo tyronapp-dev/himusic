@@ -42,17 +42,20 @@ PLAYER_CLIENTS = "ios,android,web_creator,tv,mweb"
 
 
 def _cookies_args(output_dir: str) -> list:
+    # Cookies sind NICHT mehr die Hauptverteidigung gegen "Sign in to confirm you're not a bot" –
+    # das übernimmt jetzt der PO-Token-Provider (siehe Workflow: bgutil-ytdlp-pot-provider läuft
+    # als Docker-Container und generiert live einen gültigen Proof-of-Origin-Token, unabhängig
+    # von Cookies, die vorher ständig verfielen). Cookies bleiben optional als ZWEITE Schicht nur
+    # für altersbeschränkte/private Inhalte, die eine echte Anmeldung verlangen – kein Fehler,
+    # wenn sie fehlen.
     cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
     if not cookies_content:
-        # Kein Fehler, aber im Log sichtbar machen – das war zuletzt der wahrscheinlichste Grund
-        # für Ausfälle (manche Videos verlangen einen angemeldeten Client) und war bisher nur an
-        # der ABWESENHEIT der "Cookies werden verwendet"-Zeile zu erahnen, nicht explizit sichtbar.
-        print("[WARN] Kein YOUTUBE_COOKIES-Secret gesetzt – ohne Anmeldung blockt YouTube manche Videos/Clients.", flush=True)
+        print("[INFO] Kein YOUTUBE_COOKIES-Secret gesetzt – PO-Token-Provider übernimmt die Bot-Erkennung, Cookies wären nur für altersbeschränkte Inhalte nötig.", flush=True)
         return []
     cookies_path = os.path.join(output_dir, "cookies.txt")
     with open(cookies_path, "w") as f:
         f.write(cookies_content)
-    print("[INFO] YouTube-Cookies werden verwendet.", flush=True)
+    print("[INFO] YouTube-Cookies zusätzlich vorhanden (für altersbeschränkte Inhalte).", flush=True)
     return ["--cookies", cookies_path]
 
 

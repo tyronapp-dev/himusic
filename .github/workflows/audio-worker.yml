@@ -33,10 +33,26 @@ jobs:
       # yt-dlp: bewusst der PyPI-"nightly"-Kanal statt stable. YouTube ändert seine
       # Bot-Erkennung so oft, dass Stable-Releases teils tagelang hinterherhinken – der
       # Nightly-Build enthält die aktuellsten Fixes für genau solche Ausfälle.
+      # bgutil-ytdlp-pot-provider: das yt-dlp-Plugin, das mit dem Token-Server unten spricht.
       - name: Install Python dependencies
-        run: pip install --quiet -U --pre "yt-dlp[default]" boto3 requests
+        run: pip install --quiet -U --pre "yt-dlp[default]" bgutil-ytdlp-pot-provider boto3 requests
       - name: yt-dlp-Version protokollieren
         run: yt-dlp --version
+
+      # PO-Token-Provider: generiert live einen kryptografischen "Proof of Origin"-Token
+      # (löst YouTubes BotGuard-Challenge in einer echten JS-Umgebung), GENAU der Mechanismus,
+      # den "Sign in to confirm you're not a bot" verlangt – ganz ohne Cookies, die vorher
+      # ständig verfielen. Läuft als lokaler HTTP-Server auf Port 4416, den yt-dlp automatisch
+      # anspricht (Standard-Port, keine extra Flags nötig).
+      - name: PO-Token-Provider starten
+        run: docker run --name bgutil-provider -d --init -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
+      - name: Auf PO-Token-Provider warten
+        run: |
+          for i in $(seq 1 20); do
+            (echo > /dev/tcp/127.0.0.1/4416) >/dev/null 2>&1 && echo "Provider bereit nach ${i}s" && exit 0
+            sleep 1
+          done
+          echo "::warning::PO-Token-Provider nach 20s nicht erreichbar – yt-dlp faellt auf Multi-Client-Fallback zurueck"
 
       - name: Run extractor
         env:
