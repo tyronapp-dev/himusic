@@ -78,8 +78,14 @@ jobs:
       # Läuft bewusst über den BESTEHENDEN /dispatch-import-Endpunkt am Cloudflare Worker (der hat
       # GH_PAT schon konfiguriert und dispatcht nachweislich zuverlässig) statt einen zweiten,
       # separaten GitHub-Token als neues Actions-Secret zu brauchen – kein zusätzlicher Setup-Schritt.
+      # SICHERHEITSSPERRE: Bleibt auf false, bis der Worker /dispatch-import "retry_count"
+      # zurueckgibt (siehe Chat-Anleitung). Der ALTE Worker ignoriert retry_count und generiert
+      # bei jedem Dispatch wieder retry_count=0 → ohne diese Sperre wuerde ein fehlschlagender
+      # Import JETZT SCHON in eine ECHTE Endlosschleife laufen (die 8er-Grenze griffe nie, weil
+      # der Zaehler serverseitig nie hochgezaehlt zurückkommt). Sobald der Worker deployed ist:
+      # "true" statt "false" setzen (oder mich Bescheid sagen, dann mache ich es).
       - name: Bei Fehlschlag mit frischer IP automatisch neu ausloesen
-        if: failure() && steps.extractor.outcome == 'failure'
+        if: false && failure() && steps.extractor.outcome == 'failure'
         env:
           YOUTUBE_URL:  ${{ github.event.client_payload.youtube_url }}
           RETRY_COUNT:  ${{ github.event.client_payload.retry_count }}
