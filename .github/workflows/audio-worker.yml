@@ -74,31 +74,27 @@ jobs:
       # ist gerade verbrannt". Hier wird bei Fehlschlag der GANZE Job neu ausgelöst → ein frischer
       # Runner bekommt eine NEUE zufällige IP. Empirisch ~25% Erfolgschance pro IP → bei 8 Versuchen
       # in Folge >90% Gesamterfolgschance, komplett kostenlos auf bestehender Infrastruktur.
+      #
+      # Läuft bewusst über den BESTEHENDEN /dispatch-import-Endpunkt am Cloudflare Worker (der hat
+      # GH_PAT schon konfiguriert und dispatcht nachweislich zuverlässig) statt einen zweiten,
+      # separaten GitHub-Token als neues Actions-Secret zu brauchen – kein zusätzlicher Setup-Schritt.
       - name: Bei Fehlschlag mit frischer IP automatisch neu ausloesen
         if: failure() && steps.extractor.outcome == 'failure'
         env:
-          GH_RETRY_PAT: ${{ secrets.GH_RETRY_PAT }}
           YOUTUBE_URL:  ${{ github.event.client_payload.youtube_url }}
-          JOB_ID:       ${{ github.event.client_payload.job_id }}
           RETRY_COUNT:  ${{ github.event.client_payload.retry_count }}
         run: |
           RETRY_COUNT=${RETRY_COUNT:-0}
           MAX_RETRIES=8
-          if [ -z "$GH_RETRY_PAT" ]; then
-            echo "::warning::GH_RETRY_PAT-Secret fehlt - automatischer Neuversuch uebersprungen."
-            exit 0
-          fi
           if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
-            echo "::error::Maximale Anzahl automatischer Neuversuche ($MAX_RETRIES) erreicht fuer Job $JOB_ID - endgueltig fehlgeschlagen."
+            echo "::error::Maximale Anzahl automatischer Neuversuche ($MAX_RETRIES) erreicht - endgueltig fehlgeschlagen."
             exit 0
           fi
           NEXT_RETRY=$((RETRY_COUNT + 1))
           echo "Automatischer Neuversuch $NEXT_RETRY/$MAX_RETRIES (frischer Runner = neue IP)..."
           sleep $((RANDOM % 8 + 4))
-          PAYLOAD=$(jq -n --arg url "$YOUTUBE_URL" --arg jid "$JOB_ID" --argjson retry "$NEXT_RETRY" \
-            '{event_type: "youtube-import-event", client_payload: {youtube_url: $url, job_id: $jid, retry_count: $retry}}')
-          curl -s -X POST \
-            -H "Authorization: Bearer $GH_RETRY_PAT" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/dispatches" \
+          PAYLOAD=$(jq -n --arg url "$YOUTUBE_URL" --argjson retry "$NEXT_RETRY" \
+            '{youtube_url: $url, retry_count: $retry}')
+          curl -s -X POST "https://himusic-api.tyron-app.workers.dev/dispatch-import" \
+            -H "Content-Type: application/json" \
             -d "$PAYLOAD"
