@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Himusic – Fehlende Songs finden</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; padding: 24px;
+    background: #0a0a12; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  p.sub { color: #9a9aa5; font-size: 14px; margin-top: 0; margin-bottom: 24px; }
+  .card {
+    background: rgba(255,255,255,0.06); backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 0.5px solid rgba(255,255,255,0.12); border-radius: 16px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  button {
+    font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+    border: none; border-radius: 12px; padding: 14px 20px; width: 100%;
+    background: #fa233b; color: #fff; transition: opacity 0.2s, transform 0.1s;
+  }
+  button:active { transform: scale(0.98); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.secondary { background: rgba(255,255,255,0.1); }
+  .progress-bar-bg { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.1); overflow: hidden; margin-top: 12px; }
+  .progress-bar-fill { height: 100%; background: #fa233b; width: 0%; transition: width 0.2s; }
+  .status { font-size: 14px; color: #cfcfd6; margin-top: 10px; }
+  .stat-row { display: flex; gap: 12px; margin-top: 16px; }
+  .stat { flex: 1; text-align: center; background: rgba(255,255,255,0.05); border-radius: 12px; padding: 14px; }
+  .stat .n { font-size: 26px; font-weight: 700; }
+  .stat .l { font-size: 12px; color: #9a9aa5; margin-top: 2px; }
+  .stat.new .n { color: #32d74b; }
+  .stat.dupe .n { color: #8e8e93; }
+  ul.filelist {
+    list-style: none; padding: 0; margin: 12px 0 0; max-height: 320px; overflow-y: auto;
+    border-radius: 10px; background: rgba(0,0,0,0.3);
+  }
+  ul.filelist li {
+    padding: 9px 12px; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.06);
+    display: flex; justify-content: space-between; gap: 10px;
+  }
+  ul.filelist li:last-child { border-bottom: none; }
+  ul.filelist li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul.filelist li .size { color: #8e8e93; flex-shrink: 0; }
+  #file-input { display: none; }
+  .hint { font-size: 12px; color: #8e8e93; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎵 Fehlende Songs finden</h1>
+  <p class="sub">Prüft deinen kompletten Musik-Ordner gegen die Cloud-Bibliothek – <b>ohne irgendetwas hochzuladen</b>. Nur die fehlenden Songs kannst du danach gezielt importieren.</p>
+
+  <div class="card">
+    <button id="btn-pick">📁 Ordner auswählen</button>
+    <input type="file" id="file-input" webkitdirectory multiple>
+    <p class="hint" id="pick-hint">Wähle den Ordner mit all deinen Musikdateien aus (Unterordner werden mit erfasst).</p>
+  </div>
+
+  <div class="card" id="progress-card" style="display:none;">
+    <div class="status" id="progress-status">Bereit...</div>
+    <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-fill"></div></div>
+  </div>
+
+  <div class="card" id="results-card" style="display:none;">
+    <div class="stat-row">
+      <div class="stat dupe"><div class="n" id="stat-dupe">0</div><div class="l">schon in der Cloud</div></div>
+      <div class="stat new"><div class="n" id="stat-new">0</div><div class="l">fehlen noch</div></div>
+    </div>
+    <ul class="filelist" id="missing-list"></ul>
+    <button id="btn-upload" class="secondary" style="margin-top:16px; display:none;">⬆️ Fehlende jetzt hochladen</button>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script>
+const API_URL = (window.HiMusicConfig && window.HiMusicConfig.apiBaseUrl) || 'https://himusic-api.tyron-app.workers.dev';
+const AUDIO_EXT = /\.(mp3|m4a|wav|aac|flac|ogg|opus|wma|mp4)$/i;
+
+// ── MD5 (Joseph Myers, public domain) – erzeugt exakt denselben Hash, den Cloudflare R2
+// beim Hochladen als ETag berechnet. So kann hier lokal geprüft werden, ohne hochzuladen. ──
+function md5cycle(x, k) {
+    let a = x[0], b = x[1], c = x[2], d = x[3];
+    a = ff(a, b, c, d, k[0], 7, -680876936); d = ff(d, a, b, c, k[1], 12, -389564586); c = ff(c, d, a, b, k[2], 17, 606105819); b = ff(b, c, d, a, k[3], 22, -1044525330);
+    a = ff(a, b, c, d, k[4], 7, -176418897); d = ff(d, a, b, c, k[5], 12, 1200080426); c = ff(c, d, a, b, k[6], 17, -1473231341); b = ff(b, c, d, a, k[7], 22, -45705983);
+    a = ff(a, b, c, d, k[8], 7, 1770035416); d = ff(d, a, b, c, k[9], 12, -1958414417); c = ff(c, d, a, b, k[10], 17, -42063); b = ff(b, c, d, a, k[11], 22, -1990404162);
+    a = ff(a, b, c, d, k[12], 7, 1804603682); d = ff(d, a, b, c, k[13], 12, -40341101); c = ff(c, d, a, b, k[14], 17, -1502002290); b = ff(b, c, d, a, k[15], 22, 1236535329);
+    a = gg(a, b, c, d, k[1], 5, -165796510); d = gg(d, a, b, c, k[6], 9, -1069501632); c = gg(c, d, a, b, k[11], 14, 643717713); b = gg(b, c, d, a, k[0], 20, -373897302);
+    a = gg(a, b, c, d, k[5], 5, -701558691); d = gg(d, a, b, c, k[10], 9, 38016083); c = gg(c, d, a, b, k[15], 14, -660478335); b = gg(b, c, d, a, k[4], 20, -405537848);
+    a = gg(a, b, c, d, k[9], 5, 568446438); d = gg(d, a, b, c, k[14], 9, -1019803690); c = gg(c, d, a, b, k[3], 14, -187363961); b = gg(b, c, d, a, k[8], 20, 1163531501);
+    a = gg(a, b, c, d, k[13], 5, -1444681467); d = gg(d, a, b, c, k[2], 9, -51403784); c = gg(c, d, a, b, k[7], 14, 1735328473); b = gg(b, c, d, a, k[12], 20, -1926607734);
+    a = hh(a, b, c, d, k[5], 4, -378558); d = hh(d, a, b, c, k[8], 11, -2022574463); c = hh(c, d, a, b, k[11], 16, 1839030562); b = hh(b, c, d, a, k[14], 23, -35309556);
+    a = hh(a, b, c, d, k[1], 4, -1530992060); d = hh(d, a, b, c, k[4], 11, 1272893353); c = hh(c, d, a, b, k[7], 16, -155497632); b = hh(b, c, d, a, k[10], 23, -1094730640);
+    a = hh(a, b, c, d, k[13], 4, 681279174); d = hh(d, a, b, c, k[0], 11, -358537222); c = hh(c, d, a, b, k[3], 16, -722521979); b = hh(b, c, d, a, k[6], 23, 76029189);
+    a = hh(a, b, c, d, k[9], 4, -640364487); d = hh(d, a, b, c, k[12], 11, -421815835); c = hh(c, d, a, b, k[15], 16, 530742520); b = hh(b, c, d, a, k[2], 23, -995338651);
+    a = ii(a, b, c, d, k[0], 6, -198630844); d = ii(d, a, b, c, k[7], 10, 1126891415); c = ii(c, d, a, b, k[14], 15, -1416354905); b = ii(b, c, d, a, k[5], 21, -57434055);
+    a = ii(a, b, c, d, k[12], 6, 1700485571); d = ii(d, a, b, c, k[3], 10, -1894986606); c = ii(c, d, a, b, k[10], 15, -1051523); b = ii(b, c, d, a, k[1], 21, -2054922799);
+    a = ii(a, b, c, d, k[8], 6, 1873313359); d = ii(d, a, b, c, k[15], 10, -30611744); c = ii(c, d, a, b, k[6], 15, -1560198380); b = ii(b, c, d, a, k[13], 21, 1309151649);
+    a = ii(a, b, c, d, k[4], 6, -145523070); d = ii(d, a, b, c, k[11], 10, -1120210379); c = ii(c, d, a, b, k[2], 15, 718787259); b = ii(b, c, d, a, k[9], 21, -343485551);
+    x[0] = add32(a, x[0]); x[1] = add32(b, x[1]); x[2] = add32(c, x[2]); x[3] = add32(d, x[3]);
+}
+function cmn(q, a, b, x, s, t) { a = add32(add32(a, q), add32(x, t)); return add32((a << s) | (a >>> (32 - s)), b); }
+function ff(a, b, c, d, x, s, t) { return cmn((b & c) | ((~b) & d), a, b, x, s, t); }
+function gg(a, b, c, d, x, s, t) { return cmn((b & d) | (c & (~d)), a, b, x, s, t); }
+function hh(a, b, c, d, x, s, t) { return cmn(b ^ c ^ d, a, b, x, s, t); }
+function ii(a, b, c, d, x, s, t) { return cmn(c ^ (b | (~d)), a, b, x, s, t); }
+function add32(a, b) { return (a + b) & 0xffffffff; }
+function md5blk(s, i) {
+    const b = [];
+    for (let j = 0; j < 64; j += 4) b[j >> 2] = s[i + j] | (s[i + j + 1] << 8) | (s[i + j + 2] << 16) | (s[i + j + 3] << 24);
+    return b;
+}
+function md5Bytes(bytes) {
+    const n = bytes.length;
+    const state = [1732584193, -271733879, -1732584194, 271733878];
+    let i;
+    for (i = 64; i <= n; i += 64) md5cycle(state, md5blk(bytes, i - 64));
+    const rem = n - (i - 64);
+    const tailLen = (((rem + 8) >> 6) + 1) * 64;
+    const tail = new Uint8Array(tailLen);
+    tail.set(bytes.subarray(i - 64, n));
+    tail[rem] = 0x80;
+    const bitLenLow = (n * 8) >>> 0;
+    const bitLenHigh = Math.floor(n / 0x20000000);
+    tail[tailLen - 8] = bitLenLow & 0xff;
+    tail[tailLen - 7] = (bitLenLow >>> 8) & 0xff;
+    tail[tailLen - 6] = (bitLenLow >>> 16) & 0xff;
+    tail[tailLen - 5] = (bitLenLow >>> 24) & 0xff;
+    tail[tailLen - 4] = bitLenHigh & 0xff;
+    for (let j = 0; j < tailLen; j += 64) md5cycle(state, md5blk(tail, j));
+    return state;
+}
+function hexByte(n) { let s = ''; for (let i = 0; i < 4; i++) s += ((n >> (i * 8)) & 0xff).toString(16).padStart(2, '0'); return s; }
+async function md5OfFile(file) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    return md5Bytes(buf).map(hexByte).join('');
+}
+
+// ── UI-Logik ──
+const filePicker   = document.getElementById('file-input');
+const btnPick      = document.getElementById('btn-pick');
+const pickHint     = document.getElementById('pick-hint');
+const progressCard = document.getElementById('progress-card');
+const progressFill = document.getElementById('progress-fill');
+const progressStatus = document.getElementById('progress-status');
+const resultsCard  = document.getElementById('results-card');
+const statDupe     = document.getElementById('stat-dupe');
+const statNew      = document.getElementById('stat-new');
+const missingList  = document.getElementById('missing-list');
+const btnUpload    = document.getElementById('btn-upload');
+
+let missingFiles = []; // {file, key}
+
+btnPick.addEventListener('click', () => filePicker.click());
+
+filePicker.addEventListener('change', async () => {
+    const all = Array.from(filePicker.files).filter(f => AUDIO_EXT.test(f.name));
+    if (all.length === 0) { pickHint.textContent = 'Keine Audiodateien im gewählten Ordner gefunden.'; return; }
+
+    btnPick.disabled = true;
+    resultsCard.style.display = 'none';
+    progressCard.style.display = 'block';
+    missingList.innerHTML = '';
+    missingFiles = [];
+
+    progressStatus.textContent = `📡 Lade bekannte Songs aus der Cloud...`;
+    let known;
+    try {
+        const res = await fetch(`${API_URL}/songs/known-hashes`);
+        known = await res.json();
+    } catch (e) {
+        progressStatus.textContent = `❌ Konnte Cloud-Bibliothek nicht laden: ${e.message}`;
+        btnPick.disabled = false;
+        return;
+    }
+    const knownHashes = new Set(known.map(k => k.hash));
+
+    let checked = 0, dupeCount = 0;
+    const t0 = Date.now();
+    for (const file of all) {
+        const hash = await md5OfFile(file);
+        const key = `${file.size}:${hash}`;
+        if (knownHashes.has(key)) dupeCount++;
+        else missingFiles.push({ file, key });
+        checked++;
+        if (checked % 5 === 0 || checked === all.length) {
+            const pct = Math.round((checked / all.length) * 100);
+            const elapsed = (Date.now() - t0) / 1000;
+            const eta = elapsed > 1 ? Math.round((all.length - checked) * (elapsed / checked)) : 0;
+            progressFill.style.width = pct + '%';
+            progressStatus.textContent = `🔍 Prüfe ${checked}/${all.length} · noch ~${eta}s`;
+        }
+    }
+
+    progressStatus.textContent = `✅ Prüfung abgeschlossen – ${all.length} Dateien geprüft`;
+    resultsCard.style.display = 'block';
+    statDupe.textContent = dupeCount;
+    statNew.textContent = missingFiles.length;
+
+    missingFiles
+        .sort((a, b) => a.file.name.localeCompare(b.file.name))
+        .forEach(({ file }) => {
+            const li = document.createElement('li');
+            const mb = (file.size / 1048576).toFixed(1);
+            li.innerHTML = `<span class="name">${file.name}</span><span class="size">${mb} MB</span>`;
+            missingList.appendChild(li);
+        });
+
+    btnUpload.style.display = missingFiles.length > 0 ? 'block' : 'none';
+    btnPick.disabled = false;
+});
+
+btnUpload.addEventListener('click', async () => {
+    btnUpload.disabled = true;
+    const total = missingFiles.length;
+    let done = 0, dupes = 0, failed = 0;
+
+    async function uploadOne({ file }) {
+        const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+        try {
+            const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
+                method: 'PUT', headers: { 'Content-Type': file.type || 'audio/mpeg' }, body: file,
+            });
+            if (!uploadRes.ok) throw new Error('upload failed');
+            const uploadData = await uploadRes.json();
+            const title = file.name.replace(/\.[^/.]+$/, '').trim();
+            const songRes = await fetch(`${API_URL}/songs`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title, artist: 'Unbekannt', cover_data: '', file_url: uploadData.url, file_size: file.size, duration: 0, vibes: [] }),
+            });
+            const result = await songRes.json().catch(() => ({}));
+            if (result && result.duplicate) dupes++; else done++;
+        } catch (e) { failed++; }
+        const processed = done + dupes + failed;
+        btnUpload.textContent = `⬆️ ${processed}/${total} hochgeladen...`;
+    }
+
+    const CONCURRENT = 5;
+    let idx = 0;
+    async function worker() { while (idx < missingFiles.length) { await uploadOne(missingFiles[idx++]); } }
+    await Promise.all(Array.from({ length: CONCURRENT }, worker));
+
+    btnUpload.textContent = `✅ ${done} importiert${dupes > 0 ? `, ${dupes} waren doch schon da` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}`;
+});
+</script>
+</body>
+</html>
