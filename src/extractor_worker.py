@@ -59,6 +59,13 @@ def _cookies_args(output_dir: str) -> list:
     return ["--cookies", cookies_path]
 
 
+# --impersonate chrome: yt-dlp ahmt den kompletten TLS-Fingerprint eines echten Chrome-Browsers
+# nach (nicht nur den User-Agent-Header). Pythons Standard-HTTP-Stack hat einen leicht erkennbaren
+# "Bot"-Fingerabdruck auf TLS-Ebene, unabhängig von IP, Cookies oder PO-Token – ein zusätzlicher,
+# unabhängiger Signal-Layer gegen die Bot-Erkennung. Braucht curl_cffi (siehe Workflow-Install).
+IMPERSONATE_ARGS = ["--impersonate", "chrome"]
+
+
 def get_video_info(youtube_url: str, cookies_args: list) -> dict:
     """Holt Titel und Dauer ohne Download."""
     cmd = [
@@ -68,6 +75,7 @@ def get_video_info(youtube_url: str, cookies_args: list) -> dict:
         "--quiet",
         "--no-warnings",
         "--extractor-args", f"youtube:player_client={PLAYER_CLIENTS}",
+        *IMPERSONATE_ARGS,
         *cookies_args,
         youtube_url,
     ]
@@ -98,6 +106,7 @@ def _run_ytdlp_download(youtube_url: str, output_template: str, cookies_args: li
         "--no-progress",
         "--quiet",
         "--no-warnings",
+        *IMPERSONATE_ARGS,
         *cookies_args,
         youtube_url,
     ]

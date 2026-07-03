@@ -35,7 +35,7 @@ jobs:
       # Nightly-Build enthält die aktuellsten Fixes für genau solche Ausfälle.
       # bgutil-ytdlp-pot-provider: das yt-dlp-Plugin, das mit dem Token-Server unten spricht.
       - name: Install Python dependencies
-        run: pip install --quiet -U --pre "yt-dlp[default]" bgutil-ytdlp-pot-provider boto3 requests
+        run: pip install --quiet -U --pre "yt-dlp[default]" "yt-dlp[curl_cffi]" bgutil-ytdlp-pot-provider boto3 requests
       - name: yt-dlp-Version protokollieren
         run: yt-dlp --version
 
