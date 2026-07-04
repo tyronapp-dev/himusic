@@ -1,15 +1,15 @@
-// Himusic Cloud – Lokaler YouTube-Import-Watcher
+// Himusic Cloud – YouTube-Import-Watcher (Windows-PC ODER Linux-Server, z.B. Oracle Cloud VM)
 //
-// Läuft auf DEINEM PC statt auf einem Cloud-CI-Runner. Der Grund: YouTubes Bot-Erkennung
-// blockiert die Rechenzentrums-IPs von GitHub Actions zunehmend (bestätigt: mehrere Videos
-// scheiterten dort 0/8 trotz PO-Token und TLS-Impersonation) – von der eigenen Heim-IP aus
-// gab es im Test keinen einzigen Bot-Block. Dieses Skript pollt die Cloud-Warteschlange und
-// erledigt Download + Upload lokal.
+// Läuft auf einer normalen Internet-IP statt auf einem Cloud-CI-Runner. Der Grund: YouTubes
+// Bot-Erkennung blockiert die Rechenzentrums-IPs von GitHub Actions zunehmend (bestätigt:
+// mehrere Videos scheiterten dort 0/8 trotz PO-Token und TLS-Impersonation) – von einer
+// normalen Heim- oder Server-IP aus gab es im Test keinen einzigen Bot-Block. Dieses Skript
+// pollt die Cloud-Warteschlange und erledigt Download + Upload lokal.
 //
 // Voraussetzungen (einmalig):
-//   1. yt-dlp.exe   von https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe
-//   2. ffmpeg.exe   aus https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip (bin/ffmpeg.exe)
-//   Beide Dateien in DIESEN Ordner legen (local-import-watcher/).
+//   Windows: yt-dlp.exe + ffmpeg.exe in DIESEN Ordner legen (siehe setup.bat)
+//   Linux:   yt-dlp und ffmpeg systemweit installieren (z.B. per dnf/apt), dann läuft
+//            dieses Skript unverändert – es erkennt das Betriebssystem automatisch.
 //
 // Start: node watch.js   (einfach laufen lassen, solange du Importe machen willst)
 
@@ -19,10 +19,13 @@ const os = require('os');
 const path = require('path');
 
 const API_URL = 'https://himusic-api.tyron-app.workers.dev';
-const YTDLP_PATH = path.join(__dirname, 'yt-dlp.exe');
-const FFMPEG_PATH = path.join(__dirname, 'ffmpeg.exe');
+const IS_WINDOWS = process.platform === 'win32';
+// Windows: die mitgelieferten .exe-Dateien neben diesem Skript. Linux: die systemweit
+// installierten Programme (liegen im PATH, z.B. nach "sudo dnf install yt-dlp ffmpeg").
+const YTDLP_PATH = IS_WINDOWS ? path.join(__dirname, 'yt-dlp.exe') : 'yt-dlp';
+const FFMPEG_PATH = IS_WINDOWS ? path.join(__dirname, 'ffmpeg.exe') : 'ffmpeg';
 const POLL_INTERVAL_MS = 5000;
-const CONCURRENT = 3; // mehrere Songs gleichzeitig herunterladen
+const CONCURRENT = IS_WINDOWS ? 3 : 2; // Server-VM hat oft weniger RAM/CPU als ein PC
 
 function run(cmd, args, timeoutMs = 300000) {
     return new Promise((resolve, reject) => {
@@ -129,11 +132,26 @@ async function poll() {
     }
 }
 
-if (!fs.existsSync(YTDLP_PATH) || !fs.existsSync(FFMPEG_PATH)) {
-    console.error('yt-dlp.exe und/oder ffmpeg.exe fehlen in diesem Ordner. Siehe Kommentar am Dateianfang.');
-    process.exit(1);
+function startWatching() {
+    console.log(`Himusic YouTube-Watcher gestartet (prüft alle ${POLL_INTERVAL_MS / 1000}s, bis zu ${CONCURRENT} parallel). Zum Beenden: Strg+C.`);
+    setInterval(poll, POLL_INTERVAL_MS);
+    poll();
 }
 
-console.log(`Himusic YouTube-Watcher gestartet (prüft alle ${POLL_INTERVAL_MS / 1000}s, bis zu ${CONCURRENT} parallel). Zum Beenden: Strg+C.`);
-setInterval(poll, POLL_INTERVAL_MS);
-poll();
+if (IS_WINDOWS) {
+    // Windows: die .exe-Dateien müssen als Dateien neben dem Skript liegen (setup.bat lädt sie).
+    if (!fs.existsSync(YTDLP_PATH) || !fs.existsSync(FFMPEG_PATH)) {
+        console.error('yt-dlp.exe und/oder ffmpeg.exe fehlen in diesem Ordner. Siehe Kommentar am Dateianfang.');
+        process.exit(1);
+    }
+    startWatching();
+} else {
+    // Linux: liegen im PATH (Paketmanager) statt als Dateien hier – kurzer Check per "--version".
+    let checked = 0;
+    const fail = () => { console.error('yt-dlp und/oder ffmpeg sind nicht installiert oder nicht im PATH. Siehe Kommentar am Dateianfang.'); process.exit(1); };
+    [[YTDLP_PATH, '--version'], [FFMPEG_PATH, '-version']].forEach(([bin, flag]) => {
+        const proc = spawn(bin, [flag], { stdio: 'ignore' });
+        proc.on('error', fail);
+        proc.on('close', (code) => { if (code !== 0 && code !== null) return fail(); if (++checked === 2) startWatching(); });
+    });
+}

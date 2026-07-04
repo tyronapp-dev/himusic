@@ -1,23 +1,38 @@
-# Lokaler YouTube-Import-Watcher
+# YouTube-Import-Watcher
 
-Läuft auf deinem PC statt auf einem Cloud-CI-Runner. Grund: YouTubes Bot-Erkennung blockiert
-GitHub-Actions-IPs zunehmend (verifiziert: mehrere Videos scheiterten dort 0/8 trotz PO-Token
-und TLS-Impersonation), während die eigene Heim-IP im Test keinen einzigen Bot-Block hatte.
+Läuft auf einer normalen Internet-IP (PC zuhause ODER eigener Linux-Server) statt auf einem
+Cloud-CI-Runner. Grund: YouTubes Bot-Erkennung blockiert GitHub-Actions-IPs zunehmend
+(verifiziert: mehrere Videos scheiterten dort 0/8 trotz PO-Token und TLS-Impersonation),
+während eine normale Heim- oder Server-IP im Test keinen einzigen Bot-Block hatte.
 
-## Einmaliges Setup
+## Einmaliges Setup — Windows (eigener PC)
 
 1. Diesen Ordner (`local-import-watcher/`) auf deinem PC haben (liegt schon im Projekt-Repo).
 2. Doppelklick auf **`setup.bat`** — lädt `yt-dlp.exe` und `ffmpeg.exe` automatisch herunter (~110 MB, dauert 1-2 Min).
-3. Fertig.
+3. Fertig. Starten mit Doppelklick auf **`start.bat`**.
 
-## Benutzen
+Nachteil: läuft nur, solange der PC an und das Fenster offen ist.
 
-Doppelklick auf **`start.bat`**, solange offen lassen. Der Watcher prüft alle 5 Sekunden, ob
-in der App ein YouTube-Import angestoßen wurde, und lädt bis zu 3 Songs gleichzeitig herunter.
+## Einmaliges Setup — Linux-Server (z.B. Oracle Cloud Free-Tier-VM, läuft 24/7)
 
-Fenster einfach offen lassen, während du Songs importierst. Schließen (Strg+C oder Fenster zu)
-stoppt ihn — laufende Importe brechen dann ab, in der Warteschlange verbleibt aber nichts hängen
-(die App zeigt neue Importe erst an, wenn der Watcher sie tatsächlich verarbeitet hat).
+1. Diesen Ordner per `scp` auf den Server kopieren, z.B.:
+   ```
+   scp -i deinkey.pem -r local-import-watcher opc@DEINE_SERVER_IP:~/himusic-watcher
+   ```
+2. Per SSH einloggen: `ssh -i deinkey.pem opc@DEINE_SERVER_IP`
+3. Im Ordner: `chmod +x setup-linux.sh install-service.sh && ./setup-linux.sh`
+   (installiert yt-dlp, ffmpeg, Node.js)
+4. Als Dauer-Dienst einrichten: `sudo ./install-service.sh`
+   (läuft ab jetzt automatisch, auch nach Neustart, auch nach SSH-Trennung)
+
+Log ansehen: `sudo journalctl -u himusic-watcher -f`
+
+## Wie es funktioniert
+
+Der Watcher prüft alle 5 Sekunden, ob in der App ein YouTube-Import angestoßen wurde, und
+lädt mehrere Songs gleichzeitig herunter (Windows: 3 parallel, Linux-VM: 2 parallel, wegen
+weniger RAM). Gescheiterte Importe werden aus der Warteschlange entfernt, damit nichts
+hängen bleibt — einfach in der App erneut anstoßen.
 
 ## Voraussetzung im Backend
 
