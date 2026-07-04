@@ -6,3 +6,4 @@
 # die sich jeder einmalig selbst herunterlaedt (siehe local-import-watcher/README.md)
 local-import-watcher/yt-dlp.exe
 local-import-watcher/ffmpeg.exe
+local-import-watcher/watcher.log
