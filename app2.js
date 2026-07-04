@@ -2987,35 +2987,60 @@ async function processBackgroundSync() {
 setTimeout(processBackgroundSync, 3000);
 
 // ==========================================
-// 4. YOUTUBE IMPORT (via GitHub Actions – fire & forget)
+// 4. YOUTUBE IMPORT
 // ==========================================
+// Primärweg: /youtube-queue – ein lokales Hilfsprogramm auf dem eigenen PC (Heim-IP, siehe
+// local-import-watcher/) holt sich die Warteschlange und lädt herunter. Grund: GitHub-Actions-
+// Runner-IPs werden von YouTube zunehmend als Bot geblockt (verifiziert: mehrere Videos
+// scheiterten dort komplett, trotz PO-Token + TLS-Impersonation), die eigene Heim-IP hatte im
+// Test keinen einzigen Block. Fällt automatisch auf /dispatch-import (GitHub Actions) zurück,
+// falls der Worker die neue Route noch nicht kennt (z.B. vor einem Deploy) oder kein Watcher läuft.
 async function startYoutubeImport(url, statusEl) {
     if (!url) return;
     if (statusEl) {
         statusEl.style.display = 'block';
-        statusEl.innerText = 'Wird gestartet...';
+        statusEl.innerText = 'Wird eingereiht...';
         statusEl.style.color = '#fff';
     }
     try {
-        const response = await fetch(`${API_URL}/dispatch-import`, {
+        const queueRes = await fetch(`${API_URL}/youtube-queue`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ youtube_url: url })
         });
-        if (!response.ok) throw new Error(`Server: ${response.status}`);
-        if (statusEl) {
-            statusEl.innerText = '⏳ Download im Hintergrund gestartet! Song erscheint in ~2 Min.';
-            statusEl.style.color = '#32d74b';
-            setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+        if (queueRes.ok) {
+            if (statusEl) {
+                statusEl.innerText = '⏳ In Warteschlange – dein lokaler Watcher lädt jetzt herunter.';
+                statusEl.style.color = '#32d74b';
+                setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+            }
+            return true;
         }
-        return true;
-    } catch (error) {
-        if (statusEl) {
-            statusEl.innerText = `❌ Fehler: ${error.message}`;
-            statusEl.style.color = '#ff3b30';
-            setTimeout(() => { statusEl.style.display = 'none'; }, 4000);
+        throw new Error(`Warteschlange nicht erreichbar (${queueRes.status})`);
+    } catch (queueError) {
+        // Fallback: GitHub-Actions-Kette (funktioniert auch ohne laufenden lokalen Watcher,
+        // nur mit geringerer Erfolgsquote wegen Cloud-IP-Blocks).
+        try {
+            const response = await fetch(`${API_URL}/dispatch-import`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ youtube_url: url })
+            });
+            if (!response.ok) throw new Error(`Server: ${response.status}`);
+            if (statusEl) {
+                statusEl.innerText = '⏳ Download im Hintergrund gestartet (Cloud-Fallback)! Song erscheint in ~2 Min.';
+                statusEl.style.color = '#32d74b';
+                setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+            }
+            return true;
+        } catch (error) {
+            if (statusEl) {
+                statusEl.innerText = `❌ Fehler: ${error.message}`;
+                statusEl.style.color = '#ff3b30';
+                setTimeout(() => { statusEl.style.display = 'none'; }, 4000);
+            }
+            return false;
         }
-        return false;
     }
 }
 
