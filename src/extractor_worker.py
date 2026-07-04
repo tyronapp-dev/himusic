@@ -29,9 +29,51 @@ from botocore.config import Config
 def require_env(key: str) -> str:
     val = os.environ.get(key, "").strip()
     if not val:
-        print(f"[ERROR] Pflicht-Umgebungsvariable fehlt: {key}", flush=True)
+        gh_error(f"Pflicht-Umgebungsvariable fehlt: {key}")
         sys.exit(1)
     return val
+
+
+# GitHub-Actions-Annotation (::error::) statt nur print(): Rohe Job-Logs erfordern ein Admin-
+# Token zum Abrufen (403 sonst), Annotations dagegen sind über die öffentliche Checks-API
+# abrufbar. Damit ist der tatsächliche Fehlertext künftig direkt einsehbar, ohne dass jemand
+# Screenshots aus der GitHub-Oberfläche kopieren muss. Newlines/Prozentzeichen müssen für
+# Workflow-Commands kodiert werden; auf ~3800 Zeichen gekürzt (Annotation-Längenlimit).
+def gh_error(message: str) -> None:
+    print(f"[ERROR] {message}", flush=True)
+    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")[:3800]
+    print(f"::error::{escaped}", flush=True)
+
+
+def gh_notice(message: str) -> None:
+    print(f"[INFO] {message}", flush=True)
+    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")[:3800]
+    print(f"::notice::{escaped}", flush=True)
+
+
+def _diagnose_environment() -> None:
+    """Prüft VOR dem eigentlichen Download, ob die beiden Abwehrschichten (PO-Token-Server,
+    curl_cffi für --impersonate) wirklich einsatzbereit sind. Als Annotation abrufbar – so lässt
+    sich unterscheiden zwischen "Schichten liefen, YouTube blockte trotzdem" (spricht für IP-
+    Reputation) und "Schicht war nie aktiv" (spricht für einen Setup-/Timing-Fehler im Workflow)."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", 4416), timeout=2):
+            po_status = "erreichbar"
+    except OSError as exc:
+        po_status = f"NICHT erreichbar ({exc})"
+
+    try:
+        import curl_cffi  # noqa: F401
+        cffi_status = "installiert"
+    except ImportError as exc:
+        cffi_status = f"FEHLT ({exc})"
+
+    ytdlp_version = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True, timeout=15).stdout.strip()
+
+    gh_notice(
+        f"Umgebungs-Check: yt-dlp={ytdlp_version} | PO-Token-Server={po_status} | curl_cffi={cffi_status}"
+    )
 
 
 # Mehrere YouTube-Player-Clients in EINEM yt-dlp-Aufruf anbieten. YouTube blockt einzelne
@@ -134,7 +176,7 @@ def download_audio(youtube_url: str, output_dir: str, cookies_args: list) -> str
             time.sleep(8)
 
     if result.returncode != 0:
-        print(f"[ERROR] yt-dlp endgültig fehlgeschlagen nach 2 Versuchen.\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}", flush=True)
+        gh_error(f"yt-dlp endgültig fehlgeschlagen nach 2 Versuchen.\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
         sys.exit(1)
 
     # Datei finden
@@ -145,7 +187,7 @@ def download_audio(youtube_url: str, output_dir: str, cookies_args: list) -> str
         files = [f for f in files if f.suffix.lower() in {".m4a", ".mp4", ".webm", ".ogg", ".opus"}]
 
     if not files:
-        print("[ERROR] Keine Audio-Datei nach Download gefunden.", flush=True)
+        gh_error("Keine Audio-Datei nach Download gefunden.")
         sys.exit(1)
 
     audio_path = str(files[0])
@@ -213,7 +255,7 @@ def upload_to_r2(
         print("[INFO] Multipart-Upload abgeschlossen.", flush=True)
 
     except Exception as exc:
-        print(f"[ERROR] Upload-Fehler, breche ab: {exc}", flush=True)
+        gh_error(f"R2-Upload-Fehler, breche ab: {exc}")
         s3.abort_multipart_upload(Bucket=bucket_name, Key=r2_key, UploadId=upload_id)
         sys.exit(1)
 
@@ -247,7 +289,7 @@ def register_song(
     )
 
     if not resp.ok:
-        print(f"[ERROR] D1-Registrierung fehlgeschlagen: {resp.status_code} {resp.text}", flush=True)
+        gh_error(f"D1-Registrierung fehlgeschlagen: {resp.status_code} {resp.text}")
         sys.exit(1)
 
     data = resp.json()
@@ -269,7 +311,8 @@ def main() -> None:
     d1_api_url           = require_env("D1_API_URL")
     d1_api_key           = require_env("D1_API_KEY")
 
-    print(f"[INFO] Job {job_id} gestartet: {youtube_url}", flush=True)
+    gh_notice(f"Job {job_id} gestartet: {youtube_url}")
+    _diagnose_environment()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Cookies EINMAL schreiben, für Metadaten- und Download-Aufruf gemeinsam nutzen
