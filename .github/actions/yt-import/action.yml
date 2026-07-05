@@ -35,7 +35,7 @@ inputs:
   youtube_cookies:
     required: false
     default: ""
-    description: "Optional: Cookies für altersbeschränkte Inhalte"
+    description: "Netscape-Format-Cookies eines angemeldeten YouTube-Accounts – primäre Abwehr gegen Bot-Blocks, sollte immer gesetzt sein"
 runs:
   using: "composite"
   steps:

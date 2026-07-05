@@ -84,20 +84,22 @@ PLAYER_CLIENTS = "ios,android,web_creator,tv,mweb"
 
 
 def _cookies_args(output_dir: str) -> list:
-    # Cookies sind NICHT mehr die Hauptverteidigung gegen "Sign in to confirm you're not a bot" –
-    # das übernimmt jetzt der PO-Token-Provider (siehe Workflow: bgutil-ytdlp-pot-provider läuft
-    # als Docker-Container und generiert live einen gültigen Proof-of-Origin-Token, unabhängig
-    # von Cookies, die vorher ständig verfielen). Cookies bleiben optional als ZWEITE Schicht nur
-    # für altersbeschränkte/private Inhalte, die eine echte Anmeldung verlangen – kein Fehler,
-    # wenn sie fehlen.
+    # Cookies sind die HAUPTVERTEIDIGUNG gegen "Sign in to confirm you're not a bot": ein
+    # angemeldeter Account wird von YouTube deutlich seltener geblockt als ein anonymer Request,
+    # unabhängig von der Runner-IP. Der PO-Token-Provider (Docker-Container weiter unten im
+    # Workflow) bleibt als zusätzliche, unabhängige Schicht aktiv, hat sich allein aber als nicht
+    # ausreichend erwiesen (siehe YouTube-Import-Architektur-Memory) – ohne gültige Cookies ist mit
+    # einer deutlich höheren Fehlerquote zu rechnen. cookies.txt muss im Netscape-Format vorliegen
+    # (Export z.B. per Browser-Extension "Get cookies.txt LOCALLY") und regelmäßig erneuert werden,
+    # da YouTube-Sessions nach einiger Zeit ablaufen.
     cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
     if not cookies_content:
-        print("[INFO] Kein YOUTUBE_COOKIES-Secret gesetzt – PO-Token-Provider übernimmt die Bot-Erkennung, Cookies wären nur für altersbeschränkte Inhalte nötig.", flush=True)
+        gh_error("YOUTUBE_COOKIES-Secret ist leer oder nicht gesetzt – ohne angemeldete Session ist die Bot-Blockrate erfahrungsgemäß sehr hoch. Secret in den Repo-Settings unter Secrets and variables > Actions setzen (frischer Cookie-Export, Netscape-Format).")
         return []
     cookies_path = os.path.join(output_dir, "cookies.txt")
     with open(cookies_path, "w") as f:
         f.write(cookies_content)
-    print("[INFO] YouTube-Cookies zusätzlich vorhanden (für altersbeschränkte Inhalte).", flush=True)
+    print("[INFO] YouTube-Cookies vorhanden – werden als primäre Bot-Abwehr verwendet.", flush=True)
     return ["--cookies", cookies_path]
 
 
@@ -176,7 +178,11 @@ def download_audio(youtube_url: str, output_dir: str, cookies_args: list) -> str
             time.sleep(8)
 
     if result.returncode != 0:
-        gh_error(f"yt-dlp endgültig fehlgeschlagen nach 2 Versuchen.\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
+        combined = f"{result.stdout}\n{result.stderr}"
+        if "Sign in to confirm" in combined or "not a bot" in combined:
+            gh_error(f"yt-dlp wurde als Bot geblockt – YOUTUBE_COOKIES ist wahrscheinlich abgelaufen oder leer und muss mit einem frischen Cookie-Export erneuert werden.\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
+        else:
+            gh_error(f"yt-dlp endgültig fehlgeschlagen nach 2 Versuchen.\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
         sys.exit(1)
 
     # Datei finden
