@@ -87,11 +87,25 @@ async function apiReorderPlaylistSongs(playlistId, updates) {
   return await response.json();
 }
 
+// Setzt die Akzentfarbe UND berechnet daraus die passende Schriftfarbe für Elemente, die die
+// Akzentfarbe als Hintergrund nutzen (Buttons, Vibe-Pills, Checkboxen). Bei heller Akzentfarbe
+// (z.B. Weiß) wird die Schrift schwarz, bei dunkler weiß – so bleibt Text immer lesbar.
+function _setAccentColor(color) {
+    document.documentElement.style.setProperty('--accent', color);
+    let r = 0, g = 0, b = 0;
+    const hex = (color || '').replace('#', '');
+    if (hex.length === 6) { r = parseInt(hex.slice(0,2),16); g = parseInt(hex.slice(2,4),16); b = parseInt(hex.slice(4,6),16); }
+    else if (hex.length === 3) { r = parseInt(hex[0]+hex[0],16); g = parseInt(hex[1]+hex[1],16); b = parseInt(hex[2]+hex[2],16); }
+    // Wahrgenommene Helligkeit (0–255). Über ~150 = helle Farbe → dunkle Schrift.
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    document.documentElement.style.setProperty('--accent-text', luminance > 150 ? '#000' : '#fff');
+}
+
 function updatePlayerBackground(color1, color2) {
     const bg = document.querySelector('.dynamic-bg');
     if (!bg) return;
     bg.style.backgroundImage = `radial-gradient(at 0% 10%, ${color1}66 0px, transparent 60%), radial-gradient(at 100% 20%, ${color2}44 0px, transparent 60%), radial-gradient(at 50% 100%, rgba(0, 0, 0, 1) 0px, transparent 100%)`;
-    document.documentElement.style.setProperty('--accent', color1);
+    _setAccentColor(color1);
 }
 
 function formatDuration(totalSeconds) {
@@ -199,7 +213,7 @@ async function fetchCoverFromiTunes(title, artist) {
     return (meta && meta.cover) ? meta.cover : null;
 }
 
-const AVAILABLE_VIBES = ["Afro", "Ghana", "RnB", "Old School", "Deepdream", "LD", "Calm", "SAD", "Gym", "HYPE", "Carpool", "Amapiano", "Hard rap", "Dancehall", "Rap", "Summer", "Latenight", "Dance", "Christ", "Soul", "Exotic", "N-rei"];
+const AVAILABLE_VIBES = ["Afro", "Ghana", "RnB", "Old School", "Deepdream", "LD", "Calm", "SAD", "Gym", "HYPE", "Carpool", "Amapiano", "Hard rap", "Dancehall", "Rap", "Summer", "Latenight", "Dance", "Christ", "Soul", "Exotic", "N-rei", "ODS", "G-Nrei"];
 
 function addClearButton(inputElement) {
     if (!inputElement || inputElement.dataset.hasClearBtn) return;
@@ -2268,8 +2282,8 @@ async function createNewPlaylistProcess() {
     const colorPicker = document.getElementById('theme-color-picker');
     if (colorPicker) {
         const savedColor = localStorage.getItem('heatbox_theme_color');
-        if (savedColor) { colorPicker.value = savedColor; document.documentElement.style.setProperty('--accent', savedColor); }
-        colorPicker.addEventListener('input', (e) => { const newColor = e.target.value; document.documentElement.style.setProperty('--accent', newColor); localStorage.setItem('heatbox_theme_color', newColor); if(typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights(); });
+        if (savedColor) { colorPicker.value = savedColor; _setAccentColor(savedColor); }
+        colorPicker.addEventListener('input', (e) => { const newColor = e.target.value; _setAccentColor(newColor); localStorage.setItem('heatbox_theme_color', newColor); if(typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights(); });
     }
 
     const cfToggle = document.getElementById('setting-crossfade-toggle');
