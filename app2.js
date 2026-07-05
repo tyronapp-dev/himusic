@@ -3037,22 +3037,78 @@ function _ytBatchFinish() {
     }
 }
 
-async function _watchForYoutubeImportAndCache() {
+async function _pollForFreshYtSongs(knownIds) {
+    for (let attempt = 0; attempt < 15; attempt++) {
+        await new Promise(r => setTimeout(r, 8000));
+        try {
+            const res = await fetch(`${API_URL}/songs`);
+            if (!res.ok) continue;
+            const songs = await res.json();
+            const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
+            if (fresh.length > 0) return fresh;
+        } catch (e) {}
+    }
+    return null;
+}
+
+function _cacheFreshYtSongs(fresh) {
+    fresh.forEach(s => { if (window.hbLocal) window.hbLocal.downloadToLocal(s.file_url, s.title); });
+    if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
+}
+
+// queueItemId ist gesetzt, wenn der Import über /youtube-queue lief (lokaler-Watcher-Weg): taucht
+// der Song nach ~2 Min nicht auf, läuft dort vermutlich KEIN Watcher (Queue-POST meldet fälschlich
+// "erfolgreich eingereiht", auch wenn niemand die Warteschlange abarbeitet – Songs blieben sonst
+// für immer unbemerkt liegen). In dem Fall den hängenden Queue-Eintrag aufräumen und automatisch
+// auf den GitHub-Actions-Fallback wechseln, statt den Nutzer im Unklaren zu lassen.
+async function _watchForYoutubeImportAndCache(url, queueItemId, statusEl) {
     const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
     try {
-        for (let attempt = 0; attempt < 15; attempt++) {
-            await new Promise(r => setTimeout(r, 8000));
-            try {
-                const res = await fetch(`${API_URL}/songs`);
-                if (!res.ok) continue;
-                const songs = await res.json();
-                const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
-                if (fresh.length > 0) {
-                    fresh.forEach(s => { if (window.hbLocal) window.hbLocal.downloadToLocal(s.file_url, s.title); });
-                    if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
-                    return;
-                }
-            } catch (e) {}
+        const fresh = await _pollForFreshYtSongs(knownIds);
+        if (fresh) { _cacheFreshYtSongs(fresh); return; }
+
+        if (!queueItemId) {
+            if (statusEl) {
+                statusEl.style.display = 'block';
+                statusEl.innerText = '❌ Download nicht angekommen – bitte erneut versuchen.';
+                statusEl.style.color = '#ff3b30';
+                setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+            }
+            return;
+        }
+
+        fetch(`${API_URL}/youtube-queue/${queueItemId}`, { method: 'DELETE' }).catch(() => {});
+        if (statusEl) {
+            statusEl.style.display = 'block';
+            statusEl.innerText = '⚠️ Kein lokaler Watcher aktiv – wechsle zu Cloud-Fallback...';
+            statusEl.style.color = '#fa9a00';
+        }
+        try {
+            const response = await fetch(`${API_URL}/dispatch-import`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ youtube_url: url }),
+            });
+            if (!response.ok) throw new Error(`Server: ${response.status}`);
+            if (statusEl) {
+                statusEl.innerText = '⏳ Cloud-Fallback gestartet, Song erscheint in ~2 Min.';
+                statusEl.style.color = '#32d74b';
+                setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+            }
+            const fresh2 = await _pollForFreshYtSongs(knownIds);
+            if (fresh2) { _cacheFreshYtSongs(fresh2); return; }
+            if (statusEl) {
+                statusEl.style.display = 'block';
+                statusEl.innerText = '❌ Download nicht angekommen – bitte erneut versuchen.';
+                statusEl.style.color = '#ff3b30';
+                setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+            }
+        } catch (e) {
+            if (statusEl) {
+                statusEl.style.display = 'block';
+                statusEl.innerText = '❌ Cloud-Fallback fehlgeschlagen.';
+                statusEl.style.color = '#ff3b30';
+                setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+            }
         }
     } finally {
         _ytBatchFinish();
@@ -3073,13 +3129,14 @@ async function startYoutubeImport(url, statusEl) {
             body: JSON.stringify({ youtube_url: url })
         });
         if (queueRes.ok) {
+            const queueData = await queueRes.json().catch(() => ({}));
             if (statusEl) {
                 statusEl.innerText = '⏳ In Warteschlange – dein lokaler Watcher lädt jetzt herunter.';
                 statusEl.style.color = '#32d74b';
                 setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
             }
             _ytBatchStart();
-            _watchForYoutubeImportAndCache();
+            _watchForYoutubeImportAndCache(url, queueData.id, statusEl);
             return true;
         }
         throw new Error(`Warteschlange nicht erreichbar (${queueRes.status})`);
@@ -3099,7 +3156,7 @@ async function startYoutubeImport(url, statusEl) {
                 setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
             }
             _ytBatchStart();
-            _watchForYoutubeImportAndCache();
+            _watchForYoutubeImportAndCache(url, null, statusEl);
             return true;
         } catch (error) {
             if (statusEl) {
