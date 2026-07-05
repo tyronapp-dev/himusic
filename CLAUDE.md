@@ -53,6 +53,15 @@ Key runtime state lives on `window` so UI fragments in `app2.js` can share it:
 2. **IndexedDB** (`HeatBoxAudio` / `audioFiles` store) — audio blobs for true offline playback. Audio is downloaded to IDB after first play via `downloadToLocal()`.
 3. **localStorage** — `himusic_auth` (login flag), `heatbox_state` (player state: current song, queue, volume, EQ settings)
 
+### YouTube Import
+Songs can be added by pasting a YouTube URL or by name search (`app2.js` ~line 3085: `yt-search-input` → `GET /youtube-search?q=` → result list with thumbnail/title/channel/duration, no audio preview player yet → click imports via the same path as URL paste).
+
+`startYoutubeImport()` (`app2.js` ~line 3012) tries two paths in order:
+1. **Primary:** `POST /youtube-queue` — polled by `local-import-watcher/watch.js` running on a normal (non-datacenter) IP, since YouTube's bot detection blocks cloud/datacenter IPs far more often. No watcher is guaranteed to be running at any given time.
+2. **Fallback:** `POST /dispatch-import` → Cloudflare Worker fires a `repository_dispatch` to `.github/workflows/audio-worker.yml`, which runs the import as a chain of up to 8 jobs (`.github/actions/yt-import`), each on a fresh runner/IP. `src/extractor_worker.py` treats YouTube cookies (`YOUTUBE_COOKIES` repo secret, Netscape format) as the primary defense against bot-detection, not just for age-restricted content — cookies from datacenter IPs have previously been observed to expire within hours, so re-export periodically if the fallback starts failing again.
+
+The `repository_dispatch` route requires a valid `GH_PAT` secret in the Cloudflare Worker (rotate at github.com/settings/tokens, scope `repo`, if it starts returning auth errors).
+
 ### Song vibes field
 The `vibes` column from the API can arrive as a JSON string, a JS array, or null. Always use `_parseVibes(value)` to normalize it before using.
 
