@@ -1,4 +1,5 @@
 {
   "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "comment": "PAT-unabhängiger Import-Auslöser: Diese Datei mit neuer youtube_url committen startet einen Import. Normalerweise läuft der Import über die App (Worker-Dispatch); diese Datei ist der Test-/Notfallweg."
+  "comment": "PAT-unabhängiger Import-Auslöser: Diese Datei mit neuer youtube_url committen startet einen Import. Normalerweise läuft der Import über die App (Worker-Dispatch); diese Datei ist der Test-/Notfallweg.",
+  "test_run": "2026-07-05 cookies-primary-defense"
 }
