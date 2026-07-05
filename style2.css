@@ -744,14 +744,14 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     color: var(--text-secondary); cursor: pointer;
     transition: all 0.18s;
 }
-.vibe-pill.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.vibe-pill.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 
 /* ─── Cover Play Button ─────────────────────────────────────────────────────── */
 .song-cover, .station-cover { position: relative; }
 .cover-play-btn {
     position: absolute; bottom: 8px; right: 8px;
     width: 32px; height: 32px; border-radius: 50%;
-    background: var(--accent); color: #fff; border: none;
+    background: var(--accent); color: var(--accent-text); border: none;
     display: flex; align-items: center; justify-content: center;
     box-shadow: 0 4px 12px rgba(0,0,0,0.45); cursor: pointer; z-index: 5;
     transition: transform 0.18s;

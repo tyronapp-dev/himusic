@@ -271,8 +271,9 @@ function initApp() {
     window.globalSongsData = []; 
     let playbackQueue = [];   
     let playbackHistory = []; 
-    window.currentContextSongId = null; 
-    window.currentContextPlaylistId = null; 
+    window.currentContextSongId = null;
+    window.currentEditSongId = null; // Schnappschuss: welcher Song ist GERADE im Tag-Editor offen (siehe ctxEditTags)
+    window.currentContextPlaylistId = null;
     window.currentOpenPlaylistId = null; 
     window.currentPlaylistSongs = [];
     window.currentSongDuration = 0;
@@ -1389,6 +1390,11 @@ const titleNorm = title.toLowerCase().trim();
             if (!song && window.currentSongData && window.currentSongData.id == window.currentContextSongId) { song = window.currentSongData; }
             if (!song) { alert("Lied noch nicht vollständig geladen. Bitte kurz warten."); return; }
 
+            // Schnappschuss auf DIESEN Song, unabhängig von window.currentContextSongId: das teilt
+            // sich mit der Wiedergabe (playNextSong/playPrevSong überschreiben es beim Songwechsel),
+            // sodass ein im Hintergrund weiterlaufender Song beim Speichern sonst versehentlich die
+            // Änderungen des gerade bearbeiteten Songs abbekommen hätte.
+            window.currentEditSongId = song.id;
             editTitle.value = song.title || ''; editArtist.value = song.artist || '';
             currentEditCoverData = song.cover_data || song.coverUrl || '';
             editCoverPreview.src = currentEditCoverData.length > 10 ? currentEditCoverData : 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
@@ -1491,20 +1497,20 @@ const titleNorm = title.toLowerCase().trim();
             document.querySelectorAll('#edit-tags-overlay .vibe-pill.active').forEach(pill => selectedVibes.push(pill.dataset.vibe));
             const changes = { title: editTitle.value, artist: editArtist.value, cover_data: currentEditCoverData, vibes: selectedVibes };
 
-            const song = window._songIndex?.get(window.currentContextSongId) || window._songIndex?.get(parseInt(window.currentContextSongId));
+            const song = window._songIndex?.get(window.currentEditSongId) || window._songIndex?.get(parseInt(window.currentEditSongId));
             if (song) Object.assign(song, changes);
 
             if (!navigator.onLine) {
-                _savePendingEdit(window.currentContextSongId, changes);
+                _savePendingEdit(window.currentEditSongId, changes);
                 editOverlay.classList.remove('active'); btnSaveTags.innerText = "Speichern"; _showToast('✈️ Offline gespeichert – wird synchronisiert wenn online');
                 return;
             }
 
             try {
-                await apiUpdateSong(window.currentContextSongId, changes);
+                await apiUpdateSong(window.currentEditSongId, changes);
                 editOverlay.classList.remove('active');
-                
-                const songId = window.currentContextSongId;
+
+                const songId = window.currentEditSongId;
                 const songElement = document.querySelector(`.song-item[data-id="${songId}"]`);
                 if (songElement) {
                     const coverImg = songElement.querySelector('.song-cover img');
@@ -1528,7 +1534,7 @@ const titleNorm = title.toLowerCase().trim();
                 }
                 if (typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
                 fetchSongsFromDatabase(true); _showToast('✅ Gespeichert');
-            } catch (error) { _savePendingEdit(window.currentContextSongId, changes); _showToast('⚠️ Fehler – lokal gesichert'); }
+            } catch (error) { _savePendingEdit(window.currentEditSongId, changes); _showToast('⚠️ Fehler – lokal gesichert'); }
             btnSaveTags.innerText = "Speichern";
         });
     }
@@ -2677,6 +2683,14 @@ let currentIndex = 0;
     let isPullingToRefresh = false;
     let pullRefreshTimeout = null;
 
+    function _reloadApp() {
+        clearTimeout(_saveTimer);
+        _doSavePlayerState();
+        document.body.style.transition = 'opacity 0.3s';
+        document.body.style.opacity = '0.5';
+        window.location.reload();
+    }
+
     document.addEventListener('touchstart', (e) => {
         const activeView = document.querySelector('.view.active');
         if (!activeView || activeView.scrollTop > 0) return;
@@ -2687,17 +2701,11 @@ let currentIndex = 0;
     document.addEventListener('touchmove', (e) => {
         if (!isPullingToRefresh) return;
         let pullDistance = e.touches[0].clientY - pullStartY;
-        
-        if (pullDistance > 100) { 
+
+        if (pullDistance > 100) {
             // Finger ist weit genug unten -> Timer starten
             if (!pullRefreshTimeout) {
-                pullRefreshTimeout = setTimeout(() => {
-                    clearTimeout(_saveTimer);
-                    _doSavePlayerState();
-                    document.body.style.transition = 'opacity 0.3s';
-                    document.body.style.opacity = '0.5';
-                    window.location.reload();
-                }, 2000); // Löst nach exakt 2 Sekunden aus
+                pullRefreshTimeout = setTimeout(_reloadApp, 2500); // Löst nach 2,5 Sekunden Halten aus
             }
         } else {
             // Wisch wieder nach oben -> Abbruch
@@ -2733,51 +2741,6 @@ let currentIndex = 0;
     }, 800); 
 
 } // END initApp()
-// ==========================================
-// 1. OFFLINE TAG EDITOR (Speichert lokal, synchronisiert online)
-// ==========================================
-const oldSaveBtn = document.getElementById('btn-save-tags');
-if (oldSaveBtn) {
-    const newSaveBtn = oldSaveBtn.cloneNode(true);
-    oldSaveBtn.parentNode.replaceChild(newSaveBtn, oldSaveBtn);
-    
-    newSaveBtn.addEventListener('click', async () => {
-        const title = document.getElementById('edit-input-title').value.trim();
-        const artist = document.getElementById('edit-input-artist').value.trim();
-        
-        if(document.getElementById('bp-song-name')) document.getElementById('bp-song-name').innerText = title;
-        if(document.getElementById('bp-artist-name')) document.getElementById('bp-artist-name').innerText = artist;
-        
-        const updatedData = { title: title, artist: artist, cover_data: window.currentEditCover || "", vibes: window.currentEditVibes || [] };
-        const overlay = document.getElementById('edit-tags-overlay');
-        if(overlay) overlay.classList.remove('active');
-
-        if (!navigator.onLine) {
-            let offlineQueue = JSON.parse(localStorage.getItem('offline_tags') || '{}');
-            offlineQueue[window.currentEditSongId] = updatedData;
-            localStorage.setItem('offline_tags', JSON.stringify(offlineQueue));
-            alert("Offline gespeichert! Wird synchronisiert, sobald du online bist.");
-            return;
-        }
-
-        await fetch(`${API_URL}/songs/${window.currentEditSongId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedData) });
-        if(window.applySongPatch) window.applySongPatch(window.currentEditSongId, updatedData);
-    });
-}
-
-window.addEventListener('online', async () => {
-    let offlineQueue = JSON.parse(localStorage.getItem('offline_tags') || '{}');
-    let hasUpdates = false;
-    for (const [id, data] of Object.entries(offlineQueue)) {
-        try {
-            await fetch(`${API_URL}/songs/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-            delete offlineQueue[id];
-            hasUpdates = true;
-        } catch(e) {}
-    }
-    localStorage.setItem('offline_tags', JSON.stringify(offlineQueue));
-    if(hasUpdates && window.fetchSongsFromDatabase && Object.keys(offlineQueue).length === 0) window.fetchSongsFromDatabase(true);
-});
 
 // ==========================================
 // 2. BULK IMPORT (Staging-Prinzip: roh hochladen, Server entscheidet über Duplikate am Inhalt)
@@ -2914,10 +2877,18 @@ if (oldFileInput) {
 //    vorbehalten, damit der Massen-Sync nie wieder Spotifys Rate-Limit auslöst)
 // ==========================================
 let _syncRunning = false;
-// Songs, die in DIESER Sitzung schon versucht wurden. Verhindert, dass nicht auffindbare Songs
-// jeden Durchlauf erneut iTunes/Spotify abfragen (Endlos-Schleife). Beim nächsten App-Start leer
-// → ein erneuter Versuch pro Sitzung (falls Spotify/iTunes inzwischen doch etwas hat).
-const _syncAttempted = new Set();
+// Songs mit erfolglosem Sync-Versuch: Cooldown mit exponentiellem Backoff statt permanentem
+// Blockieren. Vorher wurde ein Song nach einem Fehlversuch für den Rest der Sitzung komplett
+// übersprungen und der Sync brach ab, sobald alle Reste einmal erfolglos dran waren – trotz
+// Anzeige "später erneut versucht" gab es nie einen echten Reschedule. Jetzt läuft der Sync
+// weiter, bis wirklich JEDER Song ein Cover hat; pro Song wächst die Pause nach jedem Fehlschlag
+// (30s, 60s, 120s, ... gedeckelt bei 10 Min), damit iTunes nicht im Sekundentakt dieselbe
+// erfolglose Suche bekommt.
+const _syncCooldowns = new Map(); // id -> { nextRetryAt, attempts }
+
+function _syncBackoffMs(attempts) {
+    return Math.min(30000 * Math.pow(2, attempts - 1), 10 * 60 * 1000);
+}
 
 async function processBackgroundSync() {
     if (_syncRunning) return;
@@ -2938,21 +2909,29 @@ async function processBackgroundSync() {
         const totalSongs = songs.length;
         const unsyncedSongs = songs.filter(s => !s.cover_data && (s.artist === "Unbekannt" || s.artist === "" || s.artist === "Unbekannter Künstler"));
         const alreadySynced = totalSongs - unsyncedSongs.length;
-        // Nur die, die wir diese Sitzung noch nicht versucht haben
-        const todo = unsyncedSongs.filter(s => !_syncAttempted.has(s.id));
+        const now = Date.now();
+        // Nur die, deren Cooldown (falls vorhanden) schon abgelaufen ist
+        const todo = unsyncedSongs.filter(s => {
+            const cd = _syncCooldowns.get(s.id);
+            return !cd || now >= cd.nextRetryAt;
+        });
 
         if (progressText) progressText.innerText = `${alreadySynced} / ${totalSongs}`;
         if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(alreadySynced / totalSongs) * 100}%` : '0%';
 
-        if (todo.length === 0) {
-            // Nichts (mehr) zu tun: entweder alles hat schon ein Cover, oder alle Reste wurden diese
-            // Sitzung bereits erfolglos versucht. In beiden Fällen: STOPP (kein Reschedule → keine Last).
-            if (statusDetail) {
-                statusDetail.style.display = 'block';
-                if (unsyncedSongs.length === 0) { statusDetail.innerText = "Alle Songs synchronisiert ✓"; statusDetail.style.color = '#32d74b'; }
-                else { statusDetail.innerText = `${unsyncedSongs.length} ohne Treffer (später erneut versucht)`; statusDetail.style.color = '#8e8e93'; }
-            }
+        if (unsyncedSongs.length === 0) {
+            // Wirklich fertig – jeder Song hat ein Cover. Kein Reschedule nötig, ein neuer Import
+            // stößt den Sync über setTimeout(processBackgroundSync, 1500) andernorts wieder an.
+            if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = "Alle Songs synchronisiert ✓"; statusDetail.style.color = '#32d74b'; }
             _syncRunning = false;
+            return;
+        }
+
+        if (todo.length === 0) {
+            // Alle Reste sind gerade im Cooldown – NICHT aufgeben, kurz warten und erneut prüfen.
+            if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = `${unsyncedSongs.length} ohne Treffer – nächster Versuch in Kürze...`; statusDetail.style.color = '#8e8e93'; }
+            _syncRunning = false;
+            setTimeout(processBackgroundSync, 10000);
             return;
         }
 
@@ -2968,23 +2947,33 @@ async function processBackgroundSync() {
             while (idx < todo.length) {
                 if (window._importActive) return; // Import hat Vorrang → Durchlauf abbrechen
                 const song = todo[idx++];
-                _syncAttempted.add(song.id); // gilt als versucht, egal ob Treffer oder nicht
-                let patch = null;
+                let patch = null, matched = false;
                 try {
                     // Nur iTunes (direkt, kostenlos, praktisch kein Rate-Limit bei 3 parallelen
                     // Anfragen). Spotify wird im Sync NICHT angefragt.
                     const meta = await searchSongMetaItunes(song.title, song.artist);
-                    patch = (meta && meta.cover)
-                        ? { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover }
-                        : { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
+                    if (meta && meta.cover) {
+                        patch = { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover };
+                        matched = true;
+                    } else {
+                        patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
+                    }
                     await fetch(`${API_URL}/songs/${song.id}`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ ...patch, vibes: _parseVibes(song.vibes) }),
                         signal: _mkTimeout(15000)
                     });
                     if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, patch);
-                    if (patch.cover_data) syncedNow++;
-                } catch(e) {}
+                    if (matched) syncedNow++;
+                } catch(e) { matched = false; }
+
+                if (matched) {
+                    _syncCooldowns.delete(song.id);
+                } else {
+                    const prevAttempts = (_syncCooldowns.get(song.id) || { attempts: 0 }).attempts + 1;
+                    _syncCooldowns.set(song.id, { nextRetryAt: Date.now() + _syncBackoffMs(prevAttempts), attempts: prevAttempts });
+                }
+
                 if (progressText) progressText.innerText = `${alreadySynced + syncedNow} / ${totalSongs}`;
                 if (progressBar) progressBar.style.width = totalSongs > 0 ? `${((alreadySynced + syncedNow) / totalSongs) * 100}%` : '0%';
             }
@@ -2992,8 +2981,8 @@ async function processBackgroundSync() {
         await Promise.all(Array.from({ length: PARALLEL }, syncWorker));
 
         _syncRunning = false;
-        // Kurz durchatmen, dann nächster Durchlauf (fängt neu importierte Songs). Endet automatisch,
-        // sobald nichts Unversuchtes mehr übrig ist (todo.length === 0 oben).
+        // Kurz durchatmen, dann nächster Durchlauf (fängt neu importierte Songs und abgelaufene
+        // Cooldowns). Endet automatisch erst, sobald unsyncedSongs.length === 0 oben.
         setTimeout(processBackgroundSync, 3000);
 
     } catch(err) { _syncRunning = false; setTimeout(processBackgroundSync, 15000); }
@@ -3009,6 +2998,67 @@ setTimeout(processBackgroundSync, 3000);
 // scheiterten dort komplett, trotz PO-Token + TLS-Impersonation), die eigene Heim-IP hatte im
 // Test keinen einzigen Block. Fällt automatisch auf /dispatch-import (GitHub Actions) zurück,
 // falls der Worker die neue Route noch nicht kennt (z.B. vor einem Deploy) oder kein Watcher läuft.
+// Ein YouTube-Import läuft asynchron auf einem entfernten Watcher/Runner – die Datei landet erst
+// nach ca. 1-2 Min in der DB. Damit sie danach ohne manuellen Offline-Modus-Schalter direkt lokal
+// verfügbar ist (Anforderung: YouTube-Downloads sollen automatisch offline-fähig sein), pollt diese
+// Funktion kurz auf neue Songs mit einem YouTube-Import-Marker im file_url und cached sie sofort.
+function _isYoutubeImportedUrl(fileUrl) {
+    return !!fileUrl && (fileUrl.includes('_local_yt') || fileUrl.includes('/yt/'));
+}
+
+// Batch-Zähler für "Song X/Y lädt"-Anzeige: wächst mit jedem neu gestarteten Import, solange noch
+// welche aus dem aktuellen Schwung offen sind; sobald alle fertig sind, setzt der nächste Start
+// wieder bei 1 an (kein ewig wachsender Zähler über mehrere unabhängige Sessions hinweg).
+window._ytBatchTotal = 0;
+window._ytBatchDone = 0;
+
+function _updateYtBatchProgress() {
+    const el = document.getElementById('yt-batch-progress');
+    if (!el) return;
+    if (window._ytBatchTotal === 0 || window._ytBatchDone >= window._ytBatchTotal) {
+        el.style.display = 'none';
+        return;
+    }
+    el.style.display = 'block';
+    el.innerText = `⏳ Song ${window._ytBatchDone + 1}/${window._ytBatchTotal} lädt...`;
+}
+
+function _ytBatchStart() {
+    if (window._ytBatchDone >= window._ytBatchTotal) { window._ytBatchTotal = 0; window._ytBatchDone = 0; }
+    window._ytBatchTotal++;
+    _updateYtBatchProgress();
+}
+
+function _ytBatchFinish() {
+    window._ytBatchDone++;
+    _updateYtBatchProgress();
+    if (window._ytBatchDone >= window._ytBatchTotal) {
+        setTimeout(() => { window._ytBatchTotal = 0; window._ytBatchDone = 0; _updateYtBatchProgress(); }, 4000);
+    }
+}
+
+async function _watchForYoutubeImportAndCache() {
+    const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
+    try {
+        for (let attempt = 0; attempt < 15; attempt++) {
+            await new Promise(r => setTimeout(r, 8000));
+            try {
+                const res = await fetch(`${API_URL}/songs`);
+                if (!res.ok) continue;
+                const songs = await res.json();
+                const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
+                if (fresh.length > 0) {
+                    fresh.forEach(s => { if (window.hbLocal) window.hbLocal.downloadToLocal(s.file_url, s.title); });
+                    if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
+                    return;
+                }
+            } catch (e) {}
+        }
+    } finally {
+        _ytBatchFinish();
+    }
+}
+
 async function startYoutubeImport(url, statusEl) {
     if (!url) return;
     if (statusEl) {
@@ -3028,6 +3078,8 @@ async function startYoutubeImport(url, statusEl) {
                 statusEl.style.color = '#32d74b';
                 setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
             }
+            _ytBatchStart();
+            _watchForYoutubeImportAndCache();
             return true;
         }
         throw new Error(`Warteschlange nicht erreichbar (${queueRes.status})`);
@@ -3046,6 +3098,8 @@ async function startYoutubeImport(url, statusEl) {
                 statusEl.style.color = '#32d74b';
                 setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
             }
+            _ytBatchStart();
+            _watchForYoutubeImportAndCache();
             return true;
         } catch (error) {
             if (statusEl) {
@@ -3056,6 +3110,95 @@ async function startYoutubeImport(url, statusEl) {
             return false;
         }
     }
+}
+
+// ── YouTube-Vorschau-Player (Play/Pause/Spulen) für die Suchergebnisse ──────────
+// Nutzt die offizielle YouTube-IFrame-Player-API in einem unsichtbaren 1x1-Player: kein eigener
+// Audio-Extraktionsschritt nötig, nur zum Reinhören VOR dem eigentlichen Download. Ein einzelner
+// geteilter Player wird zwischen Ergebnissen wiederverwendet (nicht ein Player pro Zeile).
+let _ytPlayer = null;
+let _ytActiveRow = null;
+let _ytSeekPollId = null;
+
+function _ensureYtIframeApi() {
+    return new Promise((resolve) => {
+        if (window.YT && window.YT.Player) { resolve(); return; }
+        if (!document.getElementById('yt-iframe-api-script')) {
+            const s = document.createElement('script');
+            s.id = 'yt-iframe-api-script';
+            s.src = 'https://www.youtube.com/iframe_api';
+            document.head.appendChild(s);
+        }
+        const prevCallback = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = () => { if (prevCallback) prevCallback(); resolve(); };
+    });
+}
+
+function _ensureYtPlayer() {
+    if (_ytPlayer) return Promise.resolve(_ytPlayer);
+    return _ensureYtIframeApi().then(() => new Promise((resolve) => {
+        _ytPlayer = new YT.Player('yt-preview-player', {
+            height: '1', width: '1',
+            playerVars: { autoplay: 0, controls: 0 },
+            events: {
+                onReady: () => resolve(_ytPlayer),
+                onStateChange: _onYtPlayerStateChange,
+            },
+        });
+    }));
+}
+
+function _resetYtRowUI(row) {
+    if (!row) return;
+    const btn = row.querySelector('.yt-preview-playbtn');
+    if (btn) btn.innerText = '▶';
+    const seekWrap = row.querySelector('.yt-preview-seekwrap');
+    if (seekWrap) seekWrap.style.display = 'none';
+}
+
+function _stopYtSeekPoll() { if (_ytSeekPollId) clearInterval(_ytSeekPollId); _ytSeekPollId = null; }
+
+function _startYtSeekPoll() {
+    _stopYtSeekPoll();
+    _ytSeekPollId = setInterval(() => {
+        if (!_ytActiveRow || !_ytPlayer || typeof _ytPlayer.getDuration !== 'function') return;
+        const seekEl = _ytActiveRow.querySelector('.yt-preview-seek');
+        if (seekEl && !seekEl._dragging) {
+            const dur = _ytPlayer.getDuration() || 0;
+            seekEl.max = Math.floor(dur) || 100;
+            seekEl.value = Math.floor(_ytPlayer.getCurrentTime() || 0);
+        }
+    }, 500);
+}
+
+function _onYtPlayerStateChange(e) {
+    if (!_ytActiveRow) return;
+    const btn = _ytActiveRow.querySelector('.yt-preview-playbtn');
+    if (e.data === YT.PlayerState.PLAYING) { if (btn) btn.innerText = '⏸'; _startYtSeekPoll(); }
+    else if (e.data === YT.PlayerState.PAUSED || e.data === YT.PlayerState.ENDED) { if (btn) btn.innerText = '▶'; _stopYtSeekPoll(); }
+}
+
+function _stopYtPreview() {
+    if (_ytPlayer && typeof _ytPlayer.pauseVideo === 'function') { try { _ytPlayer.pauseVideo(); } catch (e) {} }
+    _resetYtRowUI(_ytActiveRow);
+    _ytActiveRow = null;
+    _stopYtSeekPoll();
+}
+
+async function _toggleYtPreview(row, videoId) {
+    const player = await _ensureYtPlayer();
+    if (_ytActiveRow && _ytActiveRow !== row) _resetYtRowUI(_ytActiveRow);
+
+    const wasActive = _ytActiveRow === row;
+    const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
+
+    if (wasActive && state === YT.PlayerState.PLAYING) { player.pauseVideo(); return; }
+    if (wasActive && state === YT.PlayerState.PAUSED) { player.playVideo(); return; }
+
+    _ytActiveRow = row;
+    const seekWrap = row.querySelector('.yt-preview-seekwrap');
+    if (seekWrap) seekWrap.style.display = 'flex';
+    player.loadVideoById(videoId);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -3093,6 +3236,7 @@ document.addEventListener('DOMContentLoaded', () => {
         searchInput.addEventListener('input', () => { searchClearBtn.style.display = searchInput.value.length > 0 ? 'block' : 'none'; });
         searchClearBtn.addEventListener('click', () => {
             searchInput.value = ''; searchClearBtn.style.display = 'none'; searchInput.focus();
+            _stopYtPreview();
             if (resultsBox) resultsBox.innerHTML = '';
         });
     }
@@ -3104,6 +3248,7 @@ document.addEventListener('DOMContentLoaded', () => {
         searchStatus.style.display = 'block';
         searchStatus.innerText = 'Suche läuft...';
         searchStatus.style.color = '#aaa';
+        _stopYtPreview();
         resultsBox.innerHTML = '';
 
         try {
@@ -3121,23 +3266,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
             items.forEach(item => {
                 const row = document.createElement('div');
-                row.style.cssText = 'display:flex; align-items:center; gap:10px; padding:8px; border-radius:10px; background:rgba(255,255,255,0.06); backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%); border:0.5px solid rgba(255,255,255,0.1); cursor:pointer; transition:transform 0.15s, background 0.2s;';
+                row.style.cssText = 'display:flex; flex-direction:column; gap:8px; padding:8px; border-radius:10px; background:rgba(255,255,255,0.06); backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%); border:0.5px solid rgba(255,255,255,0.1);';
                 row.innerHTML = `
+                  <div style="display:flex; align-items:center; gap:10px;">
                     <img src="${item.thumbnail}" style="width:64px; height:48px; border-radius:6px; object-fit:cover; flex-shrink:0;">
                     <div style="min-width:0; flex:1;">
                         <div style="font-size:14px; font-weight:600; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${item.title}</div>
                         <div style="font-size:12px; color:#aaa; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${item.channelTitle}${item.duration ? ' · ' + item.duration : ''}</div>
                     </div>
+                    <button class="yt-preview-playbtn" title="Anhören" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:rgba(255,255,255,0.15); color:#fff; font-size:14px; cursor:pointer;">▶</button>
+                    <button class="yt-download-btn" title="Herunterladen" style="flex-shrink:0; padding:8px 14px; border-radius:8px; border:none; background:#fa233b; color:#fff; font-size:16px; cursor:pointer;">⬇</button>
+                  </div>
+                  <div class="yt-preview-seekwrap" style="display:none; align-items:center; gap:8px; padding:0 4px;">
+                    <input type="range" class="yt-preview-seek" min="0" max="100" value="0" step="1" style="flex:1; accent-color:#fa233b;">
+                  </div>
                 `;
-                row.addEventListener('pointerdown', () => { row.style.transform = 'scale(0.97)'; row.style.background = 'rgba(255,255,255,0.12)'; });
-                row.addEventListener('pointerup',   () => { row.style.transform = 'scale(1)'; });
-                row.addEventListener('click', async () => {
-                    resultsBox.querySelectorAll('div').forEach(r => r.style.pointerEvents = 'none');
+                const playBtn = row.querySelector('.yt-preview-playbtn');
+                const downloadBtn = row.querySelector('.yt-download-btn');
+                const seekEl = row.querySelector('.yt-preview-seek');
+
+                playBtn.addEventListener('click', () => _toggleYtPreview(row, item.videoId));
+                seekEl.addEventListener('pointerdown', () => { seekEl._dragging = true; });
+                seekEl.addEventListener('change', () => {
+                    seekEl._dragging = false;
+                    if (_ytPlayer && _ytActiveRow === row) _ytPlayer.seekTo(Number(seekEl.value), true);
+                });
+
+                downloadBtn.addEventListener('click', async () => {
+                    downloadBtn.disabled = true; downloadBtn.style.opacity = '0.5';
+                    if (_ytActiveRow === row) _stopYtPreview();
                     searchStatus.style.display = 'block';
                     await startYoutubeImport(`https://www.youtube.com/watch?v=${item.videoId}`, searchStatus);
-                    resultsBox.innerHTML = '';
-                    searchInput.value = '';
-                    if (searchClearBtn) searchClearBtn.style.display = 'none';
+                    row.remove();
                 });
                 resultsBox.appendChild(row);
             });
