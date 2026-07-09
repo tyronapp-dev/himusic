@@ -649,10 +649,13 @@ let _bgCacheActive = false;
         const newUrls = songs.filter(s => s.file_url).map(s => s.file_url);
         const existing = new Set(_bgCacheQueue);
         newUrls.forEach(url => { if (!existing.has(url)) _bgCacheQueue.push(url); });
-        
-        if (_bgCacheActive) return; 
+
+        if (_bgCacheActive) return;
         _bgCacheActive = true;
-        const IDLE_PARALLEL = 3; // 3 Spuren unsichtbar im Hintergrund
+        // Nur 1 Spur: läuft jetzt IMMER automatisch (nicht mehr an den Offline-Schalter gekoppelt),
+        // daher bewusst gedrosselt statt 3 parallel – bei 2000+ Songs sonst sofort mehrere GB
+        // Bandbreite/Speicher am Stück. So tröpfelt der Download im Hintergrund über längere Zeit.
+        const IDLE_PARALLEL = 1;
 
         async function processNext() {
             if (_bgCacheQueue.length === 0) {
@@ -1077,10 +1080,10 @@ let _bgCacheActive = false;
                 window._songIndex = new Map(all.map(s => [s.id, s]));
                 rerenderSongsList(window.globalSongsData);
                 saveSongsSnapshot(all);
-                // NUR wenn der Nutzer Offline-Modus aktiv gewählt hat, die ganze Bibliothek
-                // vorab herunterladen. Sonst zog das bei 2000+ Songs ~14 GB im Hintergrund und
-                // machte die App dauerhaft langsam. Offline-Downloads laufen jetzt nur auf Wunsch.
-                if (localStorage.getItem('himusic_offline') === '1') startBackgroundCacheQueue(all);
+                // Läuft jetzt immer automatisch, nicht mehr nur bei aktivem Offline-Schalter.
+                // IDLE_PARALLEL=1 + Pause während aktivem Abspielen (siehe startBackgroundCacheQueue)
+                // hält das bewusst gedrosselt, damit 2000+ Songs (~14 GB) die App nicht ausbremsen.
+                startBackgroundCacheQueue(all);
             }
         } catch (error) {
             const snapshot = loadSongsSnapshot();
