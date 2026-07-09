@@ -2624,7 +2624,8 @@ const groups = new Map();
             }
 
 let currentIndex = 0;
-            const MAX_CONCURRENT = 6; // Vollgas: Nutzt das absolute Browser-Limit aus
+            const MAX_CONCURRENT = 12; // Vollgas: Cloudflare (R2/Worker) läuft über HTTP/2, das
+            // Browser-Limit von 6 gilt nur pro HTTP/1.1-Verbindung, nicht pro Host über HTTP/2
 
             // Fluid-Pool Worker: Nimmt sich immer den nächsten Song aus der Liste, sobald eine Spur frei wird
             async function downloadWorker() {
