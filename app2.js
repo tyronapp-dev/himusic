@@ -2873,8 +2873,11 @@ if (oldFileInput) {
 }
 
 // ==========================================
-// 3. BACKGROUND SYNC (nur iTunes – Spotify ist bewusst der manuellen Suche im Tag-Editor
-//    vorbehalten, damit der Massen-Sync nie wieder Spotifys Rate-Limit auslöst)
+// 3. BACKGROUND SYNC (primär iTunes; Spotify läuft nur als Fallback an, wenn iTunes nichts
+//    findet – so bleibt das Anfragevolumen niedrig genug, dass Spotifys Rate-Limit nicht wieder
+//    auslöst wie beim Vorfall mit 6 parallelen Workern. Wenn beide nichts finden, gilt der Song
+//    als synchronisiert und wird nicht mehr automatisch retried – manuelle Nachbearbeitung im
+//    Tag-Editor statt endlosem Warten.)
 // ==========================================
 let _syncRunning = false;
 // Songs mit erfolglosem Sync-Versuch: Cooldown mit exponentiellem Backoff statt permanentem
@@ -2885,12 +2888,14 @@ let _syncRunning = false;
 // (30s, 60s, 120s, ... gedeckelt bei 10 Min), damit iTunes nicht im Sekundentakt dieselbe
 // erfolglose Suche bekommt.
 const _syncCooldowns = new Map(); // id -> { nextRetryAt, attempts }
-// Songs, für die iTunes nach mehreren Versuchen wirklich keinen Treffer hat (kryptische
-// YouTube-Titel etc.), landen hier und werden nicht mehr automatisch retried – sonst blieb der
-// Sync für immer bei "X ohne Treffer, nächster Versuch in Kürze" hängen, ohne je fertig zu werden.
-// Persistiert in localStorage, damit ein Reload nicht wieder bei 0 Versuchen anfängt. Der Song
-// bleibt manuell im Tag-Editor bearbeitbar/erneut suchbar.
+// Songs, für die weder iTunes noch Spotify einen Treffer haben (kryptische YouTube-Titel,
+// Bootlegs/Mixtapes, die in keinem Katalog stehen), landen hier und werden nicht mehr automatisch
+// retried – sonst blieb der Sync für immer bei "X ohne Treffer, nächster Versuch in Kürze" hängen,
+// ohne je fertig zu werden. Persistiert in localStorage, damit ein Reload nicht wieder bei 0
+// Versuchen anfängt. Der Song bleibt manuell im Tag-Editor bearbeitbar/erneut suchbar.
 const _SYNC_GIVEUP_KEY = 'himusic_sync_giveup';
+// Sicherheitsnetz für den Fall, dass Spotify dauerhaft im Rate-Limit-Cooldown hängt (dann wird
+// nie wirklich beides versucht) – nach so vielen erfolglosen Durchläufen wird trotzdem aufgegeben.
 const _SYNC_MAX_ATTEMPTS = 5;
 let _syncGivenUp;
 try { _syncGivenUp = new Set(JSON.parse(localStorage.getItem(_SYNC_GIVEUP_KEY) || '[]')); }
@@ -2971,16 +2976,34 @@ async function processBackgroundSync() {
             while (idx < todo.length) {
                 if (window._importActive) return; // Import hat Vorrang → Durchlauf abbrechen
                 const song = todo[idx++];
-                let patch = null, matched = false;
+                let patch = null, matched = false, giveUpNow = false;
                 try {
-                    // Nur iTunes (direkt, kostenlos, praktisch kein Rate-Limit bei 3 parallelen
-                    // Anfragen). Spotify wird im Sync NICHT angefragt.
                     const meta = await searchSongMetaItunes(song.title, song.artist);
                     if (meta && meta.cover) {
                         patch = { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover };
                         matched = true;
                     } else {
-                        patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
+                        // iTunes ohne Treffer → Spotify als Fallback, aber nur wenn gerade kein
+                        // Rate-Limit-Cooldown aktiv ist (siehe searchSongMetaSpotify). So bleibt das
+                        // Anfragevolumen niedrig: Spotify wird nur für die iTunes-Fehlschläge angefragt,
+                        // nicht für jeden Song.
+                        const spotifyCoolingDown = window._spotifyCooldownUntil && Date.now() < window._spotifyCooldownUntil;
+                        if (!spotifyCoolingDown) {
+                            const sMeta = await searchSongMetaSpotify(song.title, song.artist);
+                            if (sMeta && sMeta.rateLimited) {
+                                // Rate-Limit gerade erst ausgelöst – nicht aufgeben, später erneut versuchen.
+                            } else if (sMeta && sMeta.cover) {
+                                patch = { title: sMeta.title, artist: sMeta.artist, album: sMeta.album || "", cover_data: sMeta.cover };
+                                matched = true;
+                            } else {
+                                // Weder iTunes noch Spotify haben etwas gefunden → gilt als synchronisiert,
+                                // manuelle Nachbearbeitung im Tag-Editor statt endlosem Retry.
+                                giveUpNow = true;
+                            }
+                        }
+                        if (!matched) {
+                            patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
+                        }
                     }
                     await fetch(`${API_URL}/songs/${song.id}`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -2993,6 +3016,10 @@ async function processBackgroundSync() {
 
                 if (matched) {
                     _syncCooldowns.delete(song.id);
+                } else if (giveUpNow) {
+                    _syncCooldowns.delete(song.id);
+                    _syncGivenUp.add(song.id);
+                    _persistSyncGivenUp();
                 } else {
                     const prevAttempts = (_syncCooldowns.get(song.id) || { attempts: 0 }).attempts + 1;
                     if (prevAttempts >= _SYNC_MAX_ATTEMPTS) {
