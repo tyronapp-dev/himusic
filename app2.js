@@ -2885,6 +2885,19 @@ let _syncRunning = false;
 // (30s, 60s, 120s, ... gedeckelt bei 10 Min), damit iTunes nicht im Sekundentakt dieselbe
 // erfolglose Suche bekommt.
 const _syncCooldowns = new Map(); // id -> { nextRetryAt, attempts }
+// Songs, für die iTunes nach mehreren Versuchen wirklich keinen Treffer hat (kryptische
+// YouTube-Titel etc.), landen hier und werden nicht mehr automatisch retried – sonst blieb der
+// Sync für immer bei "X ohne Treffer, nächster Versuch in Kürze" hängen, ohne je fertig zu werden.
+// Persistiert in localStorage, damit ein Reload nicht wieder bei 0 Versuchen anfängt. Der Song
+// bleibt manuell im Tag-Editor bearbeitbar/erneut suchbar.
+const _SYNC_GIVEUP_KEY = 'himusic_sync_giveup';
+const _SYNC_MAX_ATTEMPTS = 5;
+let _syncGivenUp;
+try { _syncGivenUp = new Set(JSON.parse(localStorage.getItem(_SYNC_GIVEUP_KEY) || '[]')); }
+catch(e) { _syncGivenUp = new Set(); }
+function _persistSyncGivenUp() {
+    try { localStorage.setItem(_SYNC_GIVEUP_KEY, JSON.stringify(Array.from(_syncGivenUp))); } catch(e) {}
+}
 
 function _syncBackoffMs(attempts) {
     return Math.min(30000 * Math.pow(2, attempts - 1), 10 * 60 * 1000);
@@ -2907,7 +2920,11 @@ async function processBackgroundSync() {
         const response = await fetch(`${API_URL}/songs`, { signal: _mkTimeout(20000) });
         const songs = await response.json();
         const totalSongs = songs.length;
-        const unsyncedSongs = songs.filter(s => !s.cover_data && (s.artist === "Unbekannt" || s.artist === "" || s.artist === "Unbekannter Künstler"));
+        const unsyncedAll = songs.filter(s => !s.cover_data && (s.artist === "Unbekannt" || s.artist === "" || s.artist === "Unbekannter Künstler"));
+        // Songs mit ausgeschöpften Versuchen zählen für die Fortschrittsanzeige als "erledigt"
+        // (sie sind halt manuell zu bearbeiten), sonst würde die Anzeige nie 100% erreichen.
+        const unsyncedSongs = unsyncedAll.filter(s => !_syncGivenUp.has(s.id));
+        const givenUpCount = unsyncedAll.length - unsyncedSongs.length;
         const alreadySynced = totalSongs - unsyncedSongs.length;
         const now = Date.now();
         // Nur die, deren Cooldown (falls vorhanden) schon abgelaufen ist
@@ -2920,9 +2937,16 @@ async function processBackgroundSync() {
         if (progressBar) progressBar.style.width = totalSongs > 0 ? `${(alreadySynced / totalSongs) * 100}%` : '0%';
 
         if (unsyncedSongs.length === 0) {
-            // Wirklich fertig – jeder Song hat ein Cover. Kein Reschedule nötig, ein neuer Import
-            // stößt den Sync über setTimeout(processBackgroundSync, 1500) andernorts wieder an.
-            if (statusDetail) { statusDetail.style.display = 'block'; statusDetail.innerText = "Alle Songs synchronisiert ✓"; statusDetail.style.color = '#32d74b'; }
+            // Wirklich fertig – jeder Song hat entweder ein Cover oder wurde nach mehreren
+            // erfolglosen Versuchen als manuell zu bearbeiten markiert. Kein Reschedule nötig,
+            // ein neuer Import stößt den Sync über setTimeout(processBackgroundSync, 1500) an.
+            if (statusDetail) {
+                statusDetail.style.display = 'block';
+                statusDetail.innerText = givenUpCount > 0
+                    ? `Fertig – ${givenUpCount} ohne Treffer (bitte manuell im Tag-Editor bearbeiten)`
+                    : "Alle Songs synchronisiert ✓";
+                statusDetail.style.color = givenUpCount > 0 ? '#ff9f0a' : '#32d74b';
+            }
             _syncRunning = false;
             return;
         }
@@ -2971,7 +2995,13 @@ async function processBackgroundSync() {
                     _syncCooldowns.delete(song.id);
                 } else {
                     const prevAttempts = (_syncCooldowns.get(song.id) || { attempts: 0 }).attempts + 1;
-                    _syncCooldowns.set(song.id, { nextRetryAt: Date.now() + _syncBackoffMs(prevAttempts), attempts: prevAttempts });
+                    if (prevAttempts >= _SYNC_MAX_ATTEMPTS) {
+                        _syncCooldowns.delete(song.id);
+                        _syncGivenUp.add(song.id);
+                        _persistSyncGivenUp();
+                    } else {
+                        _syncCooldowns.set(song.id, { nextRetryAt: Date.now() + _syncBackoffMs(prevAttempts), attempts: prevAttempts });
+                    }
                 }
 
                 if (progressText) progressText.innerText = `${alreadySynced + syncedNow} / ${totalSongs}`;
