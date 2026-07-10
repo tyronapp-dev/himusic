@@ -1,20 +1,20 @@
 // Himusic Cloud - Service Worker v1.0
 // Komplett optimiert für das neue Cloudflare / Firebase Setup
 
-const CACHE_NAME  = 'himusic-app-shell-v1.2';
+const CACHE_NAME  = 'himusic-app-shell-v1.3';
 const COVER_CACHE = 'himusic-covers-v1';
 const AUDIO_CACHE = 'himusic-audio-v1';
 
-// Diese Dateien müssen offline verfügbar sein, damit die App startet
+// Diese Dateien müssen offline verfügbar sein, damit die App startet.
+// login.js/firebase-config.js gab es nach der Firebase-Entfernung nie/nicht mehr im Repo –
+// jeder Install-Versuch loggte für die beiden einen Cache-Miss-404 ins Leere.
 const APP_SHELL = [
     './',
     './index.html',
     './login.html',
-    './login.js',
     './app2.js',
     './style2.css',
     './manifest.json',
-    './firebase-config.js',
     './config.js',
     './icon-180.png',
     './icon-192.png',

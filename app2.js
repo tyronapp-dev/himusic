@@ -7,6 +7,14 @@ function _parseVibes(v) {
     return [];
 }
 
+// Song-Titel/Künstler etc. können aus externen Quellen kommen (YouTube-Videotitel, von jedem
+// frei wählbar) und landen an vielen Stellen per innerHTML im DOM. Ohne Escaping wäre ein
+// Videotitel wie `<img src=x onerror=...>` gespeicherter XSS, der bei jedem Rendern der Liste
+// ausgeführt wird. IMMER durch diese Funktion schicken, bevor Songdaten in innerHTML landen.
+function _esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 // Kurzer haptischer Tick (Vibration API). Funktioniert nur auf Android-Browsern – iOS Safari/
 // PWAs unterstützen navigator.vibrate() nicht (Apple bietet dafür keine Web-API). Dort greift
 // automatisch nur das visuelle Feedback (Puls-Animation), ganz ohne Fehler oder Crash.
@@ -1195,8 +1203,8 @@ let _bgCacheActive = false;
             <div class="song-checkbox"></div>
             ${coverHtml}
             <div class="song-info">
-                <div class="song-title">${song.title}</div>
-                <div class="song-artist">${song.artist}</div>
+                <div class="song-title">${_esc(song.title)}</div>
+                <div class="song-artist">${_esc(song.artist)}</div>
             </div>
             <div class="drag-handle">≡</div>
             <button class="song-context-btn icon-btn" style="margin-left: auto; padding: 10px; color: var(--text-secondary);">
@@ -1705,8 +1713,22 @@ const titleNorm = title.toLowerCase().trim();
             if (window.currentSortTarget === 'playlist') { targetContainer = document.getElementById('playlist-details-songs-container'); targetElements = Array.from(targetContainer.querySelectorAll('.song-item')); } 
             else { targetContainer = songsContainer; targetElements = allSongsElements; }
 
-            if (window.currentSortTarget !== 'playlist' && criteria === 'created_at') {
-                const sorted = [...lazyAllSongs].sort((a, b) => { const diff = parseInt(a.id) - parseInt(b.id); return sortAscending ? diff : -diff; });
+            if (window.currentSortTarget !== 'playlist') {
+                // Die Songs-Seite ist lazy-gerendert (immer nur die ersten paar Batches stehen im
+                // DOM). Vorher sortierte "Titel"/"Künstler" nur targetElements = die aktuell
+                // sichtbaren DOM-Elemente – alles, was erst beim Weiterscrollen nachgeladen wurde,
+                // hängte sich danach unsortiert wieder an. Sortieren muss daher auf den vollständigen
+                // Rohdaten (lazyAllSongs) passieren und die Liste komplett neu rendern, wie es der
+                // created_at-Zweig schon immer richtig gemacht hat.
+                const sorted = [...lazyAllSongs].sort((a, b) => {
+                    let valA, valB;
+                    if (criteria === 'title') { valA = (a.title || '').toLowerCase(); valB = (b.title || '').toLowerCase(); }
+                    else if (criteria === 'artist') { valA = (a.artist || '').toLowerCase(); valB = (b.artist || '').toLowerCase(); }
+                    else { valA = parseInt(a.id); valB = parseInt(b.id); }
+                    if (valA < valB) return sortAscending ? -1 : 1;
+                    if (valA > valB) return sortAscending ? 1 : -1;
+                    return 0;
+                });
                 rerenderSongsList(sorted); sortOverlay.classList.remove('active'); return;
             }
 
@@ -1849,7 +1871,7 @@ const titleNorm = title.toLowerCase().trim();
                     let count = playlistSongCountMap[playlist.id] || 0; let dur = 0; allPlaylistSongs.forEach(ps => { if (ps.playlist_id == playlist.id) dur += durMap[ps.song_id] || 0; });
                     let statText = `${count} Songs`; if (dur > 0) statText += ` • ${formatDuration(dur)}`;
                     
-                    pDiv.innerHTML = `<div class="song-checkbox playlist-checkbox"></div>${coverHtml}<div class="song-info"><div class="song-title">${playlist.name}</div><div class="song-artist">Playlist • ${statText}</div></div><button class="list-play-btn icon-btn" style="margin-left: auto; padding: 10px; color: var(--accent);"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button><button class="playlist-context-btn icon-btn" style="padding: 10px; color: var(--text-secondary);"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2.5"></circle><circle cx="12" cy="12" r="2.5"></circle><circle cx="12" cy="19" r="2.5"></circle></svg></button>`;
+                    pDiv.innerHTML = `<div class="song-checkbox playlist-checkbox"></div>${coverHtml}<div class="song-info"><div class="song-title">${_esc(playlist.name)}</div><div class="song-artist">Playlist • ${statText}</div></div><button class="list-play-btn icon-btn" style="margin-left: auto; padding: 10px; color: var(--accent);"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button><button class="playlist-context-btn icon-btn" style="padding: 10px; color: var(--text-secondary);"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2.5"></circle><circle cx="12" cy="12" r="2.5"></circle><circle cx="12" cy="19" r="2.5"></circle></svg></button>`;
 
                     const pCoverEl = pDiv.querySelector('.song-cover');
                     if (typeof addLongPressListener === 'function') { addLongPressListener(pCoverEl, (e) => { e.preventDefault(); e.stopPropagation(); window.currentContextPlaylistId = playlist.id; document.getElementById('ctx-pl-edit').click(); }); }
@@ -1868,7 +1890,7 @@ const titleNorm = title.toLowerCase().trim();
         if (availablePlaylistsContainer) {
             availablePlaylistsContainer.innerHTML = '';
             if (playlists.length === 0) { availablePlaylistsContainer.innerHTML = '<div style="padding: 15px 20px; color: var(--text-secondary); font-size: 14px;">Noch keine Playlists vorhanden.</div>'; } 
-            else { playlists.forEach(playlist => { const btn = document.createElement('button'); btn.className = 'sheet-btn'; btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--text-secondary);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg> ${playlist.name}`; btn.addEventListener('click', () => addSelectedSongsToPlaylist(playlist.id, playlist.name)); availablePlaylistsContainer.appendChild(btn); }); }
+            else { playlists.forEach(playlist => { const btn = document.createElement('button'); btn.className = 'sheet-btn'; btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--text-secondary);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg> ${_esc(playlist.name)}`; btn.addEventListener('click', () => addSelectedSongsToPlaylist(playlist.id, playlist.name)); availablePlaylistsContainer.appendChild(btn); }); }
         }
     } 
 
@@ -2033,7 +2055,7 @@ async function createNewPlaylistProcess() {
             if (rp) {
                 recentContainer.innerHTML = ''; const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = rp.id; 
                 const bgImage = rp.cover_data && rp.cover_data.length > 10 ? `url('${rp.cover_data}')` : '';
-                card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${rp.name}</div>`;
+                card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(rp.name)}</div>`;
                 const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => window.togglePlaylistPlayback(e, rp.id));
                 card.addEventListener('click', () => window.openPlaylistDetails(rp.id, rp.name)); recentContainer.appendChild(card);
             }
@@ -2047,7 +2069,7 @@ async function createNewPlaylistProcess() {
                 mixContainer.innerHTML = '';
                 mixes.forEach(mix => {
                     const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = mix.id; const bgImage = mix.cover_data && mix.cover_data.length > 10 ? `url('${mix.cover_data}')` : '';
-                    card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${mix.name}</div>`;
+                    card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(mix.name)}</div>`;
                     const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => { const ids = mix.songIds || (mix.songs || []).map(s => s.id); const songs = ids.map(id => window._songIndex?.get(id)).filter(Boolean); const shuffled = [...songs].sort(() => Math.random() - 0.5); window.togglePlaylistPlayback(e, mix.id, shuffled); });
                     card.addEventListener('click', () => window.openPlaylistDetails(mix.id, mix.name));
                     if (typeof addLongPressListener === 'function') { addLongPressListener(card, (e) => { e.preventDefault(); e.stopPropagation(); if (confirm(`"${mix.name}" löschen?`)) { let saved = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); saved = saved.filter(m => m.id !== mix.id); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(saved)); window.renderHomeSections(); } }); }
@@ -2064,7 +2086,7 @@ async function createNewPlaylistProcess() {
                 stationsContainer.innerHTML = '';
                 stations.forEach(station => {
                     const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = station.id; const bgImage = station.cover_data && station.cover_data.length > 10 ? `url('${station.cover_data}')` : '';
-                    card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${station.name}</div>`;
+                    card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(station.name)}</div>`;
                     const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => window.togglePlaylistPlayback(e, station.id, station.songs));
                     card.addEventListener('click', () => { window.currentPlayingPlaylistId = station.id; if (station.songs.length > 0) { const firstSong = station.songs[0]; window.playSong(firstSong.title, firstSong.artist, firstSong.cover_data, firstSong.file_url); playbackQueue = station.songs.slice(1); savePlayerState(); } });
                     stationsContainer.appendChild(card);
@@ -2287,11 +2309,11 @@ async function createNewPlaylistProcess() {
         const coverSrc = song.coverUrl || song.cover_data || ''; const cover = coverSrc.length > 10 ? `url('${coverSrc}')` : 'var(--accent)';
         if (type === 'current') {
             div.classList.add('playing-active'); div.style.cssText = 'background:rgba(250,35,59,0.15);border:1px solid var(--accent);border-radius:10px;padding:10px;margin:6px 0 12px;';
-            div.innerHTML = `<div class="song-cover" style="background:${cover};background-size:cover;position:relative;"><div class="playing-anim" style="position:absolute;bottom:5px;right:5px;transform:scale(0.6);"><span></span><span></span><span></span></div></div><div class="song-info"><div class="song-title" style="color:var(--accent);font-size:16px;">${song.title}</div><div class="song-artist">${song.artist}</div></div><div style="font-size:10px;color:var(--accent);font-weight:700;letter-spacing:1px;flex-shrink:0;">LÄUFT</div>`;
+            div.innerHTML = `<div class="song-cover" style="background:${cover};background-size:cover;position:relative;"><div class="playing-anim" style="position:absolute;bottom:5px;right:5px;transform:scale(0.6);"><span></span><span></span><span></span></div></div><div class="song-info"><div class="song-title" style="color:var(--accent);font-size:16px;">${_esc(song.title)}</div><div class="song-artist">${_esc(song.artist)}</div></div><div style="font-size:10px;color:var(--accent);font-weight:700;letter-spacing:1px;flex-shrink:0;">LÄUFT</div>`;
             div.addEventListener('click', () => { audioPlayer.currentTime = 0; audioPlayer.play(); });
         } else if (type === 'history') {
             div.style.opacity = '0.5';
-            div.innerHTML = `<div class="song-cover" style="background:${cover};background-size:cover;"></div><div class="song-info"><div class="song-title">${song.title}</div><div class="song-artist">${song.artist}</div></div><div style="font-size:10px;color:var(--text-secondary);flex-shrink:0;padding-right:4px;">DAVOR</div>`;
+            div.innerHTML = `<div class="song-cover" style="background:${cover};background-size:cover;"></div><div class="song-info"><div class="song-title">${_esc(song.title)}</div><div class="song-artist">${_esc(song.artist)}</div></div><div style="font-size:10px;color:var(--text-secondary);flex-shrink:0;padding-right:4px;">DAVOR</div>`;
             div.addEventListener('click', () => {
                 const idx = playbackHistory.indexOf(song); if (idx === -1) return;
                 const songsAfter = playbackHistory.splice(idx + 1); if (window.currentSongData) songsAfter.push(window.currentSongData);
@@ -2299,7 +2321,7 @@ async function createNewPlaylistProcess() {
                 window.playSong(song.title, song.artist, song.cover_data || song.coverUrl, song.file_url || song.fileUrl); document.getElementById('queue-overlay').classList.remove('active');
             });
         } else { 
-            div.innerHTML = `<div class="song-cover" style="background:${cover};background-size:cover;"></div><div class="song-info"><div class="song-title">${song.title}</div><div class="song-artist">${song.artist}</div></div><div class="drag-handle" style="display:block;flex-shrink:0;">≡</div>`;
+            div.innerHTML = `<div class="song-cover" style="background:${cover};background-size:cover;"></div><div class="song-info"><div class="song-title">${_esc(song.title)}</div><div class="song-artist">${_esc(song.artist)}</div></div><div class="drag-handle" style="display:block;flex-shrink:0;">≡</div>`;
             let qStartX = 0;
             div.addEventListener('touchstart', (e) => { qStartX = e.touches[0].clientX; }, {passive: true});
             div.addEventListener('touchend', (e) => {
@@ -2525,8 +2547,8 @@ const groups = new Map();
                 <div style="display:flex;align-items:center;gap:10px;">
                     <div style="width:38px;height:38px;border-radius:6px;flex-shrink:0;background:${bg};background-size:cover;"></div>
                     <div style="flex:1;min-width:0;">
-                        <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${keep?.title||'?'}</div>
-                        <div style="font-size:11px;color:var(--text-secondary);">${keep?.artist||'?'} · ${group.length}×</div>
+                        <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(keep?.title||'?')}</div>
+                        <div style="font-size:11px;color:var(--text-secondary);">${_esc(keep?.artist||'?')} · ${group.length}×</div>
                     </div>
                     <div style="font-size:11px;color:#ff3b30;font-weight:600;">${dels.length} weg</div>
                 </div>`;
@@ -3497,10 +3519,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 row.style.cssText = 'display:flex; flex-direction:column; gap:8px; padding:8px; border-radius:10px; background:rgba(255,255,255,0.06); backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%); border:0.5px solid rgba(255,255,255,0.1);';
                 row.innerHTML = `
                   <div style="display:flex; align-items:center; gap:10px;">
-                    <img src="${item.thumbnail}" style="width:64px; height:48px; border-radius:6px; object-fit:cover; flex-shrink:0;">
+                    <img src="${_esc(item.thumbnail)}" style="width:64px; height:48px; border-radius:6px; object-fit:cover; flex-shrink:0;">
                     <div style="min-width:0; flex:1;">
-                        <div style="font-size:14px; font-weight:600; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${item.title}</div>
-                        <div style="font-size:12px; color:#aaa; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${item.channelTitle}${item.duration ? ' · ' + item.duration : ''}</div>
+                        <div style="font-size:14px; font-weight:600; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${_esc(item.title)}</div>
+                        <div style="font-size:12px; color:#aaa; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${_esc(item.channelTitle)}${item.duration ? ' · ' + _esc(item.duration) : ''}</div>
                     </div>
                     <button class="yt-preview-playbtn" title="Anhören" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:rgba(255,255,255,0.15); color:#fff; font-size:14px; cursor:pointer;">▶</button>
                     <button class="yt-download-btn" title="Herunterladen" style="flex-shrink:0; padding:8px 14px; border-radius:8px; border:none; background:#fa233b; color:#fff; font-size:16px; cursor:pointer;">⬇</button>
