@@ -1057,89 +1057,83 @@ let _bgCacheActive = false;
         if (typeof window.updateAppStats === 'function') window.updateAppStats();
     }
 
-    // ─── A-Z Schnellsprung-Leiste ────────────────────────────────────────────
-    // Ein Alphabet-Index macht nur auf einer alphabetisch sortierten Liste Sinn,
-    // die Songs-Seite kann aber auch nach Datum/Künstler sortiert sein. Deshalb
-    // sortiert das erste Antippen/Ziehen der Leiste die Liste einmalig nach Titel
-    // (wie ein impliziter "Nach Titel sortieren"-Klick), danach wird nur noch
-    // gezogen/gesprungen.
-    const AZ_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
-    const azBar = document.getElementById('az-scrollbar');
-    const azBubble = document.getElementById('az-scrollbar-bubble');
-    let azSortedByTitle = false;
+    // ─── Songs-Scrollbar ─────────────────────────────────────────────────────
+    // Schlichter, ziehbarer Scrollbar-Griff statt eines Buchstaben-Index (User
+    // wollte explizit KEINE Nav-/Sprungleiste, sondern eine normale Scrollbar,
+    // die die Position in der Liste zeigt und zum schnellen Scrollen gezogen
+    // werden kann).
+    const songsScrollTrack = document.getElementById('songs-scrollbar');
+    const songsScrollThumb = document.getElementById('songs-scrollbar-thumb');
+    const songsScrollView = document.getElementById('view-songs');
 
-    function _azFirstLetter(title) {
-        let c = (title || '').trim().charAt(0).toUpperCase();
-        const map = { 'Ä': 'A', 'Ö': 'O', 'Ü': 'U' };
-        c = map[c] || c;
-        return /^[A-Z]$/.test(c) ? c : '#';
-    }
+    if (songsScrollTrack && songsScrollThumb && songsScrollView) {
+        const MIN_THUMB = 30;
+        let hideTimer = null;
+        let dragging = false;
 
-    if (azBar) {
-        AZ_LETTERS.forEach(letter => {
-            const span = document.createElement('span');
-            span.textContent = letter;
-            span.dataset.letter = letter;
-            azBar.appendChild(span);
-        });
-
-        function scrollSongsToLetter(letter) {
-            if (!lazyAllSongs || !lazyAllSongs.length) return;
-            if (!azSortedByTitle) {
-                const sorted = [...lazyAllSongs].sort((a, b) => (a.title || '').localeCompare(b.title || '', 'de', { sensitivity: 'base' }));
-                rerenderSongsList(sorted);
-                azSortedByTitle = true;
-            }
-            let idx = lazyAllSongs.findIndex(s => _azFirstLetter(s.title) === letter);
-            if (idx === -1) idx = lazyAllSongs.findIndex(s => _azFirstLetter(s.title) > letter);
-            if (idx === -1) idx = lazyAllSongs.length - 1;
-            while (lazyRendered <= idx && lazyRendered < lazyAllSongs.length) lazyRenderBatch();
-            const el = allSongsElements[idx];
-            if (el) el.scrollIntoView({ block: 'start' });
+        function updateThumb() {
+            const trackH = songsScrollTrack.clientHeight;
+            const contentH = songsScrollView.scrollHeight;
+            const visibleH = songsScrollView.clientHeight;
+            if (contentH <= visibleH) { songsScrollThumb.classList.remove('visible'); return; }
+            const thumbH = Math.max(MIN_THUMB, trackH * (visibleH / contentH));
+            const maxThumbTop = trackH - thumbH;
+            const scrollRatio = songsScrollView.scrollTop / (contentH - visibleH);
+            songsScrollThumb.style.height = thumbH + 'px';
+            songsScrollThumb.style.top = (maxThumbTop * scrollRatio) + 'px';
         }
 
-        function _azLetterFromY(clientY) {
-            const rect = azBar.getBoundingClientRect();
-            const ratio = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
-            return AZ_LETTERS[Math.min(AZ_LETTERS.length - 1, Math.floor(ratio * AZ_LETTERS.length))];
+        function showThumb() {
+            songsScrollThumb.classList.add('visible');
+            clearTimeout(hideTimer);
+            hideTimer = setTimeout(() => { if (!dragging) songsScrollThumb.classList.remove('visible'); }, 900);
         }
 
-        function _azSetActive(letter) {
-            azBar.querySelectorAll('span').forEach(s => s.classList.toggle('az-active', s.dataset.letter === letter));
-            if (azBubble) {
-                azBubble.textContent = letter;
-                azBubble.classList.add('visible');
-                const rect = azBar.getBoundingClientRect();
-                azBubble.style.top = rect.top + rect.height / 2 + 'px';
-            }
+        songsScrollView.addEventListener('scroll', () => { updateThumb(); showThumb(); }, { passive: true });
+
+        function _thumbYToScrollTop(clientY) {
+            const rect = songsScrollTrack.getBoundingClientRect();
+            const trackH = rect.height;
+            const contentH = songsScrollView.scrollHeight;
+            const visibleH = songsScrollView.clientHeight;
+            const thumbH = Math.max(MIN_THUMB, trackH * (visibleH / contentH));
+            const maxThumbTop = trackH - thumbH;
+            const ratio = maxThumbTop > 0 ? Math.min(1, Math.max(0, (clientY - rect.top - thumbH / 2) / maxThumbTop)) : 0;
+            return ratio * (contentH - visibleH);
         }
 
-        let azDragging = false;
-        function azPointerMove(e) {
-            if (!azDragging) return;
+        function dragMove(e) {
+            if (!dragging) return;
             const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-            const letter = _azLetterFromY(clientY);
-            _azSetActive(letter);
-            scrollSongsToLetter(letter);
+            // Lange Listen sind lazy gerendert – genug Batches nachladen, bis der
+            // Ziel-Scrollbereich tatsächlich im DOM existiert.
+            while (songsScrollView.scrollHeight - songsScrollView.clientHeight < _thumbYToScrollTop(clientY) && lazyRendered < lazyAllSongs.length) lazyRenderBatch();
+            songsScrollView.scrollTop = _thumbYToScrollTop(clientY);
+            updateThumb();
         }
-        function azPointerEnd() {
-            azDragging = false;
-            azBar.classList.remove('dragging');
-            if (azBubble) azBubble.classList.remove('visible');
-            azBar.querySelectorAll('span').forEach(s => s.classList.remove('az-active'));
+        function dragEnd() {
+            if (!dragging) return;
+            dragging = false;
+            songsScrollThumb.classList.remove('dragging');
+            hideTimer = setTimeout(() => songsScrollThumb.classList.remove('visible'), 600);
         }
-        function azPointerStart(e) {
-            azDragging = true;
-            azBar.classList.add('dragging');
-            azPointerMove(e);
+        function dragStart(e) {
+            dragging = true;
+            songsScrollThumb.classList.add('dragging', 'visible');
+            clearTimeout(hideTimer);
+            dragMove(e);
         }
 
-        azBar.addEventListener('touchstart', azPointerStart, { passive: true });
-        azBar.addEventListener('touchmove', azPointerMove, { passive: true });
-        azBar.addEventListener('touchend', azPointerEnd);
-        azBar.addEventListener('mousedown', azPointerStart);
-        document.addEventListener('mousemove', azPointerMove);
-        document.addEventListener('mouseup', azPointerEnd);
+        songsScrollThumb.addEventListener('touchstart', dragStart, { passive: true });
+        songsScrollTrack.addEventListener('touchstart', dragStart, { passive: true });
+        document.addEventListener('touchmove', dragMove, { passive: true });
+        document.addEventListener('touchend', dragEnd);
+        songsScrollThumb.addEventListener('mousedown', dragStart);
+        songsScrollTrack.addEventListener('mousedown', dragStart);
+        document.addEventListener('mousemove', dragMove);
+        document.addEventListener('mouseup', dragEnd);
+        window.addEventListener('resize', updateThumb);
+        setTimeout(updateThumb, 500);
     }
 
     const SONGS_CACHE_KEY = 'heatbox_songs_snapshot';
