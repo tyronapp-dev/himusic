@@ -272,6 +272,7 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     flex: 1; margin: 4px 0 8px 0;
 }
 .large-cover {
+    position: relative;
     width: min(100%, 310px);
     aspect-ratio: 1;
     background: var(--bg-3);
@@ -525,6 +526,20 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     transform: translateY(-50%);
 }
 .az-scrollbar-bubble.visible { display: flex; }
+
+/* ─── "Keine Vibes"-Markierung: roter Punkt auf Songs ohne Vibe-Tags ───────── */
+.no-vibes-dot {
+    position: absolute;
+    top: -3px; right: -3px;
+    width: 11px; height: 11px;
+    border-radius: 50%;
+    background: var(--danger);
+    border: 2px solid var(--bg);
+    box-shadow: 0 0 0 0.5px rgba(255,255,255,0.25);
+    z-index: 2;
+    pointer-events: none;
+}
+.large-cover .no-vibes-dot { top: 10px; right: 10px; width: 16px; height: 16px; border-width: 3px; }
 
 /* ─── Song List & Grid ──────────────────────────────────────────────────────── */
 .song-container { margin-top: 16px; padding-bottom: 8px; }

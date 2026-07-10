@@ -819,6 +819,8 @@ let _bgCacheActive = false;
         if(bpArtist) bpArtist.innerText = artist;
         if(largeCover) { largeCover.style.backgroundImage = bgStyle !== 'none' ? bgStyle : 'var(--accent)'; largeCover.style.backgroundSize = 'cover'; }
         if(bpHv) bpHv.innerText = window.currentSongData.vibes?.join(' • ') || "Aktueller Titel";
+        const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
+        if (bpNoVibesDot) bpNoVibesDot.style.display = (window.currentSongData.vibes && window.currentSongData.vibes.length > 0) ? 'none' : 'block';
 
         const homeNpCover = document.getElementById('home-np-cover');
         const homeNpTitle = document.getElementById('home-np-title');
@@ -1187,10 +1189,14 @@ let _bgCacheActive = false;
     fetchSongsFromDatabase();
 
     function updateSongDOM(songDiv, song, playlistSongId = null) {
+        // Roter Punkt = Song hat noch keine Vibe-Tags gesetzt (siehe [[feedback]] Wunsch: sofort
+        // erkennbar, sowohl in der Liste als auch im großen Player, verschwindet sobald Vibes da sind.
+        const hasVibes = _parseVibes(song.vibes).length > 0;
+        const noVibesDotHtml = hasVibes ? '' : '<span class="no-vibes-dot"></span>';
         let coverHtml = '';
-        if (song.cover_data && song.cover_data.length > 10) { coverHtml = `<div class="song-cover" style="background-image: url('${song.cover_data}'); background-size: cover; background-position: center; border-radius: 6px;"></div>`; } 
-        else { const hue = Math.floor(Math.random() * 360); coverHtml = `<div class="song-cover" style="background: hsl(${hue}, 70%, 50%); display:flex; justify-content:center; align-items:center; border-radius: 6px;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="2"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>`; }
-        
+        if (song.cover_data && song.cover_data.length > 10) { coverHtml = `<div class="song-cover" style="background-image: url('${song.cover_data}'); background-size: cover; background-position: center; border-radius: 6px;">${noVibesDotHtml}</div>`; }
+        else { const hue = Math.floor(Math.random() * 360); coverHtml = `<div class="song-cover" style="background: hsl(${hue}, 70%, 50%); display:flex; justify-content:center; align-items:center; border-radius: 6px;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="2"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>${noVibesDotHtml}</div>`; }
+
         songDiv.innerHTML = `
             <div class="song-checkbox"></div>
             ${coverHtml}
@@ -1599,6 +1605,12 @@ const titleNorm = title.toLowerCase().trim();
                 editOverlay.classList.remove('active');
 
                 const songId = window.currentEditSongId;
+                const hasVibesNow = selectedVibes.length > 0;
+                document.querySelectorAll(`.song-item[data-id="${songId}"] .song-cover`).forEach(c => {
+                    let dot = c.querySelector('.no-vibes-dot');
+                    if (hasVibesNow && dot) dot.remove();
+                    else if (!hasVibesNow && !dot) { dot = document.createElement('span'); dot.className = 'no-vibes-dot'; c.appendChild(dot); }
+                });
                 const songElement = document.querySelector(`.song-item[data-id="${songId}"]`);
                 if (songElement) {
                     const coverImg = songElement.querySelector('.song-cover img');
@@ -1607,8 +1619,11 @@ const titleNorm = title.toLowerCase().trim();
                     const artistEl = songElement.querySelector('.song-artist');
                     if (titleEl) titleEl.textContent = changes.title;
                     if (artistEl) artistEl.textContent = changes.artist;
-                    
+
                     if (window.currentPlayingSongId == songId) {
+                        const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
+                        if (bpNoVibesDot) bpNoVibesDot.style.display = hasVibesNow ? 'none' : 'block';
+                        if (window.currentSongData) window.currentSongData.vibes = selectedVibes;
                         const playerCover = document.querySelector('#fullscreen-player .cover img');
                         if (playerCover && changes.cover_data) playerCover.src = changes.cover_data;
                         const playerTitle = document.querySelector('#fullscreen-player .song-title');
@@ -2845,7 +2860,23 @@ window.applySongPatch = function(id, patch) {
         if (patch.artist != null) { const a = row.querySelector('.song-artist'); if (a) a.textContent = patch.artist; }
         if (patch.cover_data) {
             const c = row.querySelector('.song-cover');
-            if (c) { c.style.backgroundImage = `url('${patch.cover_data}')`; c.style.backgroundSize = 'cover'; c.style.backgroundPosition = 'center'; c.innerHTML = ''; }
+            if (c) {
+                c.style.backgroundImage = `url('${patch.cover_data}')`; c.style.backgroundSize = 'cover'; c.style.backgroundPosition = 'center';
+                // Nicht komplett leeren – der "keine Vibes"-Punkt hängt als Kind im Cover und würde
+                // sonst beim Cover-Update (z.B. Sync) mitgelöscht.
+                const dot = c.querySelector('.no-vibes-dot');
+                c.innerHTML = '';
+                if (dot) c.appendChild(dot);
+            }
+        }
+        if (patch.vibes !== undefined) {
+            const c = row.querySelector('.song-cover');
+            if (c) {
+                const hasVibes = _parseVibes(patch.vibes).length > 0;
+                let dot = c.querySelector('.no-vibes-dot');
+                if (hasVibes && dot) dot.remove();
+                else if (!hasVibes && !dot) { dot = document.createElement('span'); dot.className = 'no-vibes-dot'; c.appendChild(dot); }
+            }
         }
     });
 };
