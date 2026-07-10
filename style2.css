@@ -481,6 +481,51 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 }
 .cancel-btn:active { transform: scale(0.97); }
 
+/* ─── A-Z Schnellsprung-Leiste (Songs-Seite) ───────────────────────────────── */
+.az-scrollbar {
+    position: fixed;
+    right: 2px;
+    top: 130px;
+    bottom: calc(var(--nav-h) + var(--mini-h) + var(--mini-gap) + env(safe-area-inset-bottom) + 44px);
+    width: 20px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 5;
+    touch-action: none;
+}
+.az-scrollbar span {
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--text-tertiary);
+    pointer-events: none;
+}
+.az-scrollbar.dragging span { color: var(--text-secondary); }
+.az-scrollbar span.az-active { color: var(--accent); transform: scale(1.35); }
+
+.az-scrollbar-bubble {
+    position: fixed;
+    right: 34px;
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    background: var(--glass-heavy);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 0.5px solid var(--glass-border);
+    color: #fff;
+    font-size: 26px;
+    font-weight: 700;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 6;
+    pointer-events: none;
+    transform: translateY(-50%);
+}
+.az-scrollbar-bubble.visible { display: flex; }
+
 /* ─── Song List & Grid ──────────────────────────────────────────────────────── */
 .song-container { margin-top: 16px; padding-bottom: 8px; }
 .list-view { display: flex; flex-direction: column; }

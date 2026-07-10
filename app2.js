@@ -1055,6 +1055,91 @@ let _bgCacheActive = false;
         if (typeof window.updateAppStats === 'function') window.updateAppStats();
     }
 
+    // ─── A-Z Schnellsprung-Leiste ────────────────────────────────────────────
+    // Ein Alphabet-Index macht nur auf einer alphabetisch sortierten Liste Sinn,
+    // die Songs-Seite kann aber auch nach Datum/Künstler sortiert sein. Deshalb
+    // sortiert das erste Antippen/Ziehen der Leiste die Liste einmalig nach Titel
+    // (wie ein impliziter "Nach Titel sortieren"-Klick), danach wird nur noch
+    // gezogen/gesprungen.
+    const AZ_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
+    const azBar = document.getElementById('az-scrollbar');
+    const azBubble = document.getElementById('az-scrollbar-bubble');
+    let azSortedByTitle = false;
+
+    function _azFirstLetter(title) {
+        let c = (title || '').trim().charAt(0).toUpperCase();
+        const map = { 'Ä': 'A', 'Ö': 'O', 'Ü': 'U' };
+        c = map[c] || c;
+        return /^[A-Z]$/.test(c) ? c : '#';
+    }
+
+    if (azBar) {
+        AZ_LETTERS.forEach(letter => {
+            const span = document.createElement('span');
+            span.textContent = letter;
+            span.dataset.letter = letter;
+            azBar.appendChild(span);
+        });
+
+        function scrollSongsToLetter(letter) {
+            if (!lazyAllSongs || !lazyAllSongs.length) return;
+            if (!azSortedByTitle) {
+                const sorted = [...lazyAllSongs].sort((a, b) => (a.title || '').localeCompare(b.title || '', 'de', { sensitivity: 'base' }));
+                rerenderSongsList(sorted);
+                azSortedByTitle = true;
+            }
+            let idx = lazyAllSongs.findIndex(s => _azFirstLetter(s.title) === letter);
+            if (idx === -1) idx = lazyAllSongs.findIndex(s => _azFirstLetter(s.title) > letter);
+            if (idx === -1) idx = lazyAllSongs.length - 1;
+            while (lazyRendered <= idx && lazyRendered < lazyAllSongs.length) lazyRenderBatch();
+            const el = allSongsElements[idx];
+            if (el) el.scrollIntoView({ block: 'start' });
+        }
+
+        function _azLetterFromY(clientY) {
+            const rect = azBar.getBoundingClientRect();
+            const ratio = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+            return AZ_LETTERS[Math.min(AZ_LETTERS.length - 1, Math.floor(ratio * AZ_LETTERS.length))];
+        }
+
+        function _azSetActive(letter) {
+            azBar.querySelectorAll('span').forEach(s => s.classList.toggle('az-active', s.dataset.letter === letter));
+            if (azBubble) {
+                azBubble.textContent = letter;
+                azBubble.classList.add('visible');
+                const rect = azBar.getBoundingClientRect();
+                azBubble.style.top = rect.top + rect.height / 2 + 'px';
+            }
+        }
+
+        let azDragging = false;
+        function azPointerMove(e) {
+            if (!azDragging) return;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            const letter = _azLetterFromY(clientY);
+            _azSetActive(letter);
+            scrollSongsToLetter(letter);
+        }
+        function azPointerEnd() {
+            azDragging = false;
+            azBar.classList.remove('dragging');
+            if (azBubble) azBubble.classList.remove('visible');
+            azBar.querySelectorAll('span').forEach(s => s.classList.remove('az-active'));
+        }
+        function azPointerStart(e) {
+            azDragging = true;
+            azBar.classList.add('dragging');
+            azPointerMove(e);
+        }
+
+        azBar.addEventListener('touchstart', azPointerStart, { passive: true });
+        azBar.addEventListener('touchmove', azPointerMove, { passive: true });
+        azBar.addEventListener('touchend', azPointerEnd);
+        azBar.addEventListener('mousedown', azPointerStart);
+        document.addEventListener('mousemove', azPointerMove);
+        document.addEventListener('mouseup', azPointerEnd);
+    }
+
     const SONGS_CACHE_KEY = 'heatbox_songs_snapshot';
     const SONGS_CACHE_TS  = 'heatbox_songs_snapshot_ts';
 
