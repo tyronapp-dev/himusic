@@ -5,11 +5,25 @@ Cloud-CI-Runner. Grund: YouTubes Bot-Erkennung blockiert GitHub-Actions-IPs zune
 (verifiziert: mehrere Videos scheiterten dort 0/8 trotz PO-Token und TLS-Impersonation),
 während eine normale Heim- oder Server-IP im Test keinen einzigen Bot-Block hatte.
 
+## API-Key (einmalig, auf jedem Rechner der den Watcher ausführt)
+
+Der Worker prüft seit kurzem einen `X-Api-Key`-Header auf jeder Route. Lege in diesem Ordner
+eine Datei **`.env`** an (liegt in `.gitignore`, wird nie committet) mit genau einer Zeile:
+
+```
+HIMUSIC_API_KEY=dein-key-hier
+```
+
+Den Key findest du in `config.js` im Hauptprojekt (Feld `apiKey`) bzw. im Cloudflare-Dashboard
+unter Worker → Settings → Variables and Secrets → `API_KEY`. Ohne diese Datei startet `watch.js`
+gar nicht erst und sagt dir das direkt.
+
 ## Einmaliges Setup — Windows (eigener PC)
 
 1. Diesen Ordner (`local-import-watcher/`) auf deinem PC haben (liegt schon im Projekt-Repo).
 2. Doppelklick auf **`setup.bat`** — lädt `yt-dlp.exe` und `ffmpeg.exe` automatisch herunter (~110 MB, dauert 1-2 Min).
-3. Fertig. Starten mit Doppelklick auf **`start.bat`**.
+3. `.env` mit dem API-Key anlegen (siehe oben).
+4. Fertig. Starten mit Doppelklick auf **`start.bat`**.
 
 Nachteil: läuft nur, solange der PC an und das Fenster offen ist.
 
@@ -22,7 +36,8 @@ Nachteil: läuft nur, solange der PC an und das Fenster offen ist.
 2. Per SSH einloggen: `ssh -i deinkey.pem opc@DEINE_SERVER_IP`
 3. Im Ordner: `chmod +x setup-linux.sh install-service.sh && ./setup-linux.sh`
    (installiert yt-dlp, ffmpeg, Node.js)
-4. Als Dauer-Dienst einrichten: `sudo ./install-service.sh`
+4. `.env` mit dem API-Key anlegen (siehe oben), z.B. `echo "HIMUSIC_API_KEY=dein-key-hier" > .env`
+5. Als Dauer-Dienst einrichten: `sudo ./install-service.sh`
    (läuft ab jetzt automatisch, auch nach Neustart, auch nach SSH-Trennung)
 
 Log ansehen: `sudo journalctl -u himusic-watcher -f`

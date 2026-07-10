@@ -19,6 +19,25 @@ const os = require('os');
 const path = require('path');
 
 const API_URL = 'https://himusic-api.tyron-app.workers.dev';
+// Der Worker prueft jetzt einen X-Api-Key-Header auf allen Routen ausser /media/* und
+// /internal/register. Der Key steht NICHT hier im Code (das waere bei einem oeffentlichen Repo
+// sofort geleakt), sondern in einer lokalen .env-Datei neben diesem Skript (Format:
+// HIMUSIC_API_KEY=... auf einer Zeile) - .env ist in .gitignore und wird nie committet.
+function _loadDotEnv() {
+    const envPath = path.join(__dirname, '.env');
+    if (!fs.existsSync(envPath)) return;
+    fs.readFileSync(envPath, 'utf8').split('\n').forEach((line) => {
+        const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$/i);
+        if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+    });
+}
+_loadDotEnv();
+const API_KEY = process.env.HIMUSIC_API_KEY || '';
+if (!API_KEY) {
+    console.error('HIMUSIC_API_KEY fehlt. Lege eine Datei ".env" neben watch.js an mit der Zeile:\nHIMUSIC_API_KEY=dein-key-hier');
+    process.exit(1);
+}
+const API_HEADERS = { 'X-Api-Key': API_KEY };
 const IS_WINDOWS = process.platform === 'win32';
 // Windows: die mitgelieferten .exe-Dateien neben diesem Skript. Linux: die systemweit
 // installierten Programme (liegen im PATH, z.B. nach "sudo dnf install yt-dlp ffmpeg").
@@ -89,7 +108,7 @@ async function processOne(item) {
         const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_local_yt.m4a`;
         const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'audio/mp4' },
+            headers: { ...API_HEADERS, 'Content-Type': 'audio/mp4' },
             body: fileBuf,
         });
         if (!uploadRes.ok) throw new Error(`Upload fehlgeschlagen: HTTP ${uploadRes.status}`);
@@ -98,7 +117,7 @@ async function processOne(item) {
         console.log(`[${item.id}] Registriere in der Datenbank...`);
         const songRes = await fetch(`${API_URL}/songs`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 title: info.title, artist: 'Unbekannt', cover_data: '',
                 file_url, file_size: fileBuf.length, duration: info.duration, vibes: [],
@@ -112,14 +131,14 @@ async function processOne(item) {
         fs.rmSync(tmpDir, { recursive: true, force: true });
         // Aus der Warteschlange entfernen, egal ob Erfolg oder Fehlschlag – bei Fehlschlag
         // kann der Song in der App einfach erneut importiert werden, statt hier ewig zu haengen.
-        await fetch(`${API_URL}/youtube-queue/${item.id}`, { method: 'DELETE' }).catch(() => {});
+        await fetch(`${API_URL}/youtube-queue/${item.id}`, { method: 'DELETE', headers: API_HEADERS }).catch(() => {});
     }
 }
 
 let active = 0;
 async function poll() {
     try {
-        const res = await fetch(`${API_URL}/youtube-queue`);
+        const res = await fetch(`${API_URL}/youtube-queue`, { headers: API_HEADERS });
         if (!res.ok) return;
         const items = await res.json();
         for (const item of items) {

@@ -1,4 +1,13 @@
 const API_URL = window.HiMusicConfig?.apiBaseUrl || 'https://heatbox-api.tyron-app.workers.dev';
+const API_KEY = window.HiMusicConfig?.apiKey || '';
+
+// Alle Aufrufe an UNSEREN Worker (himusic-api) müssen den API-Key mitschicken, seit der Worker
+// jede Route außer /media/* und /internal/register dagegen prüft (siehe Worker-Code). Ersetzt
+// fetch() 1:1 (gleiche Signatur) – Aufrufe an fremde Hosts (iTunes etc.) bleiben normales fetch()
+// und schicken den Key NIE mit, da _apiFetch nur an den eigenen Stellen verwendet wird.
+function _apiFetch(url, options = {}) {
+    return fetch(url, { ...options, headers: { ...(options.headers || {}), 'X-Api-Key': API_KEY } });
+}
 
 function _parseVibes(v) {
     if (!v) return [];
@@ -21,37 +30,37 @@ function _esc(s) {
 function _hapticTick(ms = 12) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch(e) {} }
 
 async function apiGetAllSongs() {
-  const response = await fetch(`${API_URL}/songs`);
+  const response = await _apiFetch(`${API_URL}/songs`);
   if (!response.ok) throw new Error('Failed to fetch songs');
   return await response.json();
 }
 
 async function apiCreateSong(songData) {
-  const response = await fetch(`${API_URL}/songs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(songData) });
+  const response = await _apiFetch(`${API_URL}/songs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(songData) });
   if (!response.ok) throw new Error('Failed to create song');
   return await response.json();
 }
 
 async function apiUpdateSong(songId, updates) {
-  const response = await fetch(`${API_URL}/songs/${songId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) });
+  const response = await _apiFetch(`${API_URL}/songs/${songId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) });
   if (!response.ok) throw new Error('Failed to update song');
   return await response.json();
 }
 
 async function apiDeleteSong(songId) {
-  const response = await fetch(`${API_URL}/songs/${songId}`, { method: 'DELETE' });
+  const response = await _apiFetch(`${API_URL}/songs/${songId}`, { method: 'DELETE' });
   if (!response.ok) throw new Error('Failed to delete song');
   return await response.json();
 }
 
 async function apiGetAllPlaylists() {
-  const response = await fetch(`${API_URL}/playlists`);
+  const response = await _apiFetch(`${API_URL}/playlists`);
   if (!response.ok) throw new Error('Failed to fetch playlists');
   return await response.json();
 }
 
 async function apiCreatePlaylist(name) {
-  const response = await fetch(`${API_URL}/playlists`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+  const response = await _apiFetch(`${API_URL}/playlists`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
   if (!response.ok) {
       const errText = await response.text();
       throw new Error(`Server blockiert (Status ${response.status}): ${errText}`);
@@ -60,37 +69,37 @@ async function apiCreatePlaylist(name) {
 }
 
 async function apiDeletePlaylist(playlistId) {
-  const response = await fetch(`${API_URL}/playlists/${playlistId}`, { method: 'DELETE' });
+  const response = await _apiFetch(`${API_URL}/playlists/${playlistId}`, { method: 'DELETE' });
   if (!response.ok) throw new Error('Failed to delete playlist');
   return await response.json();
 }
 
 async function apiGetPlaylistSongs(playlistId) {
-  const response = await fetch(`${API_URL}/playlists/${playlistId}/songs`);
+  const response = await _apiFetch(`${API_URL}/playlists/${playlistId}/songs`);
   if (!response.ok) throw new Error('Failed to fetch playlist songs');
   return await response.json();
 }
 
 async function apiAddSongsToPlaylist(playlistId, songIds) {
-  const response = await fetch(`${API_URL}/playlists/${playlistId}/songs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ song_ids: songIds }) });
+  const response = await _apiFetch(`${API_URL}/playlists/${playlistId}/songs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ song_ids: songIds }) });
   if (!response.ok) throw new Error('Failed to add songs to playlist');
   return await response.json();
 }
 
 async function apiRemoveSongFromPlaylist(playlistId, songId) {
-  const response = await fetch(`${API_URL}/playlists/${playlistId}/songs/${songId}`, { method: 'DELETE' });
+  const response = await _apiFetch(`${API_URL}/playlists/${playlistId}/songs/${songId}`, { method: 'DELETE' });
   if (!response.ok) throw new Error('Failed to remove song from playlist');
   return await response.json();
 }
 
 async function apiUpdatePlaylist(playlistId, updates) {
-  const response = await fetch(`${API_URL}/playlists/${playlistId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) });
+  const response = await _apiFetch(`${API_URL}/playlists/${playlistId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) });
   if (!response.ok) throw new Error('Failed to update playlist');
   return await response.json();
 }
 
 async function apiReorderPlaylistSongs(playlistId, updates) {
-  const response = await fetch(`${API_URL}/playlists/${playlistId}/reorder`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updates }) });
+  const response = await _apiFetch(`${API_URL}/playlists/${playlistId}/reorder`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updates }) });
   if (!response.ok) throw new Error('Failed to reorder playlist songs');
   return await response.json();
 }
@@ -176,7 +185,7 @@ async function searchSongMetaSpotify(title, artist, retryCount = 0) {
     const q = _cleanSearchTerm(title, artist);
     if (!q) return null;
     try {
-        const response = await fetch(`${API_URL}/spotify-search?q=${encodeURIComponent(q)}`, { signal: AbortSignal.timeout(6000) });
+        const response = await _apiFetch(`${API_URL}/spotify-search?q=${encodeURIComponent(q)}`, { signal: AbortSignal.timeout(6000) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         if (data.error === 'rate_limited') { window._spotifyCooldownUntil = Date.now() + 15 * 60 * 1000; return { rateLimited: true }; }
@@ -1399,7 +1408,7 @@ const titleNorm = title.toLowerCase().trim();
                 const safeFileName = `${Date.now()}_${Math.random().toString(36).substr(2,9)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
                 const fileDuration = await getDuration(file);
                 try {
-                    const uploadResponse = await fetch(`${API_URL}/upload/${safeFileName}`, { method: 'PUT', body: file });
+                    const uploadResponse = await _apiFetch(`${API_URL}/upload/${safeFileName}`, { method: 'PUT', body: file });
                     if (!uploadResponse.ok) throw new Error(`Upload fehlgeschlagen`);
                     const fileUrl = (await uploadResponse.json()).url;
                     await new Promise((resolve) => {
@@ -2945,7 +2954,7 @@ if (oldFileInput) {
         async function uploadOne(file, title, attempt = 1) {
             const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
             try {
-                const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
+                const uploadRes = await _apiFetch(`${API_URL}/upload/${safeFilename}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': file.type || 'audio/mpeg' },
                     body: file,
@@ -2954,7 +2963,7 @@ if (oldFileInput) {
                 if (!uploadRes.ok) throw new Error('upload failed');
                 const uploadData = await uploadRes.json();
 
-                const songRes = await fetch(`${API_URL}/songs`, {
+                const songRes = await _apiFetch(`${API_URL}/songs`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -2991,7 +3000,7 @@ if (oldFileInput) {
         if (done > 0) {
             setStatus(`🧹 Prüfe auf Duplikate...`);
             try {
-                const dRes = await fetch(`${API_URL}/songs/dedupe`, { method: 'POST', signal: _mkTimeout(120000) });
+                const dRes = await _apiFetch(`${API_URL}/songs/dedupe`, { method: 'POST', signal: _mkTimeout(120000) });
                 if (dRes.ok) { const d = await dRes.json().catch(() => ({})); removed = d.deleted || 0; }
             } catch(err) {}
         }
@@ -3058,7 +3067,7 @@ async function processBackgroundSync() {
     try {
         // Bibliothek EINMAL pro Durchlauf laden (früher passierte das alle 1,5 s → bei 1300+ Songs
         // dauerhaft langsam).
-        const response = await fetch(`${API_URL}/songs`, { signal: _mkTimeout(20000) });
+        const response = await _apiFetch(`${API_URL}/songs`, { signal: _mkTimeout(20000) });
         const songs = await response.json();
         const totalSongs = songs.length;
         const unsyncedAll = songs.filter(s => !s.cover_data && (s.artist === "Unbekannt" || s.artist === "" || s.artist === "Unbekannter Künstler"));
@@ -3141,7 +3150,7 @@ async function processBackgroundSync() {
                             patch = { title: song.title, artist: "Unbekannter Künstler", cover_data: "" };
                         }
                     }
-                    await fetch(`${API_URL}/songs/${song.id}`, {
+                    await _apiFetch(`${API_URL}/songs/${song.id}`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ ...patch, vibes: _parseVibes(song.vibes) }),
                         signal: _mkTimeout(15000)
@@ -3234,7 +3243,7 @@ async function _pollForFreshYtSongs(knownIds) {
     for (let attempt = 0; attempt < 15; attempt++) {
         await new Promise(r => setTimeout(r, 8000));
         try {
-            const res = await fetch(`${API_URL}/songs`);
+            const res = await _apiFetch(`${API_URL}/songs`);
             if (!res.ok) continue;
             const songs = await res.json();
             const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
@@ -3270,14 +3279,14 @@ async function _watchForYoutubeImportAndCache(url, queueItemId, statusEl) {
             return;
         }
 
-        fetch(`${API_URL}/youtube-queue/${queueItemId}`, { method: 'DELETE' }).catch(() => {});
+        _apiFetch(`${API_URL}/youtube-queue/${queueItemId}`, { method: 'DELETE' }).catch(() => {});
         if (statusEl) {
             statusEl.style.display = 'block';
             statusEl.innerText = '⚠️ Kein lokaler Watcher aktiv – wechsle zu Cloud-Fallback...';
             statusEl.style.color = '#fa9a00';
         }
         try {
-            const response = await fetch(`${API_URL}/dispatch-import`, {
+            const response = await _apiFetch(`${API_URL}/dispatch-import`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ youtube_url: url }),
             });
@@ -3316,7 +3325,7 @@ async function startYoutubeImport(url, statusEl) {
         statusEl.style.color = '#fff';
     }
     try {
-        const queueRes = await fetch(`${API_URL}/youtube-queue`, {
+        const queueRes = await _apiFetch(`${API_URL}/youtube-queue`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ youtube_url: url })
@@ -3337,7 +3346,7 @@ async function startYoutubeImport(url, statusEl) {
         // Fallback: GitHub-Actions-Kette (funktioniert auch ohne laufenden lokalen Watcher,
         // nur mit geringerer Erfolgsquote wegen Cloud-IP-Blocks).
         try {
-            const response = await fetch(`${API_URL}/dispatch-import`, {
+            const response = await _apiFetch(`${API_URL}/dispatch-import`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ youtube_url: url })
@@ -3502,7 +3511,7 @@ document.addEventListener('DOMContentLoaded', () => {
         resultsBox.innerHTML = '';
 
         try {
-            const res = await fetch(`${API_URL}/youtube-search?q=${encodeURIComponent(q)}`);
+            const res = await _apiFetch(`${API_URL}/youtube-search?q=${encodeURIComponent(q)}`);
             if (!res.ok) throw new Error(`Server: ${res.status}`);
             const data = await res.json();
             const items = data.results || [];
