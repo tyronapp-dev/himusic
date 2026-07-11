@@ -1769,7 +1769,7 @@ const titleNorm = title.toLowerCase().trim();
     let _noVibeFilterActive = false;
     document.getElementById('action-filter-no-vibe')?.addEventListener('click', async () => {
         actionSheetOverlay.classList.remove('active');
-        if (_noVibeFilterActive) { _noVibeFilterActive = false; songsContainer.innerHTML = ''; allSongsElements.forEach(el => songsContainer.appendChild(el)); return; }
+        if (_noVibeFilterActive) { _noVibeFilterActive = false; _currentFilteredSongs = null; songsContainer.innerHTML = ''; allSongsElements.forEach(el => songsContainer.appendChild(el)); return; }
         _noVibeFilterActive = true; songsContainer.innerHTML = '<div style="text-align:center; padding: 20px; color: var(--text-secondary);">Lade Songs ohne Vibe...</div>';
 
         const noVibeSongs = window.globalSongsData.filter(song => {
@@ -1783,9 +1783,10 @@ const titleNorm = title.toLowerCase().trim();
         songsContainer.innerHTML = '';
         noVibeSongs.forEach(song => {
             const existing = allSongsElements.find(el => parseInt(el.dataset.id) === song.id);
-            if (existing) { songsContainer.appendChild(existing); } 
-            else { const div = document.createElement('div'); div.className = 'song-item'; div.dataset.id = song.id; updateSongDOM(div, song); songsContainer.appendChild(div); }
+            if (existing) { songsContainer.appendChild(existing); }
+            else { const div = document.createElement('div'); div.className = 'song-item'; div.dataset.id = song.id; updateSongDOM(div, song); if (_existingPlaylistIds.has(String(song.id))) div.classList.add('disabled-song'); allSongsElements.push(div); songsContainer.appendChild(div); }
         });
+        _currentFilteredSongs = noVibeSongs;
     });
 
     if(actionFilterVibeBtn && vibeFilterOverlay) {
@@ -1819,7 +1820,7 @@ const titleNorm = title.toLowerCase().trim();
             const frag = document.createDocumentFragment();
             matched.forEach(song => {
                 let el = allSongsElements.find(e => parseInt(e.dataset.id) === song.id);
-                if (!el) { el = document.createElement('div'); el.className = 'song-item'; el.dataset.id = song.id; updateSongDOM(el, song); allSongsElements.push(el); }
+                if (!el) { el = document.createElement('div'); el.className = 'song-item'; el.dataset.id = song.id; updateSongDOM(el, song); if (_existingPlaylistIds.has(String(song.id))) el.classList.add('disabled-song'); allSongsElements.push(el); }
                 frag.appendChild(el);
             });
             songsContainer.appendChild(frag); _currentFilteredSongs = matched; vibeFilterOverlay.classList.remove('active');
@@ -1846,7 +1847,8 @@ const titleNorm = title.toLowerCase().trim();
 
     window.fetchPlaylistsForPage = async function(force = false) {
         const cachedPlaylists = (() => { try { const r = localStorage.getItem('heatbox_playlists_snapshot'); return r ? JSON.parse(r) : null; } catch(e) { return null; } })();
-        if (cachedPlaylists && cachedPlaylists.length > 0) { window.globalPlaylistsData = cachedPlaylists; if (typeof window.renderHomeSections === 'function') window.renderHomeSections(); _renderPlaylistsUI(cachedPlaylists, []); }
+        const cachedPs = (() => { try { const r = localStorage.getItem('heatbox_ps_snapshot'); return r ? JSON.parse(r) : []; } catch(e) { return []; } })();
+        if (cachedPlaylists && cachedPlaylists.length > 0) { window.globalPlaylistsData = cachedPlaylists; if (typeof window.renderHomeSections === 'function') window.renderHomeSections(); _renderPlaylistsUI(cachedPlaylists, cachedPs); }
 
         const now = Date.now();
         if (_fetchPlaylistsRunning) return; if (!force && cachedPlaylists && (now - _playlistsLastFetched) < 60000) return;
@@ -1856,9 +1858,16 @@ const titleNorm = title.toLowerCase().trim();
             const playlists = await apiGetAllPlaylists();
             window.globalPlaylistsData = playlists; _playlistsLastFetched = Date.now();
             try { localStorage.setItem('heatbox_playlists_snapshot', JSON.stringify(playlists)); } catch(e) {}
+
+            const psLists = await Promise.all(playlists.map(pl => apiGetPlaylistSongs(pl.id)
+                .then(songs => (songs || []).filter(s => s !== null).map(s => ({ playlist_id: pl.id, song_id: s.id })))
+                .catch(() => [])));
+            const allPlaylistSongs = psLists.flat();
+            try { localStorage.setItem('heatbox_ps_snapshot', JSON.stringify(allPlaylistSongs)); } catch(e) {}
+
             if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
             if (typeof window.updateAppStats === 'function') window.updateAppStats();
-            _renderPlaylistsUI(playlists, []); 
+            _renderPlaylistsUI(playlists, allPlaylistSongs);
         } catch (error) { } finally { _fetchPlaylistsRunning = false; }
     };
 
@@ -1949,7 +1958,7 @@ async function createNewPlaylistProcess() {
             localStorage.removeItem(`heatbox_playlist_${playlistId}_songs`); localStorage.removeItem(`heatbox_playlist_${playlistId}_ts`);
             try { const snap = JSON.parse(localStorage.getItem('heatbox_ps_snapshot') || '[]'); const newEntries = newIds.map(songId => ({ playlist_id: playlistId, song_id: parseInt(songId) })); localStorage.setItem('heatbox_ps_snapshot', JSON.stringify([...snap, ...newEntries])); } catch(e) { localStorage.removeItem('heatbox_ps_snapshot'); }
             _existingPlaylistIds = new Set(); window.fetchPlaylistsForPage(true);
-            setTimeout(() => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); const plNavBtn = document.querySelector('.nav-btn[data-target="view-playlists"]'); if (plNavBtn) plNavBtn.classList.add('active'); document.querySelectorAll('.view').forEach(v => { v.classList.remove('active'); v.classList.add('hidden'); }); const viewPlaylists = document.getElementById('view-playlists'); if (viewPlaylists) { viewPlaylists.classList.remove('hidden'); setTimeout(() => viewPlaylists.classList.add('active'), 10); } if (typeof window.openPlaylistDetails === 'function') { window.openPlaylistDetails(playlistId, playlistName, true); } }, 300);
+            setTimeout(() => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); const plNavBtn = document.querySelector('.nav-btn[data-target="view-playlists"]'); if (plNavBtn) plNavBtn.classList.add('active'); if (typeof window.openPlaylistDetails === 'function') { window.openPlaylistDetails(playlistId, playlistName, true); } }, 300);
         } catch (error) { alert("Fehler beim Hinzufügen: " + error.message); }
     }
 
