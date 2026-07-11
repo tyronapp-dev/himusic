@@ -2436,17 +2436,44 @@ async function createNewPlaylistProcess() {
 
     document.getElementById('btn-carplay')?.addEventListener('click', () => { alert("🚗 Apple CarPlay & Android Auto bereit!\n\nVerbinde dein Handy einfach per Kabel oder Bluetooth mit deinem Auto. Da HeaTBox jetzt die native Media-Schnittstelle nutzt, werden Songs, Cover und die Steuerung automatisch auf dein Auto-Display übertragen!"); });
 
+    // Sheet-Wisch-zum-Schließen: 1:1 mit dem Finger mitziehen statt nur den Endzustand beim
+    // Loslassen zu prüfen (Apple Design: "feedback must be continuous during the interaction,
+    // not just at the end"). Nach oben rausziehen wird gedämpft statt hart zu stoppen
+    // (Rubber-Banding). Ein schneller Flick schließt auch bei kurzer Strecke (Emil Kowalski:
+    // Geschwindigkeit statt reiner Distanz-Schwelle).
     document.querySelectorAll('.action-sheet-overlay').forEach(overlay => {
         const sheet = overlay.querySelector('.action-sheet'); if(!sheet) return;
-        let sheetStartY = 0; let swipeStartedInScrollable = false;
-        sheet.addEventListener('touchstart', (e) => { sheetStartY = e.touches[0].clientY; const scrollable = e.target.closest('.vibes-container, [style*="overflow-y: auto"], [style*="overflow-y:auto"], .song-container, #queue-list, #dup-results-container'); swipeStartedInScrollable = !!scrollable; }, {passive: true});
-sheet.addEventListener('touchend', (e) => {
-            if(!sheetStartY || swipeStartedInScrollable) { sheetStartY = 0; swipeStartedInScrollable = false; return; }
-            let diffY = e.changedTouches[0].clientY - sheetStartY;
-            if(diffY > 70) overlay.classList.remove('active');
-            sheetStartY = 0;
-            swipeStartedInScrollable = false;
+        let startY = 0, lastY = 0, startTime = 0, dragging = false;
+
+        function releaseSheet() {
+            sheet.style.transition = '';
+            sheet.style.transform = '';
+        }
+
+        sheet.addEventListener('touchstart', (e) => {
+            const scrollable = e.target.closest('.vibes-container, [style*="overflow-y: auto"], [style*="overflow-y:auto"], .song-container, #queue-list, #dup-results-container');
+            if (scrollable) { dragging = false; return; }
+            startY = lastY = e.touches[0].clientY; startTime = Date.now(); dragging = true;
+        }, {passive: true});
+
+        sheet.addEventListener('touchmove', (e) => {
+            if (!dragging) return;
+            lastY = e.touches[0].clientY;
+            let diff = lastY - startY;
+            if (diff < 0) diff *= 0.25; // Rubber-Band beim Rausziehen nach oben
+            sheet.style.transition = 'none';
+            sheet.style.transform = `translateY(${diff}px)`;
+        }, {passive: true});
+
+        sheet.addEventListener('touchend', () => {
+            if (!dragging) return;
+            dragging = false;
+            const diff = lastY - startY;
+            const velocity = diff / Math.max(1, Date.now() - startTime); // px/ms
+            if (diff > 70 || velocity > 0.5) { releaseSheet(); overlay.classList.remove('active'); }
+            else releaseSheet(); // schnappt über die eigene CSS-Transition der .action-sheet zurück
         });
+        sheet.addEventListener('touchcancel', () => { dragging = false; releaseSheet(); });
     });
 
     document.querySelectorAll('.action-sheet-overlay').forEach(overlay => {
