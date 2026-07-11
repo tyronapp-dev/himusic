@@ -1,12 +1,18 @@
 const API_URL = window.HiMusicConfig?.apiBaseUrl || 'https://heatbox-api.tyron-app.workers.dev';
 const API_KEY = window.HiMusicConfig?.apiKey || '';
 
-// Alle Aufrufe an UNSEREN Worker (himusic-api) müssen den API-Key mitschicken, seit der Worker
-// jede Route außer /media/* und /internal/register dagegen prüft (siehe Worker-Code). Ersetzt
-// fetch() 1:1 (gleiche Signatur) – Aufrufe an fremde Hosts (iTunes etc.) bleiben normales fetch()
-// und schicken den Key NIE mit, da _apiFetch nur an den eigenen Stellen verwendet wird.
+// Ersetzt fetch() 1:1 an allen Stellen, die UNSEREN Worker (himusic-api) aufrufen (Aufrufe an
+// fremde Hosts wie iTunes bleiben normales fetch()). Der X-Api-Key-Header ist HIER ABSICHTLICH
+// NOCH DEAKTIVIERT: sobald ein Custom-Header mitgeschickt wird, macht der Browser vor JEDEM
+// Request (auch simplen GETs) erst einen CORS-Preflight (OPTIONS) – der aktuell live laufende
+// Worker erlaubt in seiner CORS-Antwort aber nur "Content-Type, Authorization", nicht
+// "X-Api-Key". Das blockte dadurch ALLE Requests (Speichern, Sync, alles) komplett, bevor sie
+// den Worker überhaupt erreichten. Sobald der neue Worker-Code (siehe ADR-005) live ist – der
+// X-Api-Key explizit in Access-Control-Allow-Headers erlaubt UND die Route-Prüfung selbst
+// enthält – hier die auskommentierte Zeile aktivieren und die darunter entfernen.
 function _apiFetch(url, options = {}) {
-    return fetch(url, { ...options, headers: { ...(options.headers || {}), 'X-Api-Key': API_KEY } });
+    // return fetch(url, { ...options, headers: { ...(options.headers || {}), 'X-Api-Key': API_KEY } });
+    return fetch(url, options);
 }
 
 function _parseVibes(v) {
