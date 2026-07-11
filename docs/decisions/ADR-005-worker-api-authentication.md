@@ -1,11 +1,36 @@
-# ADR-005: Worker-API-Authentifizierung (IN ARBEIT — nicht abgeschlossen)
+# ADR-005: Worker-API-Authentifizierung
 
 ## Status
-Proposed / In Progress — **client-seitiger Code ist bereits deployed, Worker-seitiger Teil noch
-nicht. Nicht als abgeschlossen behandeln, bis die "Next Steps" unten erledigt sind.**
+Accepted — Worker-Code mit Auth-Gate ist deployed, `API_KEY`-Secret gesetzt, per curl gegen den
+echten Worker verifiziert (`401` ohne Header, `200` mit korrektem `X-Api-Key`). Weiterhin offen:
+die Hosting-Migration (siehe "Next Steps"), die den Key erst wirklich vor dem öffentlichen Repo
+verbirgt — bis dahin schützt der Key nur vor zufälligem/automatisiertem Zugriff, nicht vor
+jemandem, der gezielt den öffentlichen Quellcode liest.
 
 ## Date
-2026-07-10
+2026-07-10 (Auth-Gate entworfen) / 2026-07-11 (deployed und verifiziert)
+
+### Nachtrag: Rollout-Fehler und ihre Behebung (2026-07-11)
+Der Rollout verlief nicht reibungslos — drei Bugs traten nacheinander auf, alle inzwischen
+behoben:
+1. **CORS-Preflight-Blockade:** Client sendete den `X-Api-Key`-Header, bevor der Worker ihn in
+   `Access-Control-Allow-Headers` erlaubte — blockte ausnahmslos jeden Request (Speichern, Sync,
+   alles). Kurzzeitig durch Deaktivieren des Headers clientseitig entschärft, dann nach dem
+   tatsächlichen Worker-Deploy wieder aktiviert.
+2. **Service-Worker-Stale-Cache:** `CACHE_NAME` war seit vor dem Bug unverändert, die
+   Stale-while-revalidate-Strategie lieferte alte App-Shell-Dateien noch mehrere Reloads lang
+   aus. Behoben durch harten Versionsbump (v1.4 → v1.5).
+3. **Trailing Newline im Secret:** Das im Cloudflare-Dashboard gesetzte `API_KEY`-Secret hatte
+   einen unsichtbaren Zeilenumbruch am Ende (`keyLength: 44` statt 43) — vermutlich beim
+   Kopieren aus einem Chat-Code-Block mitgekommen. Erst durch einen temporären Diagnose-Endpoint
+   (`/debug-key-check`, zeigte Länge + erstes/letztes Zeichen ohne den vollen Wert preiszugeben)
+   im Worker gefunden; danach durch manuelles Abtippen des Secrets statt Copy-Paste behoben.
+   Diagnose-Endpoint wurde nach dem Fix wieder entfernt.
+
+**Lehre:** Bei clientseitigen Header-/Auth-Änderungen, die einen CORS-Preflight auslösen, immer
+zuerst den Server, dann den Client deployen (nicht umgekehrt) — und bei "Secret stimmt einfach
+nicht"-Rätseln früh einen harmlosen Diagnose-Endpoint einbauen (Länge/Randzeichen, nie den vollen
+Wert), statt wiederholt blind neu einzutippen.
 
 ## Context
 Security-Audit (siehe ADR-004) deckte auf: die REST-API auf Cloudflare Workers
