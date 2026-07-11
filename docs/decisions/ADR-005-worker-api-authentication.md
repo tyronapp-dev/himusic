@@ -101,8 +101,20 @@ Ausnahmen bewusst gewählt:
   und committen, sonst wiederholt sich das gleiche Problem).
 - **Das Login-Passwort in `login.html` ist ebenfalls verbrannt** (war es schon vor dieser
   Session, sobald das Repo public wurde) — sollte im selben Zug wie der API-Key rotiert werden.
-- Bis die Worker-Seite deployed ist, sendet die App zwar bereits den Header, aber er wird vom
-  (noch alten) Worker ignoriert — **keine funktionale Änderung, kein Risiko**, rein additiv.
+- **Korrektur (2026-07-10, kurz nach dem ursprünglichen Push):** Die Annahme "der alte Worker
+  ignoriert den Header einfach, rein additiv" war **falsch** und hat die App produktiv kaputt
+  gemacht (Speichern im Tag-Editor und der Background-Sync schlugen komplett fehl). Ursache:
+  Sobald ein Custom-Header (`X-Api-Key`) mitgeschickt wird, erzwingt der Browser vor **jedem**
+  Request — auch einfachen GETs, die vorher keinen brauchten — einen CORS-Preflight (OPTIONS).
+  Der zu dem Zeitpunkt live laufende (alte) Worker erlaubte in seiner CORS-Antwort aber nur
+  `Content-Type, Authorization`, nicht `X-Api-Key` — der Browser blockte dadurch **jeden**
+  Request an den Worker, bevor er ihn überhaupt erreichte. Fix (Commit `753fc77`): `_apiFetch()`
+  ist bis zum tatsächlichen Worker-Deploy ein reiner `fetch()`-Passthrough ohne den Header (Zeile
+  mit dem Header-Merge ist auskommentiert, nicht gelöscht — beim Worker-Deploy einfach wieder
+  aktivieren). **Lehre für den eigentlichen Rollout:** Client-seitige Header-Änderungen, die
+  einen CORS-Preflight auslösen, dürfen erst NACH dem entsprechenden Worker-Deploy live gehen,
+  nicht vorher — die Rollout-Reihenfolge aus diesem ADR (erst Client, dann Worker) war in dieser
+  Hinsicht falsch herum gedacht.
 - Separater, ungeklärter Fund aus derselben Session: der Worker-Code enthält **keine
   `/playlists`-Routen**, obwohl `app2.js` durchgehend `/playlists`, `/playlists/:id/songs` usw.
   aufruft. Nutzer war sich dessen nicht bewusst. Nicht untersucht, ob ein zweiter Worker
