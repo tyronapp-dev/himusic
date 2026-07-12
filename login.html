@@ -7,16 +7,17 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Himusic">
     <title>Himusic Login</title>
-    
+
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icon-192.png">
-    
+
     <style>
         body { background: #000; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: -apple-system, sans-serif; margin: 0; }
         .login-box { display: flex; flex-direction: column; gap: 15px; width: 300px; padding: 30px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; text-align: center; }
         h2 { margin-top: 0; font-size: 24px; }
         input { padding: 12px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: white; font-size: 16px; outline: none; text-align: center; }
         button { padding: 12px; border-radius: 8px; border: none; background: #fa233b; color: white; font-size: 16px; font-weight: 600; cursor: pointer; }
+        button:disabled { opacity: 0.6; cursor: default; }
     </style>
 </head>
 <body>
@@ -27,23 +28,48 @@
         <p id="error-msg" style="color: #ff3b30; font-size: 14px; display: none;">Falsches Passwort!</p>
     </div>
 
+    <script src="config.js"></script>
     <script>
-        // HIER DEIN EIGENES PASSWORT EINTRAGEN:
-        const APP_PASSWORD = "Kakalika";
-
-        // Wenn schon eingeloggt, SOFORT weiterleiten
-        if(localStorage.getItem('himusic_auth') === 'true') {
+        // Wenn schon eingeloggt UND ein Key vorhanden ist, SOFORT weiterleiten. Der Key-Check
+        // fängt alte Sessions aus der Zeit vor der serverseitigen Login-Prüfung (ADR-006) ab,
+        // die sonst mit leerem Key kaputt in die App liefen.
+        if (localStorage.getItem('himusic_auth') === 'true' && localStorage.getItem('himusic_api_key')) {
             window.location.replace("index.html");
         }
 
-        document.getElementById('login-btn').addEventListener('click', () => {
-            if(document.getElementById('password').value === APP_PASSWORD) {
+        const loginBtn = document.getElementById('login-btn');
+        const errorMsg = document.getElementById('error-msg');
+        const passwordInput = document.getElementById('password');
+
+        // Passwort wird serverseitig im Worker geprüft (POST /auth/login) statt clientseitig -
+        // vorher stand es im Klartext hier im JS und war per "Seitenquelltext anzeigen" für
+        // jeden lesbar, der die Seite lädt. Siehe ADR-006.
+        async function attemptLogin() {
+            const password = passwordInput.value;
+            errorMsg.style.display = 'none';
+            loginBtn.disabled = true;
+            loginBtn.textContent = 'Prüfe...';
+            try {
+                const res = await fetch(`${window.HiMusicConfig.apiBaseUrl}/auth/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password })
+                });
+                if (!res.ok) throw new Error('unauthorized');
+                const data = await res.json();
+                if (!data.apiKey) throw new Error('no_key');
                 localStorage.setItem('himusic_auth', 'true');
+                localStorage.setItem('himusic_api_key', data.apiKey);
                 window.location.replace("index.html");
-            } else {
-                document.getElementById('error-msg').style.display = 'block';
+            } catch (e) {
+                errorMsg.style.display = 'block';
+                loginBtn.disabled = false;
+                loginBtn.textContent = 'Entsperren';
             }
-        });
+        }
+
+        loginBtn.addEventListener('click', attemptLogin);
+        passwordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') attemptLogin(); });
     </script>
 </body>
 </html>

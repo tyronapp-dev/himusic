@@ -7,6 +7,11 @@ die Hosting-Migration (siehe "Next Steps"), die den Key erst wirklich vor dem ö
 verbirgt — bis dahin schützt der Key nur vor zufälligem/automatisiertem Zugriff, nicht vor
 jemandem, der gezielt den öffentlichen Quellcode liest.
 
+**Nachtrag (2026-07-12):** Das in "Consequences" beschriebene Klartext-Passwort-Problem
+(`login.html`) und das "Key steht fest in `config.js`"-Problem wurden mit **[ADR-006](ADR-006-server-side-login.md)**
+behoben (serverseitige Login-Prüfung, Key wird erst nach Login dynamisch geholt statt committed).
+Die Hosting-/private-Repo-Migration weiter unten bleibt davon unberührt offen.
+
 ## Date
 2026-07-10 (Auth-Gate entworfen) / 2026-07-11 (deployed und verifiziert)
 

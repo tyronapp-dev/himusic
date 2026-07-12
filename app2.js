@@ -1,13 +1,23 @@
 const API_URL = window.HiMusicConfig?.apiBaseUrl || 'https://heatbox-api.tyron-app.workers.dev';
-const API_KEY = window.HiMusicConfig?.apiKey || '';
+const API_KEY = localStorage.getItem('himusic_api_key') || '';
 
 // Ersetzt fetch() 1:1 an allen Stellen, die UNSEREN Worker (himusic-api) aufrufen (Aufrufe an
-// fremde Hosts wie iTunes bleiben normales fetch()). Der Worker verlangt seit dem Deploy des
-// neuen Codes (siehe ADR-005) X-Api-Key auf jeder Route außer /media/* und /internal/register
-// und erlaubt den Header auch korrekt per CORS (per curl gegen den echten Worker verifiziert,
-// 2026-07-11) – ohne den Header liefert der Worker jetzt überall 401 Unauthorized.
+// fremde Hosts wie iTunes bleiben normales fetch()). Der Worker verlangt X-Api-Key auf jeder
+// Route außer /media/*, /internal/register und /auth/login. Der Key selbst kommt seit ADR-006
+// nicht mehr aus config.js, sondern wird nach erfolgreichem Login vom Worker geholt und nur in
+// localStorage gehalten. Liefert der Worker 401 (Key fehlt/ungültig/rotiert), wird die Session
+// verworfen und zurück zum Login geschickt, statt dass jeder folgende Request still ins Leere
+// läuft.
 function _apiFetch(url, options = {}) {
-    return fetch(url, { ...options, headers: { ...(options.headers || {}), 'X-Api-Key': API_KEY } });
+    return fetch(url, { ...options, headers: { ...(options.headers || {}), 'X-Api-Key': API_KEY } })
+        .then(response => {
+            if (response.status === 401) {
+                localStorage.removeItem('himusic_auth');
+                localStorage.removeItem('himusic_api_key');
+                window.location.replace('login.html');
+            }
+            return response;
+        });
 }
 
 function _parseVibes(v) {
