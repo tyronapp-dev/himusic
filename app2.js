@@ -506,10 +506,18 @@ function initApp() {
 
     const navButtons = document.querySelectorAll('.nav-btn');
     const views = document.querySelectorAll('.view');
+    const navPill = document.querySelector('.nav-pill');
+    function _moveNavPill(btn) {
+        if (!navPill) return;
+        const index = Array.from(navButtons).indexOf(btn);
+        if (index > -1) navPill.style.transform = `translateX(${index * 100}%)`;
+    }
+    _moveNavPill(document.querySelector('.nav-btn.active') || navButtons[0]);
     navButtons.forEach(btn => {
         btn.addEventListener('click', (e) => {
             navButtons.forEach(b => b.classList.remove('active'));
             e.currentTarget.classList.add('active');
+            _moveNavPill(e.currentTarget);
             const targetId = e.currentTarget.getAttribute('data-target');
             window.currentOpenPlaylistId = null; 
             if (targetId === 'view-settings' && typeof window.updateAppStats === 'function') window.updateAppStats();
