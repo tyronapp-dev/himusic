@@ -241,7 +241,7 @@ async function fetchCoverFromiTunes(title, artist) {
     return (meta && meta.cover) ? meta.cover : null;
 }
 
-const AVAILABLE_VIBES = ["Afro", "Ghana", "RnB", "Old School", "Deepdream", "LD", "Calm", "SAD", "Gym", "HYPE", "Carpool", "Amapiano", "Hard rap", "Dancehall", "Rap", "Summer", "Latenight", "Dance", "Christ", "Soul", "Exotic", "N-rei", "ODS", "G-Nrei"];
+const AVAILABLE_VIBES = ["Afro", "Ghana", "RnB", "Old School", "Deepdream", "LD", "Calm", "SAD", "Gym", "HYPE", "Carpool", "Amapiano", "Hard rap", "Dancehall", "Rap", "Summer", "Latenight", "Dance", "Christ", "Soul", "Exotic", "N-rei", "ODS", "G-Nrei","POP","OGG"];
 
 function addClearButton(inputElement) {
     if (!inputElement || inputElement.dataset.hasClearBtn) return;
@@ -508,18 +508,19 @@ function initApp() {
     const views = document.querySelectorAll('.view');
     const navPill = document.querySelector('.nav-pill');
     // Misst die echte Bounding-Box des Buttons statt fixer CSS-Werte zu raten - sonst passt
-    // die Pille nicht zu Icon+Label und beides guckt oben/unten heraus. +Padding für etwas
-    // Luft um den Inhalt, Höhe wird zusätzlich auf die Bar selbst gedeckelt (minus 6px Rand),
-    // damit die Pille umgekehrt nie oben/unten über die Bottom-Nav hinaussteht.
-    const NAV_PILL_PAD_X = 6, NAV_PILL_PAD_Y = 4;
+    // die Pille nicht zu Icon+Label. Einheitlicher Rand auf allen Seiten (nicht X != Y), damit
+    // die Pille sauber genormt aussieht statt oben/unten gequetscht zu wirken. --nav-h wurde
+    // dafür von 49px auf 56px angehoben, sonst reicht der Platz für Icon+Label+aktives
+    // Scaling(1.08) plus gleichmäßigen Rand nicht aus. Deckelung bleibt als Sicherheitsnetz.
+    const NAV_PILL_PAD = 6;
     function _moveNavPill(btn) {
         if (!navPill || !btn) return;
         const bar = navPill.parentElement;
-        const maxH = bar ? bar.clientHeight - 6 : Infinity;
-        const h = Math.min(btn.offsetHeight + NAV_PILL_PAD_Y * 2, maxH);
-        navPill.style.width = (btn.offsetWidth + NAV_PILL_PAD_X * 2) + 'px';
+        const maxH = bar ? bar.clientHeight - NAV_PILL_PAD : Infinity;
+        const h = Math.min(btn.offsetHeight + NAV_PILL_PAD * 2, maxH);
+        navPill.style.width = (btn.offsetWidth + NAV_PILL_PAD * 2) + 'px';
         navPill.style.height = h + 'px';
-        navPill.style.transform = `translate(${btn.offsetLeft - NAV_PILL_PAD_X}px, ${btn.offsetTop - (h - btn.offsetHeight) / 2}px)`;
+        navPill.style.transform = `translate(${btn.offsetLeft - NAV_PILL_PAD}px, ${btn.offsetTop - (h - btn.offsetHeight) / 2}px)`;
     }
     _moveNavPill(document.querySelector('.nav-btn.active') || navButtons[0]);
     window.addEventListener('resize', () => _moveNavPill(document.querySelector('.nav-btn.active') || navButtons[0]));

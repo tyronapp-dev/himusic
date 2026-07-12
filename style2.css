@@ -31,7 +31,7 @@
     --ease-out:      cubic-bezier(0.23,1,0.32,1);
 
     /* Layout constants */
-    --nav-h:   49px;
+    --nav-h:   56px;
     --mini-h:  68px;
     --mini-gap: 10px;
 }
