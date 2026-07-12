@@ -162,14 +162,14 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     padding: 0 6px;
 }
 
-/* Gleitende Glas-Pille hinter dem aktiven Tab (Apple-Music-Stil). Reine transform-Animation
-   (keine width/left-Änderung) - Breite steht per CSS fest (1 von 4 Tabs), nur translateX
-   bewegt sie, dadurch GPU-beschleunigt und ohne Layout-Neuberechnung. Position wird von
-   app2.js beim Tab-Wechsel gesetzt (siehe navButtons-Click-Handler). */
+/* Gleitende Glas-Pille hinter dem aktiven Tab (Apple-Music-Stil). Breite/Höhe werden von
+   app2.js aus der tatsächlichen Bounding-Box des Buttons gemessen (+ etwas Padding) statt
+   fest in CSS geraten zu werden - sonst passt es nicht zu jeder Icon/Label-Kombination und
+   Icons/Labels gucken über die Pille hinaus. Nur transform wird animiert (GPU-beschleunigt,
+   keine Layout-Neuberechnung), width/height werden beim Tab-Wechsel instant neu gesetzt. */
 .nav-pill {
     position: absolute;
-    top: 6px; bottom: 6px; left: 6px;
-    width: calc((100% - 12px) / 4);
+    top: 0; left: 0;
     border-radius: 999px;
     background: var(--glass-sheen), rgba(255,255,255,0.16);
     box-shadow: var(--glass-bevel), 0 2px 10px rgba(0,0,0,0.3);

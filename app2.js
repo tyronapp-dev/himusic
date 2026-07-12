@@ -507,12 +507,22 @@ function initApp() {
     const navButtons = document.querySelectorAll('.nav-btn');
     const views = document.querySelectorAll('.view');
     const navPill = document.querySelector('.nav-pill');
+    // Misst die echte Bounding-Box des Buttons statt fixer CSS-Werte zu raten - sonst passt
+    // die Pille nicht zu Icon+Label und beides guckt oben/unten heraus. +Padding für etwas
+    // Luft um den Inhalt, Höhe wird zusätzlich auf die Bar selbst gedeckelt (minus 6px Rand),
+    // damit die Pille umgekehrt nie oben/unten über die Bottom-Nav hinaussteht.
+    const NAV_PILL_PAD_X = 6, NAV_PILL_PAD_Y = 4;
     function _moveNavPill(btn) {
-        if (!navPill) return;
-        const index = Array.from(navButtons).indexOf(btn);
-        if (index > -1) navPill.style.transform = `translateX(${index * 100}%)`;
+        if (!navPill || !btn) return;
+        const bar = navPill.parentElement;
+        const maxH = bar ? bar.clientHeight - 6 : Infinity;
+        const h = Math.min(btn.offsetHeight + NAV_PILL_PAD_Y * 2, maxH);
+        navPill.style.width = (btn.offsetWidth + NAV_PILL_PAD_X * 2) + 'px';
+        navPill.style.height = h + 'px';
+        navPill.style.transform = `translate(${btn.offsetLeft - NAV_PILL_PAD_X}px, ${btn.offsetTop - (h - btn.offsetHeight) / 2}px)`;
     }
     _moveNavPill(document.querySelector('.nav-btn.active') || navButtons[0]);
+    window.addEventListener('resize', () => _moveNavPill(document.querySelector('.nav-btn.active') || navButtons[0]));
     navButtons.forEach(btn => {
         btn.addEventListener('click', (e) => {
             navButtons.forEach(b => b.classList.remove('active'));
