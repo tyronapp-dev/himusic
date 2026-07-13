@@ -2522,6 +2522,61 @@ async function createNewPlaylistProcess() {
         });
     });
 
+    // --- SPOTIFY-CHECK FÜR SONGS OHNE VIBE (roter Punkt) ---
+    // Einmaliger, manuell angestoßener Bulk-Check: NUR Titel/Künstler/Cover werden aufgefrischt
+    // (Spotify kennt die eigenen Vibe-Namen wie "Ghana"/"N-rei" nicht - Vibes bleiben unangetastet,
+    // der rote Punkt verschwindet also nicht automatisch, das ist gewollt). Jeder Song wird nur
+    // EIN Mal von dieser Aktion angefasst (persistiert in _NOVIBE_SPOTIFY_CHECKED_KEY), damit
+    // wiederholtes Antippen des Buttons nicht dieselben ergebnislosen Songs erneut abfragt.
+    const _NOVIBE_SPOTIFY_CHECKED_KEY = 'himusic_novibe_spotify_checked';
+    function _loadNoVibeChecked() {
+        try { return new Set(JSON.parse(localStorage.getItem(_NOVIBE_SPOTIFY_CHECKED_KEY) || '[]')); }
+        catch(e) { return new Set(); }
+    }
+    function _saveNoVibeChecked(set) {
+        try { localStorage.setItem(_NOVIBE_SPOTIFY_CHECKED_KEY, JSON.stringify(Array.from(set))); } catch(e) {}
+    }
+    let _noVibeSpotifyRunning = false;
+    document.getElementById('btn-spotify-check-novibe')?.addEventListener('click', async () => {
+        if (_noVibeSpotifyRunning) return;
+        const allSongs = window.globalSongsData || [];
+        const alreadyChecked = _loadNoVibeChecked();
+        const todo = allSongs.filter(s => _parseVibes(s.vibes).length === 0 && !alreadyChecked.has(s.id));
+        if (todo.length === 0) { _showToast('Keine offenen Songs ohne Vibe (oder schon alle einmal geprüft)'); return; }
+        if (!confirm(`${todo.length} Songs ohne Vibe einmalig per Spotify auf Titel/Künstler/Cover prüfen?`)) return;
+
+        _noVibeSpotifyRunning = true;
+        let updated = 0, noHit = 0, idx = 0;
+        _showToast(`🔄 Prüfe ${todo.length} Songs via Spotify...`, 4000);
+
+        async function worker() {
+            while (idx < todo.length) {
+                const song = todo[idx++];
+                if (window._spotifyCooldownUntil && Date.now() < window._spotifyCooldownUntil) break; // Rate-Limit: Rest bleibt für den nächsten Klick offen
+                try {
+                    const meta = await searchSongMetaSpotify(song.title, song.artist);
+                    if (meta && meta.rateLimited) break;
+                    if (meta && meta.cover) {
+                        const patch = { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover, vibes: _parseVibes(song.vibes) };
+                        await _apiFetch(`${API_URL}/songs/${song.id}`, {
+                            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(patch), signal: _mkTimeout(15000)
+                        });
+                        if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, patch);
+                        updated++;
+                    } else {
+                        noHit++;
+                    }
+                    alreadyChecked.add(song.id);
+                } catch(e) { /* Netzwerkfehler: bleibt ungecheckt, wird beim nächsten Klick erneut versucht */ }
+            }
+        }
+        await Promise.all(Array.from({ length: 3 }, worker));
+        _saveNoVibeChecked(alreadyChecked);
+        _noVibeSpotifyRunning = false;
+        _showToast(`✅ ${updated} aktualisiert, ${noHit} ohne Spotify-Treffer`, 4000);
+    });
+
     // --- DUPLIKAT CLEANER ---
     document.getElementById('btn-find-duplicates')?.addEventListener('click', () => {
         document.getElementById('dup-results-container').innerHTML = '';
