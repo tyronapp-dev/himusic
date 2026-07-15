@@ -2690,7 +2690,7 @@ async function createNewPlaylistProcess() {
         }
 
         sheet.addEventListener('touchstart', (e) => {
-            const scrollable = e.target.closest('.vibes-container, [style*="overflow-y: auto"], [style*="overflow-y:auto"], .song-container, #queue-list, #dup-results-container');
+            const scrollable = e.target.closest('.vibes-container, [style*="overflow-y: auto"], [style*="overflow-y:auto"], .song-container, #queue-list, #dup-results-container, #edit-tags-overlay .sheet-content');
             if (scrollable) { dragging = false; return; }
             startY = lastY = e.touches[0].clientY; startTime = Date.now(); dragging = true;
         }, {passive: true});

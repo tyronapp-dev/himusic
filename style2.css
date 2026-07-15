@@ -521,6 +521,14 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     border: 0.5px solid rgba(255,255,255,0.2);
     box-shadow: var(--glass-bevel), 0 12px 40px rgba(0,0,0,0.5);
 }
+/* Audiotags-Editor ist durch den Kürzen-Bereich gewachsen und kann auf kleineren Displays über
+   die Viewport-Höhe hinausragen. Scoped statt die .sheet-content-Basisklasse global zu ändern -
+   andere Action-Sheets nutzen overflow:hidden bewusst zum sauberen Eckenclipping. */
+#edit-tags-overlay .sheet-content {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    max-height: 78vh;
+}
 .sheet-btn {
     width: 100%; background: transparent; border: none;
     border-bottom: 0.5px solid rgba(255,255,255,0.08);
