@@ -827,7 +827,7 @@ let _bgCacheActive = false;
     window.hbLocal = { clearLocalAudio, getLocalStorageInfo, getAllLocalUrls, downloadToLocal };
 
     let _skipNextHistoryPush = false;
-    window.playSong = function(title, artist, coverUrl, fileUrl) {
+    window.playSong = async function(title, artist, coverUrl, fileUrl) {
         if (!audioPlayer) return;
         const _oldSongData = window.currentSongData;
         if (!_skipNextHistoryPush && _oldSongData && _oldSongData.fileUrl && _oldSongData.fileUrl !== fileUrl) {
@@ -877,22 +877,35 @@ let _bgCacheActive = false;
             })();
         }
 
+        // Lokal gecachten Blob VOR dem Play-Aufruf prüfen (nicht erst danach asynchron
+        // nachswappen): eine bereits heruntergeladene Datei soll von Anfang an über eine
+        // blob:-URL laufen, die komplett ohne Netzwerk/Service-Worker auskommt. Grund: der
+        // Service Worker fängt jeden Audio-Request ab (Range-Request-Handling fürs Seeking) -
+        // bei gesperrtem Bildschirm auf der installierten (standalone) App kann iOS den Service
+        // Worker zwischendurch einschlafen lassen, was mitten in der Wiedergabe zu Aussetzern
+        // führen kann, wenn der Player noch auf die Netzwerk-URL angewiesen ist. Ein bereits
+        // aktiver blob:-Player ist davon unabhängig.
+        const preSwapLocalUrl = await getLocalAudio(fileUrl);
+        if (preSwapLocalUrl) audioPlayer.src = preSwapLocalUrl;
+
         let playPromise = audioPlayer.play();
-        getLocalAudio(fileUrl).then(localUrl => {
-            if (localUrl) {
-                if (!audioPlayer.paused) {
-                    const t = audioPlayer.currentTime;
-                    audioPlayer.src = localUrl;
-                    audioPlayer.load();
-                    audioPlayer.addEventListener('canplay', function swap() { audioPlayer.currentTime = t; audioPlayer.play().catch(() => {}); audioPlayer.removeEventListener('canplay', swap); });
-                } else { audioPlayer.src = localUrl; audioPlayer.load(); }
-            } else if (localStorage.getItem('himusic_offline') === '1') {
-                // Nur im Offline-Modus im Hintergrund cachen. Sonst lud jeder gespielte Song
-                // parallel komplett herunter und konkurrierte mit dem Streaming um Bandbreite →
-                // Ursache fürs Stocken/Einschlafen. Ohne Offline-Modus wird jetzt nur gestreamt.
-                downloadToLocal(fileUrl, title);
-            }
-        });
+        if (!preSwapLocalUrl) {
+            getLocalAudio(fileUrl).then(localUrl => {
+                if (localUrl) {
+                    if (!audioPlayer.paused) {
+                        const t = audioPlayer.currentTime;
+                        audioPlayer.src = localUrl;
+                        audioPlayer.load();
+                        audioPlayer.addEventListener('canplay', function swap() { audioPlayer.currentTime = t; audioPlayer.play().catch(() => {}); audioPlayer.removeEventListener('canplay', swap); });
+                    } else { audioPlayer.src = localUrl; audioPlayer.load(); }
+                } else if (localStorage.getItem('himusic_offline') === '1') {
+                    // Nur im Offline-Modus im Hintergrund cachen. Sonst lud jeder gespielte Song
+                    // parallel komplett herunter und konkurrierte mit dem Streaming um Bandbreite →
+                    // Ursache fürs Stocken/Einschlafen. Ohne Offline-Modus wird jetzt nur gestreamt.
+                    downloadToLocal(fileUrl, title);
+                }
+            });
+        }
 
         if (playPromise === undefined) playPromise = Promise.resolve();
         if (playPromise !== undefined) { playPromise.then(() => { window.updatePlayPauseIcons(true); }).catch(e => console.log("iOS Play blockiert", e)); }
@@ -1790,10 +1803,15 @@ const titleNorm = title.toLowerCase().trim();
                 const uploadData = await uploadRes.json();
                 const newDuration = (endFrame - startFrame) / sr;
 
-                // Absichtlich NICHT apiUpdateSong() - der Worker-Endpoint kennt file_url/duration
-                // noch nicht. Sobald die Worker-Erweiterung (siehe Chat) deployed ist, hier den
-                // echten PUT-Aufruf mit { file_url: uploadData.url, duration: newDuration } ergänzen.
-                throw new Error('Zugeschnittene Datei hochgeladen, aber Speichern noch nicht möglich - Worker muss zuerst erweitert werden (siehe Chat).');
+                if (trimStatus) trimStatus.innerText = 'Speichere...';
+                await apiUpdateSong(song.id, {
+                    title: song.title, artist: song.artist, cover_data: song.cover_data,
+                    vibes: _parseVibes(song.vibes), file_url: uploadData.url, duration: newDuration
+                });
+                song.file_url = uploadData.url; song.duration = newDuration;
+                if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, { file_url: uploadData.url, duration: newDuration });
+                if (trimStatus) trimStatus.innerText = '✅ Gekürzt und gespeichert';
+                _showToast('✅ Song gekürzt');
             } catch (error) {
                 if (trimStatus) trimStatus.innerText = '⚠️ ' + error.message;
             }
