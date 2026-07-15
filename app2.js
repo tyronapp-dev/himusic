@@ -189,6 +189,25 @@ function _cleanSearchTerm(title, artist) {
     return (t + ' ' + a).trim();
 }
 
+// Ähnlichkeitsmaß (Dice-Koeffizient auf Zeichen-Bigrammen) zwischen Suchbegriff und einem
+// gefundenen Treffer. Spotify liefert bei einer Suche fast immer IRGENDEIN Ergebnis zurück,
+// auch bei komplett unpassenden Anfragen (kryptische YouTube-Titel) - ohne diese Prüfung wurden
+// Songs reihenweise mit falschen Titeln/Künstlern überschrieben. Kein Build-Schritt/externe Lib
+// nötig, daher eine schlanke Eigenimplementierung statt z.B. eines npm-Fuzzy-Match-Pakets.
+function _stringSimilarity(a, b) {
+    const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const na = norm(a), nb = norm(b);
+    if (!na || !nb) return 0;
+    const bigrams = s => { const g = new Map(); for (let i = 0; i < s.length - 1; i++) { const bg = s.slice(i, i + 2); g.set(bg, (g.get(bg) || 0) + 1); } return g; };
+    const ga = bigrams(na), gb = bigrams(nb);
+    let overlap = 0, totalA = 0, totalB = 0;
+    ga.forEach((n, bg) => { totalA += n; if (gb.has(bg)) overlap += Math.min(n, gb.get(bg)); });
+    gb.forEach(n => { totalB += n; });
+    return (2 * overlap) / ((totalA + totalB) || 1);
+}
+// Unterhalb dieser Ähnlichkeit gilt ein Treffer als "vermutlich falscher Song", nicht als Match.
+const _META_MATCH_THRESHOLD = 0.35;
+
 // Spotify-Suche über den Worker. Liefert das volle Metadaten-Objekt {title, artist, cover}
 // oder null. data.error === "rate_limited" → Spotify drosselt gerade unsere App-Kennung;
 // der Aufrufer kann das anzeigen bzw. auf iTunes ausweichen.
@@ -201,6 +220,11 @@ async function searchSongMetaSpotify(title, artist, retryCount = 0) {
         const data = await response.json();
         if (data.error === 'rate_limited') { window._spotifyCooldownUntil = Date.now() + 15 * 60 * 1000; return { rateLimited: true }; }
         if (!data.result) return null;
+        // Treffer gegen den ORIGINAL-Titel prüfen (nicht gegen q, das schon bereinigt/gekürzt ist) -
+        // verwirft Fälle, in denen Spotify irgendein unpassendes Ergebnis für einen kryptischen
+        // YouTube-Titel zurückgibt, statt es blind zu übernehmen.
+        const resultLabel = `${data.result.title || ''} ${data.result.artist || ''}`;
+        if (_stringSimilarity(title, resultLabel) < _META_MATCH_THRESHOLD) return null;
         return { title: data.result.title, artist: data.result.artist, album: data.result.album || "", cover: data.result.cover_data || null };
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
@@ -221,6 +245,8 @@ async function searchSongMetaItunes(title, artist, retryCount = 0) {
         const data = await response.json();
         const t = data.results && data.results[0];
         if (!t) return null;
+        const resultLabel = `${t.trackName || ''} ${t.artistName || ''}`;
+        if (_stringSimilarity(title, resultLabel) < _META_MATCH_THRESHOLD) return null;
         return { title: t.trackName, artist: t.artistName, album: t.collectionName || "", cover: (t.artworkUrl100 || '').replace('100x100bb', '600x600bb') || null };
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
@@ -2536,6 +2562,11 @@ async function createNewPlaylistProcess() {
     function _saveNoVibeChecked(set) {
         try { localStorage.setItem(_NOVIBE_SPOTIFY_CHECKED_KEY, JSON.stringify(Array.from(set))); } catch(e) {}
     }
+    document.getElementById('btn-spotify-check-novibe-reset')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        localStorage.removeItem(_NOVIBE_SPOTIFY_CHECKED_KEY);
+        _showToast('↺ Zurückgesetzt – nächster Check prüft alle Songs ohne Vibe erneut');
+    });
     let _noVibeSpotifyRunning = false;
     document.getElementById('btn-spotify-check-novibe')?.addEventListener('click', async () => {
         if (_noVibeSpotifyRunning) return;
