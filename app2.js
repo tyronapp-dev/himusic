@@ -20,6 +20,33 @@ function _apiFetch(url, options = {}) {
         });
 }
 
+// Kodiert einen AudioBuffer (aus Web Audio API decodeAudioData/createBuffer) als 16-bit PCM WAV.
+// Standardformat, keine externe Lib nötig (MP3/M4A bräuchten einen Encoder wie lamejs - für den
+// Song-Kürzen-Zweck reicht WAV; unkomprimiert, aber korrekt und ohne Zusatz-Abhängigkeit).
+function _audioBufferToWav(buffer) {
+    const numChannels = buffer.numberOfChannels, sampleRate = buffer.sampleRate, bitDepth = 16;
+    const bytesPerSample = bitDepth / 8, blockAlign = numChannels * bytesPerSample;
+    const numFrames = buffer.length, dataSize = numFrames * blockAlign;
+    const arrBuf = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(arrBuf);
+    const writeString = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+    writeString(0, 'RIFF'); view.setUint32(4, 36 + dataSize, true); writeString(8, 'WAVE');
+    writeString(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true); view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true); view.setUint16(32, blockAlign, true); view.setUint16(34, bitDepth, true);
+    writeString(36, 'data'); view.setUint32(40, dataSize, true);
+    const channels = []; for (let c = 0; c < numChannels; c++) channels.push(buffer.getChannelData(c));
+    let offset = 44;
+    for (let i = 0; i < numFrames; i++) {
+        for (let c = 0; c < numChannels; c++) {
+            const sample = Math.max(-1, Math.min(1, channels[c][i]));
+            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+            offset += 2;
+        }
+    }
+    return new Blob([arrBuf], { type: 'audio/wav' });
+}
+
 function _parseVibes(v) {
     if (!v) return [];
     if (Array.isArray(v)) return v;
@@ -1557,6 +1584,10 @@ const titleNorm = title.toLowerCase().trim();
             // Änderungen des gerade bearbeiteten Songs abbekommen hätte.
             window.currentEditSongId = song.id;
             editTitle.value = song.title || ''; editArtist.value = song.artist || '';
+            const trimStartInput = document.getElementById('trim-start-input'); const trimEndInput = document.getElementById('trim-end-input'); const trimStatus = document.getElementById('trim-status');
+            if (trimStartInput) trimStartInput.value = 0;
+            if (trimEndInput) trimEndInput.value = song.duration ? Math.floor(song.duration) : '';
+            if (trimStatus) trimStatus.innerText = '';
             currentEditCoverData = song.cover_data || song.coverUrl || '';
             editCoverPreview.src = currentEditCoverData.length > 10 ? currentEditCoverData : 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
@@ -1706,6 +1737,67 @@ const titleNorm = title.toLowerCase().trim();
                 fetchSongsFromDatabase(true); _showToast('✅ Gespeichert');
             } catch (error) { _savePendingEdit(window.currentEditSongId, changes); _showToast('⚠️ Fehler – lokal gesichert'); }
             btnSaveTags.innerText = "Speichern";
+        });
+    }
+
+    // --- SONG KÜRZEN ---
+    // Client-seitig per Web Audio API (kein Server-Umbau für den Schneide-Teil nötig): Datei laden,
+    // dekodieren, Sample-genau auf den gewählten Bereich zuschneiden, als WAV neu kodieren (kein
+    // externer Encoder nötig - MP3/M4A-Encoding bräuchte eine zusätzliche Library), unter neuem
+    // Dateinamen hochladen. WICHTIG: apiUpdateSong()/PUT /songs/:id unterstützt aktuell NUR
+    // title/artist/cover_data/album/vibes - file_url/duration können ohne Worker-Erweiterung nicht
+    // gespeichert werden. Bis die Erweiterung deployed ist, bricht dieser Button mit einer klaren
+    // Fehlermeldung ab, statt eine neue Datei hochzuladen, die dann nirgends verlinkt wird (verwaistes
+    // R2-Objekt).
+    const btnTrimSong = document.getElementById('btn-trim-song');
+    if (btnTrimSong) {
+        btnTrimSong.addEventListener('click', async () => {
+            const trimStatus = document.getElementById('trim-status');
+            const song = window._songIndex?.get(window.currentEditSongId) || window._songIndex?.get(parseInt(window.currentEditSongId));
+            if (!song || !song.file_url) { if (trimStatus) trimStatus.innerText = 'Song nicht gefunden.'; return; }
+            const startSec = parseFloat(document.getElementById('trim-start-input').value);
+            const endSec = parseFloat(document.getElementById('trim-end-input').value);
+            if (isNaN(startSec) || isNaN(endSec) || endSec <= startSec) { if (trimStatus) trimStatus.innerText = 'Ungültiger Start/Ende-Bereich.'; return; }
+
+            btnTrimSong.disabled = true;
+            try {
+                if (trimStatus) trimStatus.innerText = 'Lade Audiodatei...';
+                const resp = await fetch(song.file_url);
+                if (!resp.ok) throw new Error('Download fehlgeschlagen');
+                const arrBuf = await resp.arrayBuffer();
+
+                if (trimStatus) trimStatus.innerText = 'Dekodiere...';
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const audioBuffer = await audioCtx.decodeAudioData(arrBuf);
+                const sr = audioBuffer.sampleRate;
+                const startFrame = Math.max(0, Math.floor(startSec * sr));
+                const endFrame = Math.min(audioBuffer.length, Math.floor(endSec * sr));
+                if (endFrame <= startFrame) throw new Error('Bereich liegt außerhalb der Songlänge.');
+
+                const trimmedBuffer = audioCtx.createBuffer(audioBuffer.numberOfChannels, endFrame - startFrame, sr);
+                for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+                    trimmedBuffer.copyToChannel(audioBuffer.getChannelData(c).subarray(startFrame, endFrame), c);
+                }
+                audioCtx.close();
+
+                if (trimStatus) trimStatus.innerText = 'Kodiere...';
+                const wavBlob = _audioBufferToWav(trimmedBuffer);
+                const newFilename = `trimmed_${Date.now()}_${song.id}.wav`;
+
+                if (trimStatus) trimStatus.innerText = 'Lade hoch...';
+                const uploadRes = await _apiFetch(`${API_URL}/upload/${newFilename}`, { method: 'PUT', headers: { 'Content-Type': 'audio/wav' }, body: wavBlob });
+                if (!uploadRes.ok) throw new Error('Upload fehlgeschlagen');
+                const uploadData = await uploadRes.json();
+                const newDuration = (endFrame - startFrame) / sr;
+
+                // Absichtlich NICHT apiUpdateSong() - der Worker-Endpoint kennt file_url/duration
+                // noch nicht. Sobald die Worker-Erweiterung (siehe Chat) deployed ist, hier den
+                // echten PUT-Aufruf mit { file_url: uploadData.url, duration: newDuration } ergänzen.
+                throw new Error('Zugeschnittene Datei hochgeladen, aber Speichern noch nicht möglich - Worker muss zuerst erweitert werden (siehe Chat).');
+            } catch (error) {
+                if (trimStatus) trimStatus.innerText = '⚠️ ' + error.message;
+            }
+            btnTrimSong.disabled = false;
         });
     }
 
