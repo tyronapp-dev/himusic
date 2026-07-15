@@ -537,6 +537,46 @@ function initApp() {
         });
     };
 
+    // --- FREEZE-LOG (Diagnose fürs "Player schläft ein"-Problem) ---
+    // Ein laufender Timer kann eine echte iOS-Suspendierung/Prozess-Freeze nicht in Echtzeit
+    // erkennen (er würde ja selbst mit einschlafen). Stattdessen: alle 5s einen Herzschlag mit
+    // Zeitstempel+Song in localStorage schreiben (überlebt auch einen kompletten Prozess-Kill,
+    // da localStorage persistiert). Beim nächsten Sichtbarwerden bzw. App-Start den Abstand zum
+    // letzten Herzschlag prüfen - eine deutlich größere Lücke als das 5s-Intervall heißt: die
+    // Seite/der Player war für diese Zeit eingefroren. So bekommen wir konkrete Daten (wann,
+    // welcher Song, wie lange) statt zu raten.
+    const FREEZE_LOG_KEY = 'himusic_freeze_log';
+    const HEARTBEAT_KEY = 'himusic_last_heartbeat';
+    const FREEZE_GAP_THRESHOLD_SEC = 15; // deutlich über 5s Heartbeat-Intervall, gegen Fehlalarme
+    function _writeHeartbeat() {
+        if (!memAudio || memAudio.paused) return;
+        try {
+            localStorage.setItem(HEARTBEAT_KEY, JSON.stringify({
+                t: Date.now(),
+                title: window.currentSongData?.title || '',
+                artist: window.currentSongData?.artist || '',
+                isBlob: (memAudio.src || '').startsWith('blob:')
+            }));
+        } catch(e) {}
+    }
+    function _logFreezeEvent(gapSeconds, hb) {
+        try {
+            const log = JSON.parse(localStorage.getItem(FREEZE_LOG_KEY) || '[]');
+            log.unshift({ when: Date.now(), gapSeconds: Math.round(gapSeconds), title: hb?.title || 'Unbekannt', artist: hb?.artist || '', wasBlob: !!hb?.isBlob });
+            localStorage.setItem(FREEZE_LOG_KEY, JSON.stringify(log.slice(0, 30)));
+        } catch(e) {}
+        if (typeof window.renderFreezeLog === 'function') window.renderFreezeLog();
+    }
+    function _checkForFreezeSinceLastHeartbeat() {
+        try {
+            const hb = JSON.parse(localStorage.getItem(HEARTBEAT_KEY) || 'null');
+            if (!hb) return;
+            const gapSec = (Date.now() - hb.t) / 1000;
+            if (gapSec > FREEZE_GAP_THRESHOLD_SEC) _logFreezeEvent(gapSec, hb);
+        } catch(e) {}
+    }
+    _checkForFreezeSinceLastHeartbeat(); // deckt den Fall "App wurde komplett gekillt und neu gestartet" ab
+
     const memAudio = document.getElementById('main-audio-player');
     if (memAudio) memAudio.addEventListener('pause', savePlayerState);
     window.addEventListener('beforeunload', savePlayerState);
@@ -544,6 +584,7 @@ function initApp() {
         if (document.visibilityState === 'hidden') {
             savePlayerState();
         } else {
+            _checkForFreezeSinceLastHeartbeat();
             // iOS braucht mehrere Versuche nach dem Entsperren
             const tryResume = (attempts) => {
                 if (!audioPlayer || !window._shouldBePlaying || !audioPlayer.src) return;
@@ -555,7 +596,7 @@ function initApp() {
             setTimeout(() => tryResume(4), 300);
         }
     });
-    setInterval(() => { if (memAudio && !memAudio.paused && memAudio.currentTime > 0) _doSavePlayerState(); }, 5000);
+    setInterval(() => { if (memAudio && !memAudio.paused && memAudio.currentTime > 0) { _doSavePlayerState(); _writeHeartbeat(); } }, 5000);
 
     const navButtons = document.querySelectorAll('.nav-btn');
     const views = document.querySelectorAll('.view');
@@ -585,6 +626,7 @@ function initApp() {
             const targetId = e.currentTarget.getAttribute('data-target');
             window.currentOpenPlaylistId = null; 
             if (targetId === 'view-settings' && typeof window.updateAppStats === 'function') window.updateAppStats();
+            if (targetId === 'view-settings' && typeof window.renderFreezeLog === 'function') window.renderFreezeLog();
             views.forEach(view => {
                 if (view.id === targetId) {
                     view.classList.remove('hidden');
@@ -2602,6 +2644,29 @@ async function createNewPlaylistProcess() {
         const statsEl = document.getElementById('app-stats-text');
         if (statsEl) { const songCount = (typeof window.globalSongsData !== 'undefined') ? window.globalSongsData.length : 0; const plCount = window.globalPlaylistsData ? window.globalPlaylistsData.length : 0; statsEl.innerText = `${songCount} Songs • ${plCount} Playlists in der Cloud`; }
     };
+
+    window.renderFreezeLog = function() {
+        const listEl = document.getElementById('freeze-log-list');
+        if (!listEl) return;
+        let log = [];
+        try { log = JSON.parse(localStorage.getItem('himusic_freeze_log') || '[]'); } catch(e) {}
+        if (log.length === 0) { listEl.innerHTML = '<p style="font-size: 13px; color: var(--text-secondary); padding: 4px 0;">Noch keine Freezes erfasst.</p>'; return; }
+        listEl.innerHTML = log.map(entry => {
+            const d = new Date(entry.when);
+            const dateStr = `${d.toLocaleDateString('de-DE')} ${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
+            const gapStr = entry.gapSeconds >= 60 ? `${Math.floor(entry.gapSeconds / 60)} Min ${entry.gapSeconds % 60}s` : `${entry.gapSeconds}s`;
+            return `<div style="padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 13px;">
+                <div style="color: #fff; font-weight: 600;">${_esc(entry.title || 'Unbekannt')} ${entry.artist ? '– ' + _esc(entry.artist) : ''}</div>
+                <div style="color: var(--text-secondary); margin-top: 2px;">${dateStr} · eingefroren für ~${gapStr} · ${entry.wasBlob ? 'lokal (blob)' : 'Netzwerk'}</div>
+            </div>`;
+        }).join('');
+    };
+
+    document.getElementById('btn-clear-freeze-log')?.addEventListener('click', () => {
+        localStorage.removeItem('himusic_freeze_log');
+        window.renderFreezeLog();
+        _showToast('Freeze-Log geleert');
+    });
 
     document.getElementById('btn-backup-download')?.addEventListener('click', () => {
         const backupData = { state: JSON.parse(localStorage.getItem('heatbox_state') || '{}'), mixes: JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'), stations: JSON.parse(localStorage.getItem('heatbox_stations') || '[]'), theme: localStorage.getItem('heatbox_theme_color') || '#fa233b', timestamp: new Date().toISOString() };

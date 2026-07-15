@@ -1,7 +1,7 @@
 // Himusic Cloud - Service Worker v1.0
 // Komplett optimiert für das neue Cloudflare / Firebase Setup
 
-const CACHE_NAME  = 'himusic-app-shell-v1.7';
+const CACHE_NAME  = 'himusic-app-shell-v1.8';
 const COVER_CACHE = 'himusic-covers-v1';
 const AUDIO_CACHE = 'himusic-audio-v1';
 
