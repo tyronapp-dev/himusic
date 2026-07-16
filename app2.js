@@ -234,6 +234,9 @@ function _stringSimilarity(a, b) {
 }
 // Unterhalb dieser Ähnlichkeit gilt ein Treffer als "vermutlich falscher Song", nicht als Match.
 const _META_MATCH_THRESHOLD = 0.35;
+// Spotify darf lockerer matchen als iTunes (z.B. leicht verschriebene/rohe YouTube-Titel sollen
+// trotzdem noch treffen) - niedrigerer Schwellwert nur für die Spotify-Prüfung.
+const _META_MATCH_THRESHOLD_SPOTIFY = 0.22;
 
 // Spotify-Suche über den Worker. Liefert das volle Metadaten-Objekt {title, artist, cover}
 // oder null. data.error === "rate_limited" → Spotify drosselt gerade unsere App-Kennung;
@@ -251,7 +254,7 @@ async function searchSongMetaSpotify(title, artist, retryCount = 0) {
         // verwirft Fälle, in denen Spotify irgendein unpassendes Ergebnis für einen kryptischen
         // YouTube-Titel zurückgibt, statt es blind zu übernehmen.
         const resultLabel = `${data.result.title || ''} ${data.result.artist || ''}`;
-        if (_stringSimilarity(title, resultLabel) < _META_MATCH_THRESHOLD) return null;
+        if (_stringSimilarity(title, resultLabel) < _META_MATCH_THRESHOLD_SPOTIFY) return null;
         return { title: data.result.title, artist: data.result.artist, album: data.result.album || "", cover: data.result.cover_data || null };
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
