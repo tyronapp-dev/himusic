@@ -1771,33 +1771,49 @@ const titleNorm = title.toLowerCase().trim();
 
                 const songId = window.currentEditSongId;
                 const hasVibesNow = selectedVibes.length > 0;
-                document.querySelectorAll(`.song-item[data-id="${songId}"] .song-cover`).forEach(c => {
-                    let dot = c.querySelector('.no-vibes-dot');
-                    if (hasVibesNow && dot) dot.remove();
-                    else if (!hasVibesNow && !dot) { dot = document.createElement('span'); dot.className = 'no-vibes-dot'; c.appendChild(dot); }
-                });
-                const songElement = document.querySelector(`.song-item[data-id="${songId}"]`);
-                if (songElement) {
-                    const coverImg = songElement.querySelector('.song-cover img');
-                    if (coverImg && changes.cover_data) coverImg.src = changes.cover_data;
-                    const titleEl = songElement.querySelector('.song-title');
-                    const artistEl = songElement.querySelector('.song-artist');
-                    if (titleEl) titleEl.textContent = changes.title;
-                    if (artistEl) artistEl.textContent = changes.artist;
+                // applySongPatch kennt die echte Songzeilen-Struktur (.song-cover ist ein
+                // Hintergrundbild-Div, kein <img>) - die alte, hier auskommentiert entfernte
+                // Handschrift-Logik nutzte teils falsche Selektoren (u.a. "#fullscreen-player
+                // .cover img" / ".song-title", die es so im DOM nie gab) und aktualisierte
+                // den großen Player nur, wenn die Songzeile zufällig gerade gerendert war -
+                // Änderungen am laufenden Song blieben dadurch bis zum nächsten Songwechsel
+                // oder App-Neustart unsichtbar.
+                if (typeof window.applySongPatch === 'function') window.applySongPatch(songId, changes);
 
-                    if (window.currentPlayingSongId == songId) {
-                        const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
-                        if (bpNoVibesDot) bpNoVibesDot.style.display = hasVibesNow ? 'none' : 'block';
-                        if (window.currentSongData) window.currentSongData.vibes = selectedVibes;
-                        const playerCover = document.querySelector('#fullscreen-player .cover img');
-                        if (playerCover && changes.cover_data) playerCover.src = changes.cover_data;
-                        const playerTitle = document.querySelector('#fullscreen-player .song-title');
-                        const playerArtist = document.querySelector('#fullscreen-player .song-artist');
-                        if (playerTitle) playerTitle.textContent = changes.title;
-                        if (playerArtist) playerArtist.textContent = changes.artist;
-                        if ('mediaSession' in navigator && navigator.mediaSession.metadata) {
-                            navigator.mediaSession.metadata = new MediaMetadata({ title: changes.title, artist: changes.artist, album: 'HeaTBox Cloud', artwork: changes.cover_data ? [ { src: changes.cover_data, sizes: '512x512', type: 'image/jpeg' } ] : [] });
-                        }
+                if (window.currentPlayingSongId == songId) {
+                    if (window.currentSongData) {
+                        window.currentSongData.title = changes.title; window.currentSongData.artist = changes.artist; window.currentSongData.vibes = selectedVibes;
+                        if (changes.cover_data) window.currentSongData.coverUrl = changes.cover_data;
+                    }
+                    const bgStyle = changes.cover_data && changes.cover_data.length > 10 ? `url('${changes.cover_data}')` : null;
+
+                    const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
+                    if (bpNoVibesDot) bpNoVibesDot.style.display = hasVibesNow ? 'none' : 'block';
+                    const bpHv = document.getElementById('bp-header-vibes');
+                    if (bpHv) bpHv.innerText = selectedVibes.join(' • ') || 'Aktueller Titel';
+                    const bpTitle = document.getElementById('bp-song-name');
+                    const bpArtist = document.getElementById('bp-artist-name');
+                    if (bpTitle) bpTitle.innerText = changes.title;
+                    if (bpArtist) bpArtist.innerText = changes.artist;
+                    const largeCover = document.querySelector('.large-cover');
+                    if (largeCover && bgStyle) { largeCover.style.backgroundImage = bgStyle; largeCover.style.backgroundSize = 'cover'; }
+
+                    const miniTitle = document.querySelector('.mini-title');
+                    const miniArtist = document.querySelector('.mini-artist');
+                    const miniCover = document.querySelector('.mini-cover');
+                    if (miniTitle) miniTitle.innerText = changes.title;
+                    if (miniArtist) miniArtist.innerText = changes.artist || '—';
+                    if (miniCover && bgStyle) { miniCover.style.backgroundImage = bgStyle; miniCover.style.backgroundSize = 'cover'; }
+
+                    const homeNpTitle = document.getElementById('home-np-title');
+                    const homeNpArtist = document.getElementById('home-np-artist');
+                    const homeNpCover = document.getElementById('home-np-cover');
+                    if (homeNpTitle) homeNpTitle.innerText = changes.title;
+                    if (homeNpArtist) homeNpArtist.innerText = changes.artist;
+                    if (homeNpCover && bgStyle) homeNpCover.style.backgroundImage = bgStyle;
+
+                    if ('mediaSession' in navigator && navigator.mediaSession.metadata) {
+                        navigator.mediaSession.metadata = new MediaMetadata({ title: changes.title, artist: changes.artist, album: 'HeaTBox Cloud', artwork: changes.cover_data ? [ { src: changes.cover_data, sizes: '512x512', type: 'image/jpeg' } ] : [] });
                     }
                 }
                 if (typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
@@ -1873,14 +1889,32 @@ const titleNorm = title.toLowerCase().trim();
                 if (window.currentPlayingSongId == song.id && audioPlayer) {
                     const wasPlaying = !audioPlayer.paused;
                     const priorTime = audioPlayer.currentTime;
-                    audioPlayer.src = uploadData.url;
-                    audioPlayer.load();
+                    const targetSongId = song.id;
                     if (window.currentSongData) { window.currentSongData.fileUrl = uploadData.url; window.currentSongData.duration = newDuration; }
-                    audioPlayer.addEventListener('loadedmetadata', function _afterTrimReload() {
-                        audioPlayer.removeEventListener('loadedmetadata', _afterTrimReload);
-                        audioPlayer.currentTime = Math.min(priorTime, Math.max(0, newDuration - 0.5));
-                        if (wasPlaying) audioPlayer.play().catch(() => {});
-                    });
+
+                    // Eine gerade erst hochgeladene R2-Datei ist an der Edge, die den nächsten
+                    // Request bedient, nicht immer sofort lesbar (kurzes Propagations-Fenster).
+                    // Blind audioPlayer.src zuweisen kann dadurch den globalen 'error'-Handler
+                    // auslösen ("Song nicht erreichbar"), obwohl die Datei kurz danach längst da
+                    // ist. Deshalb erst per stillem HEAD-Request prüfen und mit kurzen Pausen
+                    // wiederholen, bevor das <audio>-Element überhaupt angefasst wird. Klappt es
+                    // nach ein paar Versuchen nicht, läuft einfach die alte Version bis zum
+                    // nächsten Songwechsel weiter - gespeichert ist die neue Datei so oder so.
+                    (async () => {
+                        let ready = false;
+                        for (let attempt = 0; attempt < 5 && !ready; attempt++) {
+                            if (attempt > 0) await new Promise(r => setTimeout(r, 500));
+                            try { const check = await fetch(uploadData.url, { method: 'HEAD' }); ready = check.ok; } catch (e) {}
+                        }
+                        if (!ready || window.currentPlayingSongId != targetSongId) return;
+                        audioPlayer.src = uploadData.url;
+                        audioPlayer.load();
+                        audioPlayer.addEventListener('loadedmetadata', function _afterTrimReload() {
+                            audioPlayer.removeEventListener('loadedmetadata', _afterTrimReload);
+                            audioPlayer.currentTime = Math.min(priorTime, Math.max(0, newDuration - 0.5));
+                            if (wasPlaying) audioPlayer.play().catch(() => {});
+                        });
+                    })();
                 }
 
                 if (trimStatus) trimStatus.innerText = '✅ Gekürzt und gespeichert';
