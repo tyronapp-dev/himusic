@@ -150,6 +150,14 @@ async function processOne(item) {
     }
 }
 
+// Auto-Beenden nach einer Weile Leerlauf: gedacht fuers "kurz vor dem Download anschalten, dann
+// nicht mehr dran denken muessen"-Nutzungsmuster auf einem PC (nicht fuers dauerhafte Laufen auf
+// einem Server, siehe unten). Der Leerlauf-Timer startet beim Programmstart neu (nicht sofort bei
+// leerer Warteschlange), damit Zeit bleibt, nach dem Start noch Links in der App einzufuegen.
+const AUTO_EXIT_WHEN_IDLE = IS_WINDOWS && process.env.HIMUSIC_NO_AUTO_EXIT !== '1';
+const IDLE_EXIT_MS = 90000; // 90s ohne irgendetwas zu tun -> vermutlich fertig, sich selbst beenden
+let lastActivityAt = Date.now();
+
 let active = 0;
 async function poll() {
     try {
@@ -162,15 +170,22 @@ async function poll() {
         for (const item of claimable) {
             if (active >= CONCURRENT) break;
             active++;
-            processOne(item).finally(() => { active--; });
+            lastActivityAt = Date.now();
+            processOne(item).finally(() => { active--; lastActivityAt = Date.now(); });
         }
     } catch (err) {
         console.error('Konnte Warteschlange nicht abrufen:', err.message);
+    }
+
+    if (AUTO_EXIT_WHEN_IDLE && active === 0 && (Date.now() - lastActivityAt) > IDLE_EXIT_MS) {
+        console.log('Seit einer Weile nichts mehr zu tun - beende mich automatisch. Einfach start.bat erneut doppelklicken, wenn wieder was ansteht.');
+        process.exit(0);
     }
 }
 
 function startWatching() {
     console.log(`Himusic YouTube-Watcher gestartet (prüft alle ${POLL_INTERVAL_MS / 1000}s, bis zu ${CONCURRENT} parallel). Zum Beenden: Strg+C.`);
+    if (AUTO_EXIT_WHEN_IDLE) console.log(`Beendet sich automatisch, wenn ${IDLE_EXIT_MS / 1000}s lang nichts zu tun war.`);
     setInterval(poll, POLL_INTERVAL_MS);
     poll();
 }
