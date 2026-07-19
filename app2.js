@@ -3666,8 +3666,13 @@ function _cacheFreshYtSongs(fresh) {
 // direkt per /internal/register in die DB, ohne den youtube_queue-Status zu berühren, es gibt
 // also keinen anderen Weg zu erkennen, wann er fertig ist.
 async function _pollForFreshYtSongs(knownIds) {
-    for (let attempt = 0; attempt < 15; attempt++) {
-        await new Promise(r => setTimeout(r, 8000));
+    // Der GitHub-Actions-Fallback probiert bis zu 8 Versuche nacheinander durch (jeder auf einem
+    // frischen Runner/IP), gemessen ~60-70s pro Versuch - im schlechtesten Fall also fast 9
+    // Minuten, bis der letzte Versuch durch ist. Frueher stand hier 15x8s (2 Minuten) - das gab
+    // regelmaessig faelschlich "Nicht angekommen" aus, waehrend der Import im Hintergrund noch
+    // laenger korrekt weiterlief (live an echten GitHub-Actions-Runs verifiziert, 2026-07-19).
+    for (let attempt = 0; attempt < 40; attempt++) {
+        await new Promise(r => setTimeout(r, 15000));
         try {
             const res = await _apiFetch(`${API_URL}/songs`);
             if (!res.ok) continue;
