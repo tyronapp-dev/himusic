@@ -1415,16 +1415,25 @@ let _bgCacheActive = false;
                 if (checkbox.classList.toggle('checked')) selectedSongs.add(String(song.id)); else selectedSongs.delete(String(song.id));
                 const selCount = document.getElementById('sel-count'); const count = _countAvailableSelectedSongs(); if(selCount) selCount.innerText = `${count} ausgewählt`;
             } else if (currentMode === 'normal') {
-                window.currentPlayingPlaylistId = window.currentOpenPlaylistId || null; 
+                window.currentPlayingPlaylistId = window.currentOpenPlaylistId || null;
                 window.playSong(song.title, song.artist, song.cover_data, song.file_url);
                 if (window.currentOpenPlaylistId && window.currentPlaylistSongs) {
                     const songIndex = window.currentPlaylistSongs.findIndex(s => s.id === song.id);
                     if (songIndex > -1) { playbackQueue = window.currentPlaylistSongs.slice(songIndex + 1); }
-                } else if (window.globalSongsData && window.globalSongsData.length > 0) {
-                    const otherSongs = window.globalSongsData.filter(s => s.id !== song.id);
-                    playbackQueue = otherSongs.sort(() => 0.5 - Math.random());
+                } else {
+                    // Reihenfolge wie auf der Songs-Seite sichtbar (inkl. aktivem Vibe-Filter),
+                    // NICHT global gemischt - Zufallsreihenfolge gibt's nur, wenn Shuffle aktiv ist
+                    // (gleiche Variable, die auch der Shuffle-Button selbst umschaltet).
+                    const sourceList = _currentFilteredSongs || lazyAllSongs;
+                    if (sourceList && sourceList.length > 0) {
+                        const songIndex = sourceList.findIndex(s => s.id === song.id);
+                        playbackQueue = songIndex > -1 ? sourceList.slice(songIndex + 1) : sourceList.filter(s => s.id !== song.id);
+                    } else if (window.globalSongsData && window.globalSongsData.length > 0) {
+                        playbackQueue = window.globalSongsData.filter(s => s.id !== song.id);
+                    }
+                    if (isShuffle) playbackQueue = playbackQueue.sort(() => 0.5 - Math.random());
                 }
-                savePlayerState(); 
+                savePlayerState();
             }
         });
     }
@@ -1855,6 +1864,25 @@ const titleNorm = title.toLowerCase().trim();
                 });
                 song.file_url = uploadData.url; song.duration = newDuration;
                 if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, { file_url: uploadData.url, duration: newDuration });
+
+                // Läuft der gerade gekürzte Song aktuell im Player, hört man sonst bis zum
+                // nächsten Songwechsel weiter die alte (untrimmte) Version - das <audio>-Element
+                // bekommt die neue file_url sonst nirgends zugewiesen, nur das Song-Objekt im
+                // Speicher wird gepatcht. Direkt auf die neue Datei umschalten, Wiedergabeposition
+                // an die neue (kürzere) Länge anpassen und laufende Wiedergabe fortsetzen.
+                if (window.currentPlayingSongId == song.id && audioPlayer) {
+                    const wasPlaying = !audioPlayer.paused;
+                    const priorTime = audioPlayer.currentTime;
+                    audioPlayer.src = uploadData.url;
+                    audioPlayer.load();
+                    if (window.currentSongData) { window.currentSongData.fileUrl = uploadData.url; window.currentSongData.duration = newDuration; }
+                    audioPlayer.addEventListener('loadedmetadata', function _afterTrimReload() {
+                        audioPlayer.removeEventListener('loadedmetadata', _afterTrimReload);
+                        audioPlayer.currentTime = Math.min(priorTime, Math.max(0, newDuration - 0.5));
+                        if (wasPlaying) audioPlayer.play().catch(() => {});
+                    });
+                }
+
                 if (trimStatus) trimStatus.innerText = '✅ Gekürzt und gespeichert';
                 _showToast('✅ Song gekürzt');
             } catch (error) {
