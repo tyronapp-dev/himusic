@@ -2,7 +2,7 @@
   "name": "Himusic Cloud",
   "short_name": "Himusic",
   "start_url": "./index.html",
-  "display": "standalone",
+  "display": "browser",
   "background_color": "#0a0a12",
   "theme_color": "#000000",
   "orientation": "portrait",
