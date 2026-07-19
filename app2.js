@@ -630,6 +630,7 @@ function initApp() {
             window.currentOpenPlaylistId = null; 
             if (targetId === 'view-settings' && typeof window.updateAppStats === 'function') window.updateAppStats();
             if (targetId === 'view-settings' && typeof window.renderFreezeLog === 'function') window.renderFreezeLog();
+            if (targetId === 'view-settings' && typeof renderYtQueueList === 'function') renderYtQueueList();
             views.forEach(view => {
                 if (view.id === targetId) {
                     view.classList.remove('hidden');
@@ -1748,6 +1749,7 @@ const titleNorm = title.toLowerCase().trim();
         toast.innerText = msg; toast.style.opacity = '1';
         clearTimeout(toast._t); toast._t = setTimeout(() => { toast.style.opacity = '0'; }, duration);
     }
+    window._showToast = _showToast; // wird auch von Code außerhalb dieses initApp-Scopes gebraucht (YouTube-Warteschlange)
 
     if (btnSaveTags) {
         btnSaveTags.addEventListener('click', async () => {
@@ -3625,37 +3627,44 @@ function _isYoutubeImportedUrl(fileUrl) {
     return !!fileUrl && (fileUrl.includes('_local_yt') || fileUrl.includes('/yt/'));
 }
 
-// Batch-Zähler für "Song X/Y lädt"-Anzeige: wächst mit jedem neu gestarteten Import, solange noch
-// welche aus dem aktuellen Schwung offen sind; sobald alle fertig sind, setzt der nächste Start
-// wieder bei 1 an (kein ewig wachsender Zähler über mehrere unabhängige Sessions hinweg).
-window._ytBatchTotal = 0;
-window._ytBatchDone = 0;
+// --- WARTESCHLANGE: persistenter Status statt flüchtiger Textzeile ---
+// Jeder eingereichte Link bekommt einen Eintrag mit echtem Status (server-seitig ab jetzt via
+// PATCH /youtube-queue/:id gepflegt: pending/processing/done/failed), der in localStorage
+// überlebt und in Settings dauerhaft sichtbar bleibt - analog zum Freeze-Log weiter unten in
+// dieser Datei (renderFreezeLog/#freeze-log-list).
+const YT_QUEUE_KEY = 'himusic_yt_queue';
+const YT_ENQUEUE_CONCURRENCY = 3; // wie CONCURRENT im lokalen Watcher - schneller einreihen bringt nichts
+const YT_LIVENESS_WINDOW_MS = 100000; // taucht in dieser Zeit NIRGENDS "processing" auf, gilt kein Watcher als aktiv
+const YT_STALL_TIMEOUT_MS = 5 * 60 * 1000; // ein Eintrag hängt >5 Min in "processing" -> Watcher vermutlich abgestürzt
+const YT_TERMINAL_PRUNE_MS = 10 * 60 * 1000; // fertige Einträge nach 10 Min aus der Ansicht entfernen
 
-function _updateYtBatchProgress() {
-    const el = document.getElementById('yt-batch-progress');
-    if (!el) return;
-    if (window._ytBatchTotal === 0 || window._ytBatchDone >= window._ytBatchTotal) {
-        el.style.display = 'none';
-        return;
-    }
-    el.style.display = 'block';
-    el.innerText = `⏳ Song ${window._ytBatchDone + 1}/${window._ytBatchTotal} lädt...`;
+let _ytQueueState = _loadYtQueue();
+let _ytPollTimer = null;
+let _ytLastLivenessAt = 0;   // wann zuletzt IRGENDEIN Eintrag (nicht nur eigene) als "processing" beobachtet wurde
+let _ytFirstEnqueueAt = 0;   // Start des aktuellen Lebendigkeits-Beobachtungsfensters
+let _ytFallbackDecided = false; // verhindert, die globale "kein Watcher"-Entscheidung mehrfach im selben Fenster zu treffen
+
+function _loadYtQueue() {
+    try {
+        const items = JSON.parse(localStorage.getItem(YT_QUEUE_KEY) || '[]');
+        // Eintrag hing beim letzten Neuladen mitten im ersten POST fest - wir können nicht sicher
+        // wissen, ob der Request angekommen ist, also klar als fehlgeschlagen markieren statt
+        // stumm für immer bei "Wird eingereiht..." hängen zu bleiben (seltener Randfall).
+        items.forEach(item => { if (item.clientState === 'submitting') { item.clientState = 'failed'; item.errorMessage = 'Sitzung unterbrochen - bitte erneut einfügen'; } });
+        return items;
+    } catch (e) { return []; }
+}
+function _saveYtQueue(items) { try { localStorage.setItem(YT_QUEUE_KEY, JSON.stringify(items)); } catch (e) {} }
+function _saveAndRenderYtQueue() { _saveYtQueue(_ytQueueState); renderYtQueueList(); }
+
+function _cacheFreshYtSongs(fresh) {
+    fresh.forEach(s => { if (window.hbLocal) window.hbLocal.downloadToLocal(s.file_url, s.title); });
+    if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
 }
 
-function _ytBatchStart() {
-    if (window._ytBatchDone >= window._ytBatchTotal) { window._ytBatchTotal = 0; window._ytBatchDone = 0; }
-    window._ytBatchTotal++;
-    _updateYtBatchProgress();
-}
-
-function _ytBatchFinish() {
-    window._ytBatchDone++;
-    _updateYtBatchProgress();
-    if (window._ytBatchDone >= window._ytBatchTotal) {
-        setTimeout(() => { window._ytBatchTotal = 0; window._ytBatchDone = 0; _updateYtBatchProgress(); }, 4000);
-    }
-}
-
+// Bounded Retry-Poll, NUR für den Cloud-Fallback (GitHub Actions) noch nötig - der schreibt
+// direkt per /internal/register in die DB, ohne den youtube_queue-Status zu berühren, es gibt
+// also keinen anderen Weg zu erkennen, wann er fertig ist.
 async function _pollForFreshYtSongs(knownIds) {
     for (let attempt = 0; attempt < 15; attempt++) {
         await new Promise(r => setTimeout(r, 8000));
@@ -3670,123 +3679,312 @@ async function _pollForFreshYtSongs(knownIds) {
     return null;
 }
 
-function _cacheFreshYtSongs(fresh) {
-    fresh.forEach(s => { if (window.hbLocal) window.hbLocal.downloadToLocal(s.file_url, s.title); });
-    if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
+function _parseYoutubeLinksFromTextarea(raw) {
+    const lines = (raw || '').split('\n').map(l => l.trim()).filter(Boolean);
+    const seen = new Set();
+    const valid = [];
+    let invalidCount = 0;
+    lines.forEach(line => {
+        const isYt = /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)/i.test(line);
+        if (!isYt) { invalidCount++; return; }
+        if (seen.has(line)) return;
+        seen.add(line);
+        valid.push(line);
+    });
+    return { valid, invalidCount };
 }
 
-// queueItemId ist gesetzt, wenn der Import über /youtube-queue lief (lokaler-Watcher-Weg): taucht
-// der Song nach ~2 Min nicht auf, läuft dort vermutlich KEIN Watcher (Queue-POST meldet fälschlich
-// "erfolgreich eingereiht", auch wenn niemand die Warteschlange abarbeitet – Songs blieben sonst
-// für immer unbemerkt liegen). In dem Fall den hängenden Queue-Eintrag aufräumen und automatisch
-// auf den GitHub-Actions-Fallback wechseln, statt den Nutzer im Unklaren zu lassen.
-async function _watchForYoutubeImportAndCache(url, queueItemId, statusEl) {
-    const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
-    try {
-        const fresh = await _pollForFreshYtSongs(knownIds);
-        if (fresh) { _cacheFreshYtSongs(fresh); return; }
+function _makeYtQueueItem(url, meta) {
+    const now = Date.now();
+    return {
+        localId: `ytq_${now}_${Math.random().toString(36).slice(2, 8)}`,
+        url, title: (meta && meta.title) || null, thumbnail: (meta && meta.thumbnail) || null,
+        queueItemId: null, serverStatus: null, clientState: 'submitting',
+        errorMessage: null, createdAt: now, updatedAt: now,
+    };
+}
 
-        if (!queueItemId) {
-            if (statusEl) {
-                statusEl.style.display = 'block';
-                statusEl.innerText = '❌ Download nicht angekommen – bitte erneut versuchen.';
-                statusEl.style.color = '#ff3b30';
-                setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
-            }
-            return;
-        }
-
-        _apiFetch(`${API_URL}/youtube-queue/${queueItemId}`, { method: 'DELETE' }).catch(() => {});
-        if (statusEl) {
-            statusEl.style.display = 'block';
-            statusEl.innerText = '⚠️ Kein lokaler Watcher aktiv – wechsle zu Cloud-Fallback...';
-            statusEl.style.color = '#fa9a00';
-        }
-        try {
-            const response = await _apiFetch(`${API_URL}/dispatch-import`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ youtube_url: url }),
-            });
-            if (!response.ok) throw new Error(`Server: ${response.status}`);
-            if (statusEl) {
-                statusEl.innerText = '⏳ Cloud-Fallback gestartet, Song erscheint in ~2 Min.';
-                statusEl.style.color = '#32d74b';
-                setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
-            }
-            const fresh2 = await _pollForFreshYtSongs(knownIds);
-            if (fresh2) { _cacheFreshYtSongs(fresh2); return; }
-            if (statusEl) {
-                statusEl.style.display = 'block';
-                statusEl.innerText = '❌ Download nicht angekommen – bitte erneut versuchen.';
-                statusEl.style.color = '#ff3b30';
-                setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
-            }
-        } catch (e) {
-            if (statusEl) {
-                statusEl.style.display = 'block';
-                statusEl.innerText = '❌ Cloud-Fallback fehlgeschlagen.';
-                statusEl.style.color = '#ff3b30';
-                setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
-            }
-        }
-    } finally {
-        _ytBatchFinish();
+function _ytStatusLabel(item) {
+    switch (item.clientState) {
+        case 'submitting': return { icon: '⏳', text: 'Wird eingereiht...' };
+        case 'queued': return { icon: '⏳', text: 'Wartet' };
+        case 'processing': return { icon: '⬇️', text: 'Lädt herunter' };
+        case 'done': return { icon: '✅', text: 'Fertig' };
+        case 'failed': return { icon: '❌', text: item.errorMessage ? `Fehlgeschlagen: ${item.errorMessage}` : 'Fehlgeschlagen' };
+        case 'fallback_pending': return { icon: '☁️', text: 'Cloud-Fallback läuft...' };
+        case 'fallback_done': return { icon: '✅', text: 'Fertig (Cloud)' };
+        case 'fallback_failed': return { icon: '❌', text: item.errorMessage ? `Cloud-Fallback fehlgeschlagen: ${item.errorMessage}` : 'Cloud-Fallback fehlgeschlagen' };
+        default: return { icon: '·', text: item.clientState };
     }
 }
 
-async function startYoutubeImport(url, statusEl) {
-    if (!url) return;
-    if (statusEl) {
-        statusEl.style.display = 'block';
-        statusEl.innerText = 'Wird eingereiht...';
-        statusEl.style.color = '#fff';
+function renderYtQueueList() {
+    const listEl = document.getElementById('yt-queue-list');
+    const summaryEl = document.getElementById('yt-queue-summary');
+    if (!listEl) return;
+    const items = _ytQueueState;
+
+    if (items.length === 0) {
+        listEl.innerHTML = '';
+        if (summaryEl) summaryEl.style.display = 'none';
+        return;
     }
+
+    const counts = { queued: 0, processing: 0, done: 0, failed: 0 };
+    items.forEach(item => {
+        if (item.clientState === 'submitting' || item.clientState === 'queued') counts.queued++;
+        else if (item.clientState === 'processing' || item.clientState === 'fallback_pending') counts.processing++;
+        else if (item.clientState === 'done' || item.clientState === 'fallback_done') counts.done++;
+        else if (item.clientState === 'failed' || item.clientState === 'fallback_failed') counts.failed++;
+    });
+    if (summaryEl) {
+        summaryEl.style.display = 'block';
+        summaryEl.innerText = `${counts.queued} wartend · ${counts.processing} laden · ${counts.done} fertig · ${counts.failed} fehlgeschlagen`;
+    }
+
+    listEl.innerHTML = items.slice().reverse().map(item => {
+        const { icon, text } = _ytStatusLabel(item);
+        const title = item.title || item.url;
+        const canRetry = item.clientState === 'failed' || item.clientState === 'fallback_failed';
+        const retryBtn = canRetry
+            ? `<button class="yt-queue-retry-btn" data-localid="${_esc(item.localId)}" style="background:none;border:1px solid rgba(255,255,255,0.25);color:#fff;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;margin-left:8px;flex-shrink:0;">Wiederholen</button>`
+            : '';
+        const thumb = item.thumbnail
+            ? `<img src="${_esc(item.thumbnail)}" style="width:36px;height:36px;border-radius:6px;object-fit:cover;flex-shrink:0;">`
+            : `<div style="width:36px;height:36px;border-radius:6px;background:rgba(255,255,255,0.1);flex-shrink:0;"></div>`;
+        return `<div class="yt-queue-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.08);">
+            ${thumb}
+            <div style="flex:1;min-width:0;">
+                <div style="font-size:13px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(title)}</div>
+                <div style="font-size:12px;color:#aaa;">${icon} ${_esc(text)}</div>
+            </div>
+            ${retryBtn}
+        </div>`;
+    }).join('');
+
+    listEl.querySelectorAll('.yt-queue-retry-btn').forEach(btn => {
+        btn.addEventListener('click', () => _retryYtQueueItem(btn.dataset.localid));
+    });
+}
+
+function _pruneTerminalYtItems() {
+    const now = Date.now();
+    const before = _ytQueueState.length;
+    _ytQueueState = _ytQueueState.filter(item => {
+        const isTerminalDone = item.clientState === 'done' || item.clientState === 'fallback_done';
+        return !(isTerminalDone && (now - item.updatedAt) > YT_TERMINAL_PRUNE_MS);
+    });
+    if (_ytQueueState.length !== before) _saveAndRenderYtQueue();
+}
+
+function _ensureYtPollLoop() {
+    if (_ytPollTimer) return;
+    _ytFirstEnqueueAt = Date.now();
+    _ytLastLivenessAt = 0;
+    _ytFallbackDecided = false;
+    _ytPollTimer = setInterval(_pollYtQueueTick, 6000);
+    _pollYtQueueTick();
+}
+
+async function _handleNewlyDoneYtItems() {
     try {
-        const queueRes = await _apiFetch(`${API_URL}/youtube-queue`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ youtube_url: url })
+        const res = await _apiFetch(`${API_URL}/songs`);
+        if (!res.ok) return;
+        const songs = await res.json();
+        const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
+        const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
+        if (fresh.length > 0) _cacheFreshYtSongs(fresh);
+    } catch (e) {}
+}
+
+async function _resolveVanishedYtItem(item) {
+    // Eintrag ist aus /youtube-queue verschwunden, ohne dass wir "done" gesehen haben - deckt
+    // v.a. den Übergang ab, falls irgendwo noch ein alter Watcher läuft, der Einträge weiterhin
+    // nach der Verarbeitung blind löscht statt den Status zu setzen.
+    if (item._resolvingVanish) return;
+    item._resolvingVanish = true;
+    try {
+        const res = await _apiFetch(`${API_URL}/songs`);
+        if (res.ok) {
+            const songs = await res.json();
+            const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
+            const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
+            if (fresh.length > 0) {
+                _cacheFreshYtSongs(fresh);
+                item.clientState = 'done';
+                item.updatedAt = Date.now();
+                _saveAndRenderYtQueue();
+                return;
+            }
+        }
+    } catch (e) {}
+    item.clientState = 'failed';
+    item.errorMessage = 'Aus der Warteschlange verschwunden ohne Ergebnis';
+    item.updatedAt = Date.now();
+    _saveAndRenderYtQueue();
+}
+
+async function _pollYtQueueTick() {
+    const trackedQueued = _ytQueueState.filter(item => item.clientState === 'queued' || item.clientState === 'processing');
+    if (trackedQueued.length === 0) {
+        _pruneTerminalYtItems();
+        if (_ytPollTimer) { clearInterval(_ytPollTimer); _ytPollTimer = null; }
+        return;
+    }
+
+    let serverItems = null;
+    try {
+        const res = await _apiFetch(`${API_URL}/youtube-queue`);
+        if (res.ok) serverItems = await res.json();
+    } catch (e) {}
+
+    let sawNewlyDone = false;
+    if (serverItems) {
+        const byId = new Map(serverItems.map(s => [s.id, s]));
+        // Globales Lebendigkeits-Signal: sobald IRGENDEIN Eintrag (nicht nur die eigenen) als
+        // "processing" beobachtet wird, läuft ein Watcher - die Warteschlange bleibt dann
+        // geduldig, statt nach starren 2 Minuten fälschlich "kein Watcher aktiv" anzunehmen (der
+        // eigentliche Bug bei einem großen Stapel: der Watcher hatte oft nur noch viele Songs vor
+        // sich, kein Ausfall).
+        if (serverItems.some(s => s.status === 'processing')) _ytLastLivenessAt = Date.now();
+
+        for (const item of trackedQueued) {
+            if (!item.queueItemId) continue;
+            const server = byId.get(item.queueItemId);
+            if (!server) { _resolveVanishedYtItem(item); continue; }
+            item.serverStatus = server.status;
+            if (server.status === 'processing' && item.clientState !== 'processing') {
+                item.clientState = 'processing'; item.updatedAt = Date.now();
+            } else if (server.status === 'done') {
+                item.clientState = 'done'; item.updatedAt = Date.now(); sawNewlyDone = true;
+            } else if (server.status === 'failed') {
+                item.clientState = 'failed'; item.errorMessage = server.error_message || 'Unbekannter Fehler'; item.updatedAt = Date.now();
+            }
+        }
+    }
+    if (sawNewlyDone) await _handleNewlyDoneYtItems();
+
+    // Einzelner Eintrag hängt zu lange in "processing" - Watcher vermutlich mittendrin
+    // abgestürzt. Nur DIESEN einen Eintrag auf Cloud-Fallback umstellen, nicht die ganze Liste.
+    const now = Date.now();
+    trackedQueued.forEach(item => {
+        if (item.clientState === 'processing' && (now - item.updatedAt) > YT_STALL_TIMEOUT_MS) _dispatchYtFallback(item);
+    });
+
+    // Globale "kein Watcher aktiv"-Erkennung: seit dem ersten eigenen Eintrag dieser Session ist
+    // das Lebendigkeits-Fenster abgelaufen, OHNE dass irgendwo "processing" beobachtet wurde ->
+    // EINMALIG alle noch wartenden eigenen Einträge gemeinsam auf Cloud-Fallback umstellen.
+    const windowExpired = _ytFirstEnqueueAt && (now - _ytFirstEnqueueAt) > YT_LIVENESS_WINDOW_MS;
+    if (!_ytFallbackDecided && _ytLastLivenessAt === 0 && windowExpired) {
+        _ytFallbackDecided = true;
+        _dispatchYtFallbackBatch(_ytQueueState.filter(item => item.clientState === 'queued'));
+    }
+
+    _saveAndRenderYtQueue();
+    _pruneTerminalYtItems();
+}
+
+async function _dispatchYtFallback(item) {
+    item.clientState = 'fallback_pending';
+    item.errorMessage = null;
+    item.updatedAt = Date.now();
+    _saveAndRenderYtQueue();
+    try {
+        const res = await _apiFetch(`${API_URL}/dispatch-import`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ youtube_url: item.url }),
         });
-        if (queueRes.ok) {
-            const queueData = await queueRes.json().catch(() => ({}));
-            if (statusEl) {
-                statusEl.innerText = '⏳ In Warteschlange – dein lokaler Watcher lädt jetzt herunter.';
-                statusEl.style.color = '#32d74b';
-                setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
-            }
-            _ytBatchStart();
-            _watchForYoutubeImportAndCache(url, queueData.id, statusEl);
-            return true;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
+        const fresh = await _pollForFreshYtSongs(knownIds);
+        if (fresh && fresh.length > 0) {
+            _cacheFreshYtSongs(fresh);
+            item.clientState = 'fallback_done';
+        } else {
+            item.clientState = 'fallback_failed';
+            item.errorMessage = 'Nicht angekommen';
         }
-        throw new Error(`Warteschlange nicht erreichbar (${queueRes.status})`);
-    } catch (queueError) {
-        // Fallback: GitHub-Actions-Kette (funktioniert auch ohne laufenden lokalen Watcher,
-        // nur mit geringerer Erfolgsquote wegen Cloud-IP-Blocks).
-        try {
-            const response = await _apiFetch(`${API_URL}/dispatch-import`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ youtube_url: url })
-            });
-            if (!response.ok) throw new Error(`Server: ${response.status}`);
-            if (statusEl) {
-                statusEl.innerText = '⏳ Download im Hintergrund gestartet (Cloud-Fallback)! Song erscheint in ~2 Min.';
-                statusEl.style.color = '#32d74b';
-                setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
-            }
-            _ytBatchStart();
-            _watchForYoutubeImportAndCache(url, null, statusEl);
-            return true;
-        } catch (error) {
-            if (statusEl) {
-                statusEl.innerText = `❌ Fehler: ${error.message}`;
-                statusEl.style.color = '#ff3b30';
-                setTimeout(() => { statusEl.style.display = 'none'; }, 4000);
-            }
-            return false;
+    } catch (e) {
+        item.clientState = 'fallback_failed';
+        item.errorMessage = e.message;
+    }
+    item.updatedAt = Date.now();
+    _saveAndRenderYtQueue();
+}
+
+// Feuert _dispatchYtFallback für viele Einträge auf einmal, gedrosselt über dieselben Bahnen
+// wie beim Einreihen - sonst würde z.B. "kein Watcher aktiv" bei einem 500er-Stapel alle 500
+// gleichzeitig auf den GitHub-Actions-Fallback umstellen (bis zu 500 parallele 8-Job-Workflows
+// plus 500 gleichzeitige 2-Minuten-Poller gegen den Worker).
+async function _dispatchYtFallbackBatch(items) {
+    let idx = 0;
+    async function lane() {
+        while (idx < items.length) {
+            const item = items[idx++];
+            await _dispatchYtFallback(item);
+            await new Promise(r => setTimeout(r, 200));
         }
     }
+    const lanes = Array.from({ length: Math.min(YT_ENQUEUE_CONCURRENCY, items.length) }, () => lane());
+    await Promise.all(lanes);
 }
+
+function _retryYtQueueItem(localId) {
+    const item = _ytQueueState.find(i => i.localId === localId);
+    if (!item) return;
+    _dispatchYtFallback(item);
+}
+
+function _retryAllFailedYt() {
+    const items = _ytQueueState.filter(item => item.clientState === 'failed' || item.clientState === 'fallback_failed');
+    _dispatchYtFallbackBatch(items);
+}
+
+function _clearYtQueue() {
+    _ytQueueState = _ytQueueState.filter(item => !['done', 'fallback_done', 'failed', 'fallback_failed'].includes(item.clientState));
+    _saveAndRenderYtQueue();
+}
+
+async function _enqueueOneLink(url, meta) {
+    const item = _makeYtQueueItem(url, meta);
+    _ytQueueState.push(item);
+    _saveAndRenderYtQueue();
+
+    try {
+        const res = await _apiFetch(`${API_URL}/youtube-queue`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ youtube_url: url }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json().catch(() => ({}));
+        item.queueItemId = data.id || null;
+        item.serverStatus = 'pending';
+        item.clientState = 'queued';
+        item.updatedAt = Date.now();
+        _saveAndRenderYtQueue();
+        _ensureYtPollLoop();
+    } catch (e) {
+        // Die Warteschlangen-Route selbst ist gerade nicht erreichbar (nicht "kein Watcher",
+        // sondern der POST schlug fehl) - direkt auf Cloud-Fallback wechseln.
+        _dispatchYtFallback(item);
+    }
+}
+
+async function _enqueueYoutubeLinks(urls, meta) {
+    let idx = 0;
+    async function lane() {
+        while (idx < urls.length) {
+            const url = urls[idx++];
+            await _enqueueOneLink(url, meta);
+            await new Promise(r => setTimeout(r, 200));
+        }
+    }
+    const lanes = Array.from({ length: Math.min(YT_ENQUEUE_CONCURRENCY, urls.length) }, () => lane());
+    await Promise.all(lanes);
+}
+
+renderYtQueueList();
+if (_ytQueueState.some(item => item.clientState === 'queued' || item.clientState === 'processing')) _ensureYtPollLoop();
 
 // ── YouTube-Vorschau-Player (Play/Pause/Spulen) für die Suchergebnisse ──────────
 // Nutzt die offizielle YouTube-IFrame-Player-API in einem unsichtbaren 1x1-Player: kein eigener
@@ -3878,28 +4076,49 @@ async function _toggleYtPreview(row, videoId) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    // ── Manueller Link-Import (Fallback) ────────────────────
-    const ytInput = document.getElementById('youtube-url-input');
+    // ── Link(s) einfügen → Warteschlange ────────────────────
+    const ytUrlsInput = document.getElementById('youtube-urls-input');
     const ytBtn = document.getElementById('youtube-import-btn');
     const ytStatus = document.getElementById('youtube-status');
     const ytClearBtn = document.getElementById('youtube-clear-btn');
+    const ytUrlsCount = document.getElementById('youtube-urls-count');
 
-    if (ytInput && ytClearBtn) {
-        ytInput.addEventListener('input', () => { ytClearBtn.style.display = ytInput.value.length > 0 ? 'block' : 'none'; });
-        ytClearBtn.addEventListener('click', () => { ytInput.value = ''; ytClearBtn.style.display = 'none'; ytInput.focus(); });
+    function _updateYtUrlsCount() {
+        if (!ytUrlsInput || !ytUrlsCount) return;
+        const { valid } = _parseYoutubeLinksFromTextarea(ytUrlsInput.value);
+        ytUrlsCount.innerText = valid.length > 0 ? `${valid.length} Link${valid.length === 1 ? '' : 's'} erkannt` : '';
     }
 
-    if (ytBtn && ytInput) {
+    if (ytUrlsInput) ytUrlsInput.addEventListener('input', _updateYtUrlsCount);
+    if (ytClearBtn && ytUrlsInput) {
+        ytClearBtn.addEventListener('click', () => { ytUrlsInput.value = ''; _updateYtUrlsCount(); ytUrlsInput.focus(); });
+    }
+
+    if (ytBtn && ytUrlsInput) {
         ytBtn.addEventListener('click', async () => {
-            const url = ytInput.value.trim();
-            if (!url) return;
+            const { valid, invalidCount } = _parseYoutubeLinksFromTextarea(ytUrlsInput.value);
+            if (valid.length === 0) {
+                if (ytStatus) { ytStatus.style.display = 'block'; ytStatus.innerText = 'Keine gültigen YouTube-Links gefunden.'; ytStatus.style.color = '#ff3b30'; setTimeout(() => { ytStatus.style.display = 'none'; }, 4000); }
+                return;
+            }
+            const YT_MAX_BATCH = 500;
+            if (valid.length > YT_MAX_BATCH) { valid.length = YT_MAX_BATCH; }
             ytBtn.disabled = true; ytBtn.style.opacity = '0.5';
-            await startYoutubeImport(url, ytStatus);
-            ytInput.value = '';
-            if (ytClearBtn) ytClearBtn.style.display = 'none';
+            if (ytStatus) {
+                ytStatus.style.display = 'block'; ytStatus.style.color = '#32d74b';
+                ytStatus.innerText = invalidCount > 0 ? `${valid.length} Link(s) werden eingereiht (${invalidCount} Zeile(n) ohne gültigen Link ignoriert).` : `${valid.length} Link(s) werden eingereiht.`;
+                setTimeout(() => { ytStatus.style.display = 'none'; }, 5000);
+            }
+            ytUrlsInput.value = ''; _updateYtUrlsCount();
             ytBtn.disabled = false; ytBtn.style.opacity = '1';
+            _enqueueYoutubeLinks(valid, {});
         });
     }
+
+    const btnClearYtQueue = document.getElementById('btn-clear-yt-queue');
+    if (btnClearYtQueue) btnClearYtQueue.addEventListener('click', () => { _clearYtQueue(); window._showToast('Warteschlange geleert'); });
+    const btnRetryFailedYt = document.getElementById('btn-retry-failed-yt');
+    if (btnRetryFailedYt) btnRetryFailedYt.addEventListener('click', () => { _retryAllFailedYt(); window._showToast('Wiederholung gestartet'); });
 
     // ── Songsuche: Name eingeben → YouTube-Ergebnisse → auswählen ──
     const searchInput   = document.getElementById('yt-search-input');
@@ -3968,11 +4187,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (_ytPlayer && _ytActiveRow === row) _ytPlayer.seekTo(Number(seekEl.value), true);
                 });
 
-                downloadBtn.addEventListener('click', async () => {
+                downloadBtn.addEventListener('click', () => {
                     downloadBtn.disabled = true; downloadBtn.style.opacity = '0.5';
                     if (_ytActiveRow === row) _stopYtPreview();
-                    searchStatus.style.display = 'block';
-                    await startYoutubeImport(`https://www.youtube.com/watch?v=${item.videoId}`, searchStatus);
+                    _enqueueYoutubeLinks([`https://www.youtube.com/watch?v=${item.videoId}`], { title: item.title, thumbnail: item.thumbnail });
+                    window._showToast('Zur Warteschlange hinzugefügt');
                     row.remove();
                 });
                 resultsBox.appendChild(row);

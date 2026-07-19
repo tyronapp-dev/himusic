@@ -94,8 +94,24 @@ async function downloadAudio(url, outputDir) {
     throw lastErr || new Error('Keine Audiodatei nach Download gefunden');
 }
 
+// Setzt den Status eines Warteschlangen-Eintrags im Worker (statt ihn wie frueher nach der
+// Verarbeitung sofort zu loeschen) - so kann der Client in der App den echten Fortschritt
+// anzeigen (wartet/laedt/fertig/fehlgeschlagen), statt raten zu muessen, ob gerade ein Watcher
+// aktiv ist. Fehler beim Setzen selbst werden verschluckt (best effort, kein Grund den Import
+// deswegen abzubrechen).
+async function patchStatus(id, status, errorMessage) {
+    try {
+        await fetch(`${API_URL}/youtube-queue/${id}`, {
+            method: 'PATCH',
+            headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status, error_message: errorMessage ?? null }),
+        });
+    } catch (err) {}
+}
+
 async function processOne(item) {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-import-'));
+    await patchStatus(item.id, 'processing');
     try {
         console.log(`[${item.id}] Metadaten abrufen: ${item.youtube_url}`);
         const info = await getVideoInfo(item.youtube_url);
@@ -125,13 +141,12 @@ async function processOne(item) {
         });
         const result = await songRes.json().catch(() => ({}));
         console.log(`[${item.id}] ${result.duplicate ? 'War inhaltlich schon vorhanden (Duplikat verworfen)' : '✅ Fertig: ' + info.title}`);
+        await patchStatus(item.id, 'done');
     } catch (err) {
         console.error(`[${item.id}] ❌ Fehler: ${err.message}`);
+        await patchStatus(item.id, 'failed', String(err.message || err).slice(0, 300));
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
-        // Aus der Warteschlange entfernen, egal ob Erfolg oder Fehlschlag – bei Fehlschlag
-        // kann der Song in der App einfach erneut importiert werden, statt hier ewig zu haengen.
-        await fetch(`${API_URL}/youtube-queue/${item.id}`, { method: 'DELETE', headers: API_HEADERS }).catch(() => {});
     }
 }
 
@@ -141,7 +156,10 @@ async function poll() {
         const res = await fetch(`${API_URL}/youtube-queue`, { headers: API_HEADERS });
         if (!res.ok) return;
         const items = await res.json();
-        for (const item of items) {
+        // Nur wirklich wartende Eintraege beanspruchen - "!item.status" faengt alte Zeilen ab,
+        // die vor der status-Spalte angelegt wurden.
+        const claimable = items.filter((item) => item.status === 'pending' || !item.status);
+        for (const item of claimable) {
             if (active >= CONCURRENT) break;
             active++;
             processOne(item).finally(() => { active--; });
