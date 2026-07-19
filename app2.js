@@ -2727,6 +2727,31 @@ async function createNewPlaylistProcess() {
         }).join('');
     };
 
+    document.getElementById('btn-copy-freeze-log')?.addEventListener('click', async () => {
+        let log = [];
+        try { log = JSON.parse(localStorage.getItem('himusic_freeze_log') || '[]'); } catch(e) {}
+        if (log.length === 0) { _showToast('Freeze-Log ist leer'); return; }
+        const lines = log.map(entry => {
+            const d = new Date(entry.when);
+            const dateStr = `${d.toLocaleDateString('de-DE')} ${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
+            return `${dateStr} | ${entry.gapSeconds}s eingefroren | ${entry.title || 'Unbekannt'}${entry.artist ? ' - ' + entry.artist : ''} | ${entry.wasBlob ? 'lokal (blob)' : 'Netzwerk'}`;
+        });
+        const text = `Himusic Freeze-Log (${log.length} Einträge)\n` + lines.join('\n');
+        try {
+            await navigator.clipboard.writeText(text);
+            _showToast('📋 Freeze-Log kopiert');
+        } catch (e) {
+            // Fallback, falls die Clipboard-API im aktuellen Kontext nicht erlaubt ist
+            // (z.B. manche eingebetteten Webviews) - klassischer execCommand-Umweg.
+            const ta = document.createElement('textarea');
+            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); _showToast('📋 Freeze-Log kopiert'); }
+            catch (e2) { _showToast('⚠️ Kopieren fehlgeschlagen'); }
+            document.body.removeChild(ta);
+        }
+    });
+
     document.getElementById('btn-clear-freeze-log')?.addEventListener('click', () => {
         localStorage.removeItem('himusic_freeze_log');
         window.renderFreezeLog();
