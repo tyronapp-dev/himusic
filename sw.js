@@ -186,6 +186,17 @@ self.addEventListener('fetch', (event) => {
     }
 
     // 4. API (Cloudflare) – Netzwerk mit Timeout, graceful offline
+    // Der 8s-Timeout ist für schnelle JSON-GETs gedacht (schneller Offline-Fallback statt langem
+    // Hängen). Seit Regel 1 auf GET beschränkt ist, landen PUT/POST-Uploads (u.a. der
+    // Song-Kürzen-WAV-Upload, mehrere MB, auf Mobilfunk leicht >8s) jetzt hier - das Race würde
+    // ihnen fälschlich nach 8s ein synthetisches 503 unterschieben, OBWOHL der echte Request im
+    // Hintergrund weiterläuft und serverseitig oft trotzdem durchgeht (verwaiste Datei: Upload
+    // "schlägt fehl", landet aber doch in R2, ohne dass die DB je den neuen Link bekommt). Für
+    // mutierende Requests deshalb ohne Timeout einfach direkt durchreichen.
+    if (event.request.method !== 'GET') {
+        event.respondWith(fetch(event.request));
+        return;
+    }
     event.respondWith(
         Promise.race([
             fetch(event.request),
