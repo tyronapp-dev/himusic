@@ -1,7 +1,7 @@
 // Himusic Cloud - Service Worker v1.0
 // Komplett optimiert für das neue Cloudflare / Firebase Setup
 
-const CACHE_NAME  = 'himusic-app-shell-v1.9';
+const CACHE_NAME  = 'himusic-app-shell-v1.10';
 const COVER_CACHE = 'himusic-covers-v1';
 const AUDIO_CACHE = 'himusic-audio-v1';
 
@@ -75,13 +75,24 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
     // 1. Audio – Cache-first mit Range-Request-Support (für Seeking auf iOS!)
+    // NUR für GET: "url.hostname.includes('workers.dev')" traf bisher JEDEN Request an den
+    // Worker, unabhängig von der Methode - inklusive PUT /upload/... (Song-Kürzen-Upload,
+    // eine grosse unkomprimierte WAV-Datei) und PUT /songs/:id (Tag-Speichern). Diese wurden
+    // dadurch fälschlich durch die cache-first-Logik samt ihrer Promise-Kette geschleust statt
+    // direkt durchgereicht zu werden - beim grossen WAV-Upload endete das zuverlässig in einer
+    // beschädigten/leeren R2-Datei, die zwar existierte (Upload meldete Erfolg), aber beim
+    // Abspielen "Song nicht erreichbar" auslöste. Zusätzlich beim workers.dev-Treffer auf
+    // /media/* eingeschränkt, damit normale JSON-API-Aufrufe (GET /songs etc.) gar nicht erst
+    // hier landen, sondern über die einfache Passthrough-Regel weiter unten laufen.
     if (
-        event.request.destination === 'audio' ||
-        url.pathname.endsWith('.mp3') ||
-        url.pathname.endsWith('.flac') ||
-        url.pathname.endsWith('.m4a') ||
-        url.hostname.includes('r2.cloudflarestorage') ||
-        url.hostname.includes('workers.dev')
+        event.request.method === 'GET' && (
+            event.request.destination === 'audio' ||
+            url.pathname.endsWith('.mp3') ||
+            url.pathname.endsWith('.flac') ||
+            url.pathname.endsWith('.m4a') ||
+            url.hostname.includes('r2.cloudflarestorage') ||
+            (url.hostname.includes('workers.dev') && url.pathname.startsWith('/media/'))
+        )
     ) {
         event.respondWith(
             caches.open(AUDIO_CACHE).then(async (cache) => {
