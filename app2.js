@@ -3634,7 +3634,14 @@ function _isYoutubeImportedUrl(fileUrl) {
 // dieser Datei (renderFreezeLog/#freeze-log-list).
 const YT_QUEUE_KEY = 'himusic_yt_queue';
 const YT_ENQUEUE_CONCURRENCY = 3; // wie CONCURRENT im lokalen Watcher - schneller einreihen bringt nichts
-const YT_LIVENESS_WINDOW_MS = 100000; // taucht in dieser Zeit NIRGENDS "processing" auf, gilt kein Watcher als aktiv
+const YT_QUEUE_POLL_MS = 3000; // Status-Poll gegen /youtube-queue (kleine Antwort) - war 6000. Halbiert die
+                               // Zeit, bis ein fertiger Song bemerkt und auf der Seite angezeigt wird.
+const YT_FRESH_SAFETY_MS = 15000; // Sicherheitsnetz: falls der Watcher-PATCH "done" mal verloren geht, trotzdem
+                                  // direkt in /songs nachsehen - aber nur, wenn wirklich etwas "processing" ist
+                                  // (sonst würde die grosse /songs-Antwort unnötig oft geladen).
+const YT_LIVENESS_WINDOW_MS = 30000; // war 100000. Ein laufender Watcher meldet den ersten Eintrag binnen ~10s als
+                                     // "processing" (Poll alle 2s, PATCH VOR dem Download) - 30s reichen also sicher,
+                                     // und OHNE Watcher startet der Cloud-Fallback jetzt nach 30s statt erst nach 100s.
 const YT_STALL_TIMEOUT_MS = 5 * 60 * 1000; // ein Eintrag hängt >5 Min in "processing" -> Watcher vermutlich abgestürzt
 const YT_TERMINAL_PRUNE_MS = 10 * 60 * 1000; // fertige Einträge nach 10 Min aus der Ansicht entfernen
 
@@ -3643,6 +3650,7 @@ let _ytPollTimer = null;
 let _ytLastLivenessAt = 0;   // wann zuletzt IRGENDEIN Eintrag (nicht nur eigene) als "processing" beobachtet wurde
 let _ytFirstEnqueueAt = 0;   // Start des aktuellen Lebendigkeits-Beobachtungsfensters
 let _ytFallbackDecided = false; // verhindert, die globale "kein Watcher"-Entscheidung mehrfach im selben Fenster zu treffen
+let _ytLastFreshCheckAt = 0; // wann zuletzt (als Sicherheitsnetz) direkt in /songs nach neuen Songs gesehen wurde
 
 function _loadYtQueue() {
     try {
@@ -3787,7 +3795,8 @@ function _ensureYtPollLoop() {
     _ytFirstEnqueueAt = Date.now();
     _ytLastLivenessAt = 0;
     _ytFallbackDecided = false;
-    _ytPollTimer = setInterval(_pollYtQueueTick, 6000);
+    _ytLastFreshCheckAt = 0;
+    _ytPollTimer = setInterval(_pollYtQueueTick, YT_QUEUE_POLL_MS);
     _pollYtQueueTick();
 }
 
@@ -3867,7 +3876,16 @@ async function _pollYtQueueTick() {
             }
         }
     }
-    if (sawNewlyDone) await _handleNewlyDoneYtItems();
+    // Neu fertige Songs sofort holen und rendern. Zusätzlich als Sicherheitsnetz: wenn ein Eintrag
+    // schon "processing" ist (die Datei landet also gerade/demnächst in der DB) und der Watcher-PATCH
+    // "done" mal verloren ginge, trotzdem periodisch direkt in /songs nachsehen - so erscheint der Song
+    // auch dann in Sekunden, statt bis zum 5-Min-Stall-Timeout auf "Lädt herunter" hängen zu bleiben.
+    const someProcessing = trackedQueued.some(item => item.clientState === 'processing');
+    const nowFresh = Date.now();
+    if (sawNewlyDone || (someProcessing && (nowFresh - _ytLastFreshCheckAt) > YT_FRESH_SAFETY_MS)) {
+        _ytLastFreshCheckAt = nowFresh;
+        await _handleNewlyDoneYtItems();
+    }
 
     // Einzelner Eintrag hängt zu lange in "processing" - Watcher vermutlich mittendrin
     // abgestürzt. Nur DIESEN einen Eintrag auf Cloud-Fallback umstellen, nicht die ganze Liste.

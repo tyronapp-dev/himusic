@@ -43,7 +43,7 @@ const IS_WINDOWS = process.platform === 'win32';
 // installierten Programme (liegen im PATH, z.B. nach "sudo dnf install yt-dlp ffmpeg").
 const YTDLP_PATH = IS_WINDOWS ? path.join(__dirname, 'yt-dlp.exe') : 'yt-dlp';
 const FFMPEG_PATH = IS_WINDOWS ? path.join(__dirname, 'ffmpeg.exe') : 'ffmpeg';
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 2000;
 const CONCURRENT = IS_WINDOWS ? 3 : 2; // Server-VM hat oft weniger RAM/CPU als ein PC
 
 function run(cmd, args, timeoutMs = 300000) {
@@ -62,30 +62,33 @@ function run(cmd, args, timeoutMs = 300000) {
     });
 }
 
-async function getVideoInfo(url) {
-    try {
-        const { stdout } = await run(YTDLP_PATH, ['--print', '%(title)s\t%(duration)s', '--no-download', '--quiet', '--no-warnings', url], 30000);
-        const [title, duration] = stdout.trim().split('\t');
-        return { title: title || 'YouTube Import', duration: parseInt(duration, 10) || 0 };
-    } catch (err) {
-        return { title: 'YouTube Import', duration: 0 };
-    }
-}
-
+// Download UND Titel/Dauer in EINEM yt-dlp-Aufruf. Frueher lief davor ein separates getVideoInfo()
+// (eigener voller YouTube-Abruf nur fuer den Titel) - das war ein zweiter Netzwerk-Roundtrip pro Song
+// und eine zweite Gelegenheit fuer einen Bot-Block, ganz umsonst. "--no-simulate --print" laedt herunter
+// und gibt gleichzeitig Titel+Dauer aus derselben Extraktion auf stdout aus.
 async function downloadAudio(url, outputDir) {
     const outputTemplate = path.join(outputDir, '%(id)s.%(ext)s');
     let lastErr = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-            await run(YTDLP_PATH, [
+            const { stdout } = await run(YTDLP_PATH, [
                 '--no-playlist', '--extract-audio', '--audio-format', 'm4a', '--audio-quality', '0',
                 '--ffmpeg-location', FFMPEG_PATH,
                 '--output', outputTemplate,
+                '--no-simulate', '--print', '%(title)s\t%(duration)s',
                 '--no-progress', '--quiet', '--no-warnings',
                 url,
             ]);
             const files = fs.readdirSync(outputDir).filter((f) => f.endsWith('.m4a'));
-            if (files.length > 0) return path.join(outputDir, files[0]);
+            if (files.length > 0) {
+                const line = stdout.split('\n').map((l) => l.trim()).filter(Boolean).pop() || '';
+                const [title, duration] = line.split('\t');
+                return {
+                    filePath: path.join(outputDir, files[0]),
+                    title: title || 'YouTube Import',
+                    duration: parseInt(duration, 10) || 0,
+                };
+            }
         } catch (err) {
             lastErr = err;
             if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
@@ -113,12 +116,9 @@ async function processOne(item) {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-import-'));
     await patchStatus(item.id, 'processing');
     try {
-        console.log(`[${item.id}] Metadaten abrufen: ${item.youtube_url}`);
-        const info = await getVideoInfo(item.youtube_url);
-
-        console.log(`[${item.id}] Download: "${info.title}"`);
-        const filePath = await downloadAudio(item.youtube_url, tmpDir);
-        const fileBuf = fs.readFileSync(filePath);
+        console.log(`[${item.id}] Download: ${item.youtube_url}`);
+        const info = await downloadAudio(item.youtube_url, tmpDir);
+        const fileBuf = fs.readFileSync(info.filePath);
 
         console.log(`[${item.id}] Upload nach R2 (${(fileBuf.length / 1048576).toFixed(1)} MB)...`);
         const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_local_yt.m4a`;
