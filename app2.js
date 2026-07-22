@@ -1,4 +1,8 @@
-const API_URL = window.HiMusicConfig?.apiBaseUrl || 'https://heatbox-api.tyron-app.workers.dev';
+// Fallback zeigte bis 2026-07-22 auf "heatbox-api" - den Namen der App VOR der Umbenennung zu
+// "Himusic" (daher auch die alten localStorage-Keys wie heatbox_state). Lief unter config.js nie
+// aktiv, aber falls config.js je nicht laedt (Netzwerkfehler, kaputter Cache-Eintrag), haette die
+// App lautlos gegen einen falschen/toten Server geredet statt sichtbar zu scheitern.
+const API_URL = window.HiMusicConfig?.apiBaseUrl || 'https://himusic-api.tyron-app.workers.dev';
 const API_KEY = localStorage.getItem('himusic_api_key') || '';
 
 // Ersetzt fetch() 1:1 an allen Stellen, die UNSEREN Worker (himusic-api) aufrufen (Aufrufe an
@@ -14,6 +18,13 @@ function _apiFetch(url, options = {}) {
             if (response.status === 401) {
                 localStorage.removeItem('himusic_auth');
                 localStorage.removeItem('himusic_api_key');
+                // Live per Browsertest verifiziert (2026-07-22): OHNE diese Zeile wirft eine
+                // einzige 401-Antwort - z.B. mitten in einem 5-fach-parallelen Datei-Upload -
+                // die komplette Seite kommentarlos zurueck zum Login. Der Nutzer sah dabei nichts:
+                // kein Fehler, keine Erklaerung, der laufende Import war einfach weg. login.html
+                // liest dieses Flag beim Laden aus und zeigt die Ursache an, statt stumm auf dem
+                // leeren Login-Formular zu landen.
+                try { sessionStorage.setItem('himusic_logout_reason', `Sitzung abgelaufen (Server antwortete mit 401 auf ${url.replace(API_URL, '')})`); } catch (e) {}
                 window.location.replace('login.html');
             }
             return response;
@@ -3300,8 +3311,13 @@ if (oldFileInput) {
 
         const uploadLabel = document.querySelector('label[for="native-file-upload"]');
         const syncStatusDetail = document.getElementById('sync-status-detail');
+        // songs-import-status lebt AUF der Songs-Seite (wo btn-add-songs liegt) - sync-status-detail
+        // liegt in der Settings-Seite und war deshalb unsichtbar, solange man beim Import auf der
+        // Songs-Seite blieb. Beide werden befüllt, aber diese hier ist die, die man tatsächlich sieht.
+        const songsImportStatus = document.getElementById('songs-import-status');
         const setStatus = (msg, color = '#fff') => {
             if (syncStatusDetail) { syncStatusDetail.style.display = 'block'; syncStatusDetail.style.color = color; syncStatusDetail.innerText = msg; }
+            if (songsImportStatus) { songsImportStatus.style.display = 'block'; songsImportStatus.style.color = color; songsImportStatus.innerText = msg; }
         };
 
         if (uploadLabel) uploadLabel.style.opacity = '0.5';

@@ -27,6 +27,7 @@
         <input type="password" id="password" placeholder="Passwort">
         <button id="login-btn">Entsperren</button>
         <p id="error-msg" style="color: #ff3b30; font-size: 14px; display: none;">Falsches Passwort!</p>
+        <p id="logout-reason-msg" style="color: #ff9f0a; font-size: 13px; display: none;"></p>
     </div>
 
     <script src="config.js"></script>
@@ -37,6 +38,19 @@
         if (localStorage.getItem('himusic_auth') === 'true' && localStorage.getItem('himusic_api_key')) {
             window.location.replace("index.html");
         }
+
+        // Zeigt an, WARUM man hier gelandet ist, falls _apiFetch (app2.js) wegen einer 401-Antwort
+        // hierher zurückgeschickt hat - live per Browsertest verifiziert: ohne das landete man
+        // kommentarlos auf dem leeren Login-Formular, ohne zu wissen, dass gerade z.B. ein
+        // laufender Import mittendrin abgebrochen wurde. Kein _esc() nötig - der Text kommt aus
+        // eigenem Code (app2.js), nicht von einer externen/nutzergesteuerten Quelle.
+        (function () {
+            const reason = sessionStorage.getItem('himusic_logout_reason');
+            if (!reason) return;
+            sessionStorage.removeItem('himusic_logout_reason');
+            const el = document.getElementById('logout-reason-msg');
+            if (el) { el.textContent = '⚠️ Abgemeldet: ' + reason; el.style.display = 'block'; }
+        })();
 
         const loginBtn = document.getElementById('login-btn');
         const errorMsg = document.getElementById('error-msg');

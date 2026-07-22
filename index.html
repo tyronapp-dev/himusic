@@ -125,7 +125,13 @@
                 <div class="search-container"><input type="text" id="songs-search-input" class="search-input" placeholder="Song suchen"></div>
                 <div class="action-button-container">
                     <button id="btn-add-songs" class="secondary-btn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 6px; margin-top: -2px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg> Musik importieren</button>
-<input type="file" id="native-file-upload" accept=".mp3, .wav, .m4a, .aac, .mp4, audio/*, video/mp4" multiple style="display: none;">                </div>
+<input type="file" id="native-file-upload" accept=".mp3, .wav, .m4a, .aac, .mp4, audio/*, video/mp4" multiple style="display: none;">
+                    <!-- Eigenes, auf DIESER Seite sichtbares Status-Element. #sync-status-detail (Settings-Seite)
+                         wurde weiterhin mitbefüllt, war aber unsichtbar, solange man auf der Songs-Seite blieb -
+                         wo der Import-Button liegt und wo man während des Imports auch bleibt. Sah dadurch nach
+                         "nichts passiert" aus, obwohl im Hintergrund tatsächlich hochgeladen wurde. -->
+                    <p id="songs-import-status" style="font-size: 13px; color: #32d74b; margin: 8px 0 0; display: none;"></p>
+                </div>
                 <div id="songs-list-container" class="song-container list-view"></div>
             </div>
         </main>
