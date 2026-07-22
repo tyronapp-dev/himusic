@@ -2943,29 +2943,76 @@ async function createNewPlaylistProcess() {
         progressBarEl.style.width = '40%';
         statusEl.innerText = `${all.length} Songs geladen. Suche Duplikate...`;
 
-const groups = new Map();
+// Zwei unabhängige Erkennungs-Signale, deren Treffer per Union-Find zu Gruppen verschmolzen
+        // werden (ein Song kann über beide Signale gefunden werden, landet aber nur in einer Gruppe):
+        //  1) exakt gleiche Bytegröße + Titel - fängt eine buchstäblich identische Datei zweimal ab.
+        //  2) Titel + Künstler + fast gleiche Länge (±ein paar Sekunden) - fängt denselben Song aus
+        //     zwei verschiedenen Quellen ab (anderes Encoding/Bitrate -> andere Bytegröße, Signal 1
+        //     verpasst das - der gemeldete Bug: "Could it be" von Jaheim zweimal importiert, nie
+        //     exakt dieselbe Dateigröße, wurde nie als Duplikat erkannt). OHNE die Längen-Vorgabe
+        //     wäre Signal 2 reines Titel-Dedupe - genau DAS hat früher echte, unterschiedliche Songs
+        //     gelöscht (Hintergrund-Sync vergibt denselben Titel wie "Love" an mehrere verschiedene
+        //     Songs, siehe Gedächtnis/ADRs) - zwei verschiedene Songs teilen sich Titel UND Künstler
+        //     UND Länge auf ein paar Sekunden praktisch nie zufällig. Songs ohne echten Künstler
+        //     (Platzhalter "Unbekannt"/"Unbekannter Künstler", noch nicht synchronisiert) nehmen an
+        //     Signal 2 deshalb bewusst nicht teil - dieselbe /^unbekannt/i-Regex wie in _cleanSearchTerm.
+        // Längen-Vergleich läuft paarweise mit Toleranz (nicht per festem Zeit-"Bucket"): ein
+        // Bucket-Raster hat harte Kanten, an denen zwei Songs, die nur 1-2s auseinanderliegen, in
+        // verschiedene Buckets fallen und trotzdem verpasst würden (per Test aufgedeckt).
+        const DUP_DURATION_TOLERANCE_SEC = 3;
+        const parent = new Map();
+        all.forEach(song => parent.set(song.id, song.id));
+        function _find(id) { while (parent.get(id) !== id) { parent.set(id, parent.get(parent.get(id))); id = parent.get(id); } return id; }
+        function _union(a, b) { const ra = _find(a), rb = _find(b); if (ra !== rb) parent.set(ra, rb); }
+
+        const sizeKeyMap = new Map();
+        const metaCandidates = new Map(); // titel+künstler -> Kandidaten, Längen-Abgleich folgt paarweise
         all.forEach(song => {
             const cleanTitle = (song.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-            const cleanArtist = (song.artist || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-            
-            let k;
-            if (song.file_size && song.file_size > 0 && cleanTitle.length > 0) {
-                // Ein echtes Duplikat hat exakt die gleiche Bytegröße UND denselben Titel
-                k = `dup_${song.file_size}_${cleanTitle}`;
-            } else if (cleanArtist !== '' && cleanArtist !== 'unbekannterknstler') {
-                // Fallback: Gleicher Titel & Künstler
-                k = `meta_${cleanTitle}_${cleanArtist}`;
-            } else {
-                // Einzigartig -> nicht löschen
-                k = `unique_${song.id}`;
-            }
+            const rawArtist = (song.artist || '').trim();
+            const isUnknownArtist = !rawArtist || /^unbekannt/i.test(rawArtist);
+            if (cleanTitle.length === 0) return;
 
-            if (!groups.has(k)) groups.set(k, []);
-            groups.get(k).push(song);
+            if (song.file_size && song.file_size > 0) {
+                const k = `dup_${song.file_size}_${cleanTitle}`;
+                if (sizeKeyMap.has(k)) _union(song.id, sizeKeyMap.get(k)); else sizeKeyMap.set(k, song.id);
+            }
+            // Unter 60s bewusst raus: kurze Album-Interludes/Skits/Intros vom selben Künstler tragen
+            // oft denselben generischen Titel ("Interlude"/"Skit") und liegen von Natur aus alle nah
+            // beieinander in der Länge - genau der Fall, in dem Signal 2 sonst ECHTE, unterschiedliche
+            // Tracks fälschlich zusammenlegen könnte (per Security-Review aufgedeckt).
+            if (!isUnknownArtist && song.duration >= 60) {
+                const cleanArtist = rawArtist.toLowerCase().replace(/[^a-z0-9]/g, '');
+                const k = `${cleanTitle}_${cleanArtist}`;
+                if (!metaCandidates.has(k)) metaCandidates.set(k, []);
+                metaCandidates.get(k).push(song);
+            }
+        });
+        // Kandidatenpools sind klein (eine Handvoll Songs mit exakt gleichem Titel+Künstler), daher
+        // ist der paarweise Vergleich hier unproblematisch. Hinweis (bekannter, akzeptierter
+        // Trade-off): bei einer Kette aus >2 Kandidaten kann die Gesamtspanne der Gruppe die
+        // 3s-Toleranz überschreiten (A~B, B~C beide ≤3s, A~C dann evtl. >3s) - Standard-Verhalten
+        // von Ketten-Clustering, kein Zufalls-Fehler. Die Vorschau unten zeigt die Längen-Spanne
+        // jeder Gruppe an, damit sowas vor dem Löschen auffällt statt blind zu passieren.
+        metaCandidates.forEach(candidates => {
+            for (let i = 0; i < candidates.length; i++) {
+                for (let j = i + 1; j < candidates.length; j++) {
+                    if (Math.abs(candidates[i].duration - candidates[j].duration) <= DUP_DURATION_TOLERANCE_SEC) {
+                        _union(candidates[i].id, candidates[j].id);
+                    }
+                }
+            }
+        });
+
+        const groupsById = new Map();
+        all.forEach(song => {
+            const root = _find(song.id);
+            if (!groupsById.has(root)) groupsById.set(root, []);
+            groupsById.get(root).push(song);
         });
 
         const dupGroups = [];
-        groups.forEach(arr => { if (arr.length > 1) dupGroups.push(arr); });
+        groupsById.forEach(arr => { if (arr.length > 1) dupGroups.push(arr); });
 
         progressBarEl.style.width = '80%';
 
@@ -2994,6 +3041,10 @@ const groups = new Map();
         deleteAllBtn.style.display = 'flex';
         deleteAllBtn.innerText = `${totalDups} Duplikate löschen`;
 
+        // mm:ss-Format, damit die Längen-Spanne in der Vorschau lesbar ist (siehe unten) - ein
+        // Fehl-Merge (z.B. Kette hat sich über die eigentliche Toleranz hinausgezogen) fällt hier
+        // vor dem Löschen auf, statt blind zu passieren.
+        const fmtDur = (s) => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
         const frag = document.createDocumentFragment();
         dupGroups.slice(0, 60).forEach(group => {
             const card = document.createElement('div');
@@ -3001,12 +3052,15 @@ const groups = new Map();
             const keep = group.find(s => !toDeleteIds.has(s.id));
             const dels = group.filter(s => toDeleteIds.has(s.id));
             const bg = keep?.cover_data && keep.cover_data.length > 10 ? `url('${keep.cover_data}')` : 'var(--accent)';
+            const durs = group.map(s => s.duration || 0).filter(d => d > 0);
+            const minD = durs.length ? Math.min(...durs) : 0, maxD = durs.length ? Math.max(...durs) : 0;
+            const durLabel = durs.length ? (minD === maxD ? fmtDur(minD) : `${fmtDur(minD)}–${fmtDur(maxD)}`) : '';
             card.innerHTML = `
                 <div style="display:flex;align-items:center;gap:10px;">
                     <div style="width:38px;height:38px;border-radius:6px;flex-shrink:0;background:${bg};background-size:cover;"></div>
                     <div style="flex:1;min-width:0;">
                         <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(keep?.title||'?')}</div>
-                        <div style="font-size:11px;color:var(--text-secondary);">${_esc(keep?.artist||'?')} · ${group.length}×</div>
+                        <div style="font-size:11px;color:var(--text-secondary);">${_esc(keep?.artist||'?')} · ${group.length}×${durLabel ? ' · ' + _esc(durLabel) : ''}</div>
                     </div>
                     <div style="font-size:11px;color:#ff3b30;font-weight:600;">${dels.length} weg</div>
                 </div>`;
