@@ -3561,29 +3561,46 @@ let _fileReviewPending = null;
 
 function _renderFileImportReview(allFiles) {
     const manifest = _loadImportedFilesManifest();
-    let freshCount = 0;
+    // Zweites Signal: Dateigröße gegen die schon geladene Bibliothek (window.globalSongsData) -
+    // fängt den gemeldeten Fall ab, dass eine Datei unter neuem Namen (anderer Export/Download-Weg,
+    // z.B. erneut aus einer anderen App exportiert) erneut ausgewählt wird, obwohl der INHALT schon
+    // in der Bibliothek steckt. Signal 1 (Merkliste oben) kennt nur exakt diesen Dateinamen von
+    // DIESEM Gerät - nicht "ist der Inhalt schon irgendwo in meiner Bibliothek". Reiner Größen-
+    // vergleich, kein Hash (kostenlos, Daten sind eh schon geladen) - schwächer als Signal 1 (zwei
+    // verschiedene Songs können zufällig dieselbe Bytegröße haben), deshalb eigene, vorsichtigere
+    // Kennzeichnung statt "sicher schon da".
+    const librarySizes = new Set((window.globalSongsData || []).map(s => s.file_size).filter(sz => sz && sz > 0));
+
+    let freshCount = 0, manifestKnownCount = 0, librarySuspectCount = 0;
     const fresh = [];
     allFiles.forEach(file => {
-        if (manifest.has(_fileManifestKey(file.name, file.size))) return;
+        if (manifest.has(_fileManifestKey(file.name, file.size))) { manifestKnownCount++; return; }
+        if (file.size > 0 && librarySizes.has(file.size)) { librarySuspectCount++; return; }
         freshCount++;
         fresh.push({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() });
     });
     _fileReviewPending = fresh;
 
-    const knownCount = allFiles.length - freshCount;
     const summaryEl = document.getElementById('fir-summary');
     const listEl = document.getElementById('fir-list');
     const confirmBtn = document.getElementById('fir-confirm');
-    if (summaryEl) summaryEl.innerText = `${freshCount} neu${knownCount > 0 ? ` · ${knownCount} bereits importiert (werden übersprungen)` : ''}`;
+    let summaryText = `${freshCount} neu`;
+    if (manifestKnownCount > 0) summaryText += ` · ${manifestKnownCount} bereits importiert`;
+    if (librarySuspectCount > 0) summaryText += ` · ${librarySuspectCount} evtl. schon in Bibliothek (gleiche Größe)`;
+    if (summaryEl) summaryEl.innerText = summaryText;
     if (confirmBtn) { confirmBtn.innerText = freshCount > 0 ? `${freshCount} importieren` : 'Nichts Neues zu importieren'; confirmBtn.disabled = freshCount === 0; confirmBtn.style.opacity = freshCount === 0 ? '0.5' : '1'; }
 
     if (listEl) {
         const shown = allFiles.slice(0, FILE_REVIEW_DISPLAY_CAP);
         listEl.innerHTML = shown.map(file => {
-            const isKnown = manifest.has(_fileManifestKey(file.name, file.size));
-            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06);${isKnown ? 'opacity:0.45;' : ''}">
-                <span style="flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${isKnown ? 'text-decoration:line-through;' : ''}">${_esc(file.name)}</span>
-                <span style="font-size:11px;flex-shrink:0;color:${isKnown ? 'var(--text-secondary)' : '#32d74b'};">${isKnown ? '✓ schon da' : 'neu'}</span>
+            const isManifestKnown = manifest.has(_fileManifestKey(file.name, file.size));
+            const isLibrarySuspect = !isManifestKnown && file.size > 0 && librarySizes.has(file.size);
+            const isSkipped = isManifestKnown || isLibrarySuspect;
+            const label = isManifestKnown ? '✓ schon da' : (isLibrarySuspect ? '⚠️ evtl. vorhanden' : 'neu');
+            const color = isManifestKnown ? 'var(--text-secondary)' : (isLibrarySuspect ? '#ff9f0a' : '#32d74b');
+            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06);${isSkipped ? 'opacity:0.45;' : ''}">
+                <span style="flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${isSkipped ? 'text-decoration:line-through;' : ''}">${_esc(file.name)}</span>
+                <span style="font-size:11px;flex-shrink:0;color:${color};">${label}</span>
             </div>`;
         }).join('');
         if (allFiles.length > FILE_REVIEW_DISPLAY_CAP) {
