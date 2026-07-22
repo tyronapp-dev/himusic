@@ -3692,6 +3692,29 @@ const YT_LIVENESS_WINDOW_MS = 30000; // war 100000. Ein laufender Watcher meldet
 const YT_STALL_TIMEOUT_MS = 5 * 60 * 1000; // ein Eintrag hängt >5 Min in "processing" -> Watcher vermutlich abgestürzt
 const YT_TERMINAL_PRUNE_MS = 10 * 60 * 1000; // fertige Einträge nach 10 Min aus der Ansicht entfernen
 
+// Dauerhafte URL-Historie (anders als _ytQueueState oben: DIE wird 10 Min nach Fertigstellung
+// geleert, siehe YT_TERMINAL_PRUNE_MS). Ohne eigenes Gedächtnis lief bei jedem erneut eingefügten
+// Link (z.B. überlappende Playlists, versehentlich zweimal eingefügte Liste) der komplette teure
+// Weg durch: yt-dlp-Download + R2-Upload + POST /songs, und ERST der Server hätte es am Ende per
+// Inhalts-Hash als Duplikat verworfen (siehe Worker-Dedup-Architektur) - die ganze Bandbreite/Zeit
+// war da schon verbrannt. Jetzt: URL-Vergleich VOR dem Einreihen, in Millisekunden, kein Download
+// nötig. Rein lokal (localStorage) - deckt keine Duplikate von einem ANDEREN Gerät ab, dafür
+// bräuchte es eine Server-Spalte (Worker-Quelltext liegt nicht im Repo, siehe CLAUDE.md).
+const YT_IMPORTED_URLS_KEY = 'himusic_yt_imported_urls';
+const YT_IMPORTED_URLS_MAX = 20000; // Deckel gegen unbegrenztes Wachstum, LRU-artig (ältestes zuerst raus)
+function _loadImportedYtUrls() { try { return new Set(JSON.parse(localStorage.getItem(YT_IMPORTED_URLS_KEY) || '[]')); } catch(e) { return new Set(); } }
+function _rememberImportedYtUrl(url) {
+    if (!url) return;
+    try {
+        const set = _loadImportedYtUrls();
+        if (set.has(url)) return;
+        set.add(url);
+        let arr = Array.from(set);
+        if (arr.length > YT_IMPORTED_URLS_MAX) arr = arr.slice(arr.length - YT_IMPORTED_URLS_MAX);
+        localStorage.setItem(YT_IMPORTED_URLS_KEY, JSON.stringify(arr));
+    } catch(e) {}
+}
+
 let _ytQueueState = _loadYtQueue();
 let _ytPollTimer = null;
 let _ytLastLivenessAt = 0;   // wann zuletzt IRGENDEIN Eintrag (nicht nur eigene) als "processing" beobachtet wurde
@@ -3874,6 +3897,7 @@ async function _resolveVanishedYtItem(item) {
                 _cacheFreshYtSongs(fresh);
                 item.clientState = 'done';
                 item.updatedAt = Date.now();
+                _rememberImportedYtUrl(item.url);
                 _saveAndRenderYtQueue();
                 return;
             }
@@ -3917,7 +3941,7 @@ async function _pollYtQueueTick() {
             if (server.status === 'processing' && item.clientState !== 'processing') {
                 item.clientState = 'processing'; item.updatedAt = Date.now();
             } else if (server.status === 'done') {
-                item.clientState = 'done'; item.updatedAt = Date.now(); sawNewlyDone = true;
+                item.clientState = 'done'; item.updatedAt = Date.now(); sawNewlyDone = true; _rememberImportedYtUrl(item.url);
             } else if (server.status === 'failed') {
                 item.clientState = 'failed'; item.errorMessage = server.error_message || 'Unbekannter Fehler'; item.updatedAt = Date.now();
             }
@@ -3970,6 +3994,7 @@ async function _dispatchYtFallback(item) {
         if (fresh && fresh.length > 0) {
             _cacheFreshYtSongs(fresh);
             item.clientState = 'fallback_done';
+            _rememberImportedYtUrl(item.url);
         } else {
             item.clientState = 'fallback_failed';
             item.errorMessage = 'Nicht angekommen';
@@ -4041,15 +4066,27 @@ async function _enqueueOneLink(url, meta) {
 }
 
 async function _enqueueYoutubeLinks(urls, meta) {
+    // Schnell-Check VOR dem Einreihen: URLs, die laut lokaler Historie schon fertig importiert
+    // wurden, werden sofort übersprungen (Set-Lookup, keine Millisekunden) statt erst den vollen
+    // Weg (Download + Upload + Server-Dedupe) zu durchlaufen und ganz am Ende als Duplikat zu
+    // scheitern. Siehe _rememberImportedYtUrl weiter oben.
+    const importedUrls = _loadImportedYtUrls();
+    const toEnqueue = urls.filter(u => !importedUrls.has(u));
+    const skipped = urls.length - toEnqueue.length;
+    if (skipped > 0 && typeof window._showToast === 'function') {
+        window._showToast(`⏭️ ${skipped} bereits importierte${skipped === 1 ? 'r' : ''} Link${skipped === 1 ? '' : 's'} übersprungen`, 3500);
+    }
+    if (toEnqueue.length === 0) return;
+
     let idx = 0;
     async function lane() {
-        while (idx < urls.length) {
-            const url = urls[idx++];
+        while (idx < toEnqueue.length) {
+            const url = toEnqueue[idx++];
             await _enqueueOneLink(url, meta);
             await new Promise(r => setTimeout(r, 50));
         }
     }
-    const lanes = Array.from({ length: Math.min(YT_ENQUEUE_CONCURRENCY, urls.length) }, () => lane());
+    const lanes = Array.from({ length: Math.min(YT_ENQUEUE_CONCURRENCY, toEnqueue.length) }, () => lane());
     await Promise.all(lanes);
 }
 
@@ -4187,6 +4224,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const btnClearYtQueue = document.getElementById('btn-clear-yt-queue');
     if (btnClearYtQueue) btnClearYtQueue.addEventListener('click', () => { _clearYtQueue(); window._showToast('Warteschlange geleert'); });
+    const btnResetYtImportHistory = document.getElementById('btn-reset-yt-import-history');
+    if (btnResetYtImportHistory) btnResetYtImportHistory.addEventListener('click', () => {
+        if (!confirm('Import-Historie zurücksetzen? Bereits importierte Links werden beim nächsten Einfügen nicht mehr automatisch übersprungen.')) return;
+        localStorage.removeItem(YT_IMPORTED_URLS_KEY);
+        window._showToast('Import-Historie zurückgesetzt');
+    });
     const btnRetryFailedYt = document.getElementById('btn-retry-failed-yt');
     if (btnRetryFailedYt) btnRetryFailedYt.addEventListener('click', () => { _retryAllFailedYt(); window._showToast('Wiederholung gestartet'); });
 
