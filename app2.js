@@ -1350,6 +1350,17 @@ let _bgCacheActive = false;
         if (typeof window.updateAppStats === 'function') window.updateAppStats();
     }
     window.fetchSongsFromDatabase = fetchSongsFromDatabase;
+    // Sofort-Start: gecachten Snapshot direkt zeigen statt auf DB-Antwort zu warten (stale-while-
+    // revalidate). Server-Fetch läuft trotzdem sofort danach im Hintergrund weiter und überschreibt
+    // die Liste, sobald er da ist - fängt neue/gelöschte Songs seit dem letzten Öffnen ein.
+    const _startupSnapshot = loadSongsSnapshot();
+    if (_startupSnapshot && _startupSnapshot.length > 0) {
+        _startupSnapshot.forEach(s => { s.vibes = _parseVibes(s.vibes); });
+        window.globalSongsData = _startupSnapshot;
+        window._songIndex = new Map(_startupSnapshot.map(s => [s.id, s]));
+        rerenderSongsList(_startupSnapshot);
+        if (typeof window.updateAppStats === 'function') window.updateAppStats();
+    }
     fetchSongsFromDatabase();
 
     function updateSongDOM(songDiv, song, playlistSongId = null) {
