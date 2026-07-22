@@ -1604,7 +1604,7 @@ let _bgCacheActive = false;
                 stationSongs = Array.from(new Set([...stationSongs, ...randomFill]));
             }
             stationSongs = stationSongs.sort(() => 0.5 - Math.random());
-            const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data, songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000) };
+            const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data, songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000), pinned: false };
             const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]');
             savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
             if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
@@ -2327,6 +2327,22 @@ async function createNewPlaylistProcess() {
         } catch (error) { alert('Fehler beim Laden: ' + error.message); }
     });
 
+    // Sender + Vibe-Mixe teilen sich dasselbe Kartenformat (.station-card) und dieselbe
+    // 24h-Auto-Löschung; diese Helfer kapseln nur den Speicherort (heutzutage zwei
+    // localStorage-Keys), damit das Longpress-Kontextmenü beide Typen gleich behandeln kann.
+    function _stationStorageKey(type) { return type === 'mix' ? 'heatbox_vibe_mixes' : 'heatbox_stations'; }
+    function _getStationLikeList(type) { try { return JSON.parse(localStorage.getItem(_stationStorageKey(type)) || '[]'); } catch(e) { return []; } }
+    function _saveStationLikeList(type, list) { localStorage.setItem(_stationStorageKey(type), JSON.stringify(list)); }
+    // Vibe-Mixe speichern nur songIds (siehe btn-create-vibe-mix), Sender die vollen Song-Objekte.
+    function _getStationLikeSongs(item) { return item.songIds ? item.songIds.map(id => window._songIndex?.get(id)).filter(Boolean) : (item.songs || []).filter(Boolean); }
+    function _openStationContextMenu(type, id) {
+        window.currentContextStationType = type; window.currentContextStationId = id;
+        const item = _getStationLikeList(type).find(x => x.id === id);
+        const pinLabel = document.getElementById('ctx-st-pin-label');
+        if (pinLabel) pinLabel.innerText = (item && item.pinned) ? 'Nicht mehr anpinnen' : 'Anpinnen';
+        document.getElementById('station-context-overlay')?.classList.add('active');
+    }
+
     window.renderHomeSections = function() {
         const recentId = localStorage.getItem('heatbox_last_playlist'); const recentContainer = document.getElementById('home-recent-playlist');
         if(recentContainer && window.globalPlaylistsData) {
@@ -2342,16 +2358,18 @@ async function createNewPlaylistProcess() {
 
         const mixContainer = document.getElementById('home-vibe-mixes');
         if(mixContainer) {
-            let mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); const now = Date.now(); mixes = mixes.filter(m => m.expires > now); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(mixes));
-            if(mixes.length === 0) { mixContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Keine aktiven Vibe Mixe.</div>'; } 
+            // Angepinnte Mixe überleben die 24h-Auto-Löschung, alle anderen fliegen wie bisher raus.
+            let mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); const now = Date.now(); mixes = mixes.filter(m => m.pinned || m.expires > now); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(mixes));
+            if(mixes.length === 0) { mixContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Keine aktiven Vibe Mixe.</div>'; }
             else {
                 mixContainer.innerHTML = '';
                 mixes.forEach(mix => {
                     const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = mix.id; const bgImage = mix.cover_data && mix.cover_data.length > 10 ? `url('${mix.cover_data}')` : '';
-                    card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(mix.name)}</div>`;
+                    const pinBadge = mix.pinned ? '<div class="pin-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg></div>' : '';
+                    card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};">${pinBadge}<button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(mix.name)}</div>`;
                     const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => { const ids = mix.songIds || (mix.songs || []).map(s => s.id); const songs = ids.map(id => window._songIndex?.get(id)).filter(Boolean); const shuffled = [...songs].sort(() => Math.random() - 0.5); window.togglePlaylistPlayback(e, mix.id, shuffled); });
                     card.addEventListener('click', () => window.openPlaylistDetails(mix.id, mix.name));
-                    if (typeof addLongPressListener === 'function') { addLongPressListener(card, (e) => { e.preventDefault(); e.stopPropagation(); if (confirm(`"${mix.name}" löschen?`)) { let saved = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); saved = saved.filter(m => m.id !== mix.id); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(saved)); window.renderHomeSections(); } }); }
+                    if (typeof addLongPressListener === 'function') { addLongPressListener(card, (e) => { e.preventDefault(); e.stopPropagation(); _openStationContextMenu('mix', mix.id); }); }
                     mixContainer.appendChild(card);
                 });
             }
@@ -2359,15 +2377,18 @@ async function createNewPlaylistProcess() {
 
         const stationsContainer = document.getElementById('stations-container');
         if(stationsContainer) {
-            let stations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]'); const now = Date.now(); stations = stations.filter(s => s.expires > now); localStorage.setItem('heatbox_stations', JSON.stringify(stations));
-            if(stations.length === 0) { stationsContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Keine Sender vorhanden. Erstelle einen aus deinen Songs!</div>'; } 
+            // Angepinnte Sender überleben die 24h-Auto-Löschung, alle anderen fliegen wie bisher raus.
+            let stations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]'); const now = Date.now(); stations = stations.filter(s => s.pinned || s.expires > now); localStorage.setItem('heatbox_stations', JSON.stringify(stations));
+            if(stations.length === 0) { stationsContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Keine Sender vorhanden. Erstelle einen aus deinen Songs!</div>'; }
             else {
                 stationsContainer.innerHTML = '';
                 stations.forEach(station => {
                     const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = station.id; const bgImage = station.cover_data && station.cover_data.length > 10 ? `url('${station.cover_data}')` : '';
-                    card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(station.name)}</div>`;
+                    const pinBadge = station.pinned ? '<div class="pin-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg></div>' : '';
+                    card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};">${pinBadge}<button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(station.name)}</div>`;
                     const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => window.togglePlaylistPlayback(e, station.id, station.songs));
                     card.addEventListener('click', () => { window.currentPlayingPlaylistId = station.id; if (station.songs.length > 0) { const firstSong = station.songs[0]; window.playSong(firstSong.title, firstSong.artist, firstSong.cover_data, firstSong.file_url); playbackQueue = station.songs.slice(1); savePlayerState(); } });
+                    if (typeof addLongPressListener === 'function') { addLongPressListener(card, (e) => { e.preventDefault(); e.stopPropagation(); _openStationContextMenu('station', station.id); }); }
                     stationsContainer.appendChild(card);
                 });
             }
@@ -2430,11 +2451,34 @@ async function createNewPlaylistProcess() {
         if (matchedSongs.length === 0) return alert('Keine passenden Songs gefunden.');
 
         const mixName = 'Vibe Mix: ' + (isNoVibe ? 'Ohne Vibe' : selectedVibes.join(', ')); const shuffledIds = [...matchedSongs].sort(() => Math.random() - 0.5).map(s => s.id);
-        const newMix = { id: 'temp_' + Date.now(), name: mixName, cover_data: matchedSongs[0].cover_data || '', songIds: shuffledIds, expires: Date.now() + 86400000 };
+        const newMix = { id: 'temp_' + Date.now(), name: mixName, cover_data: matchedSongs[0].cover_data || '', songIds: shuffledIds, expires: Date.now() + 86400000, pinned: false };
         const mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); mixes.unshift(newMix); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(mixes));
         
         document.getElementById('vibe-mix-overlay')?.classList.remove('active'); window.renderHomeSections();
         const songCount = shuffledIds.length; _showToast(`🎵 Vibe Mix erstellt – ${songCount} ${songCount === 1 ? 'Lied' : 'Lieder'}`, 3000);
+    });
+
+    // Longpress-Kontextmenü für Sender- und Vibe-Mix-Karten (siehe _openStationContextMenu oben).
+    document.getElementById('ctx-st-play-next')?.addEventListener('click', () => {
+        document.getElementById('station-context-overlay')?.classList.remove('active');
+        const item = _getStationLikeList(window.currentContextStationType).find(x => x.id === window.currentContextStationId); if (!item) return;
+        const songs = _getStationLikeSongs(item); if (songs.length === 0) return;
+        playbackQueue.unshift(...songs); savePlayerState();
+        _showToast(`"${item.name}" spielt als nächstes.`);
+    });
+    document.getElementById('ctx-st-pin')?.addEventListener('click', () => {
+        document.getElementById('station-context-overlay')?.classList.remove('active');
+        const type = window.currentContextStationType; const list = _getStationLikeList(type);
+        const item = list.find(x => x.id === window.currentContextStationId); if (!item) return;
+        item.pinned = !item.pinned; _saveStationLikeList(type, list); window.renderHomeSections();
+        _showToast(item.pinned ? `📌 "${item.name}" angepinnt` : `"${item.name}" losgepinnt`);
+    });
+    document.getElementById('ctx-st-delete')?.addEventListener('click', () => {
+        document.getElementById('station-context-overlay')?.classList.remove('active');
+        const type = window.currentContextStationType; const list = _getStationLikeList(type);
+        const item = list.find(x => x.id === window.currentContextStationId); if (!item) return;
+        if (!confirm(`"${item.name}" löschen?`)) return;
+        _saveStationLikeList(type, list.filter(x => x.id !== item.id)); window.renderHomeSections();
     });
 
     const viewPlaylistDetails = document.getElementById('view-playlist-details');
@@ -2669,7 +2713,7 @@ async function createNewPlaylistProcess() {
         let stationSongs = window.globalSongsData.filter(s => { if (s.id === song.id) return true; const sVibes = s.vibes || []; const matchCount = sVibes.filter(v => sourceVibes.includes(v)).length; return matchCount >= 2; });
         if (stationSongs.length <= 1) { const randomFill = [...window.globalSongsData].sort(() => 0.5 - Math.random()).slice(0, 5); stationSongs = Array.from(new Set([...stationSongs, ...randomFill])); }
         stationSongs = stationSongs.sort(() => 0.5 - Math.random());
-        const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data, songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000) };
+        const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data, songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000), pinned: false };
         const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]'); savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
         if (typeof window.renderHomeSections === 'function') window.renderHomeSections(); _showToast(`Sender für "${song.title}" erstellt!`);
     });

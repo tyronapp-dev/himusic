@@ -594,6 +594,14 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 }
 .large-cover .no-vibes-dot { top: 10px; right: 10px; width: 16px; height: 16px; border-width: 3px; }
 
+/* ─── Pin-Markierung: angepinnte Sender/Vibe-Mixe überleben die 24h-Auto-Löschung ──────── */
+.pin-badge {
+    position: absolute; top: 6px; left: 6px; width: 22px; height: 22px;
+    border-radius: 50%; background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center; z-index: 5;
+    color: var(--accent); box-shadow: 0 2px 6px rgba(0,0,0,0.35); pointer-events: none;
+}
+
 /* ─── Song List & Grid ──────────────────────────────────────────────────────── */
 .song-container { margin-top: 16px; padding-bottom: 8px; }
 .list-view { display: flex; flex-direction: column; }
