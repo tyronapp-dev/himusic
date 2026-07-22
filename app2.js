@@ -1443,81 +1443,45 @@ let _bgCacheActive = false;
     const fileUploadInput = document.getElementById('native-file-upload');
     const jsmediatags = window.jsmediatags;
 
-const UPLOAD_CONFIG = { PARALLEL_UPLOADS: 4, MAX_RETRIES: 3, WORKER_URL: `${API_URL}/upload`, ITUNES_TIMEOUT: 4000 };    let _uploadQueue = []; let _uploadRunning = false; let _uploadStats = { total: 0, success: 0, failed: 0, skipped: 0 }; let _inFlightKeys = new Set();
-
-    async function _uploadSingleFile(file, retryCount = 0) {
-        try {
-            const fallbackName = file.name.replace(/\.[^/.]+$/, '');
-            let title = fallbackName; let artist = 'Unbekannter Künstler';
-            try {
-                const tags = await new Promise((resolve, reject) => { jsmediatags.read(file, { onSuccess: (t) => resolve(t.tags), onError: reject }); });
-                if (tags.title) title = tags.title.trim(); if (tags.artist) artist = tags.artist.trim();
-            } catch (e) { }
-const titleNorm = title.toLowerCase().trim();
-            const artistNorm = artist.toLowerCase().trim();
-
-            const isDup = window.globalSongsData.some(s => {
-                const sTitle = (s.title || '').toLowerCase().trim();
-                const sArtist = (s.artist || '').toLowerCase().trim();
-                // Datei ist nur ein Duplikat, wenn Bytegröße UND Titel exakt stimmen
-                return (s.file_size === file.size && sTitle === titleNorm) || 
-                       (sTitle === titleNorm && sArtist === artistNorm && sArtist !== 'unbekannter künstler' && s.file_size === file.size);
-            });
-
-            if (isDup) { _uploadStats.skipped++; return { success: false, skipped: true }; }
-            const safeFileName = `${Date.now()}_${Math.random().toString(36).substr(2, 5)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
-            const uploadResponse = await fetch(`${UPLOAD_CONFIG.WORKER_URL}/${safeFileName}`, { method: 'PUT', body: file, signal: AbortSignal.timeout(60000) });
-            if (!uploadResponse.ok) throw new Error(`HTTP ${uploadResponse.status}`);
-            const fileUrl = (await uploadResponse.json()).url;
-
-            const fileDuration = await getDuration(file).catch(() => 0);
-            let finalCoverUrl = await fetchCoverFromiTunes(title, artist);
-
-            const created = await apiCreateSong({ title, artist, cover_data: finalCoverUrl || '', file_url: fileUrl, vibes: [], file_size: file.size, duration: fileDuration || 0 });
-            if (created?.id) {
-                const newSong = { ...created, vibes: [] };
-                window.globalSongsData.push(newSong);
-                if (window._songIndex) window._songIndex.set(created.id, newSong);
-            }
-            _uploadStats.success++; return { success: true };
-        } catch (err) {
-            if (retryCount < UPLOAD_CONFIG.MAX_RETRIES) { await new Promise(resolve => setTimeout(resolve, 1000)); return _uploadSingleFile(file, retryCount + 1); }
-            _uploadStats.failed++; return { success: false, error: err.message };
-        }
-    }
-    
-    async function _processUploadQueue() {
-        if (_uploadRunning) return;
-        _uploadRunning = true; _uploadStats = { total: _uploadQueue.length, success: 0, failed: 0, skipped: 0 };
-        try {
-            while (_uploadQueue.length > 0) {
-                const batch = _uploadQueue.splice(0, UPLOAD_CONFIG.PARALLEL_UPLOADS);
-                const processed = _uploadStats.success + _uploadStats.failed + _uploadStats.skipped;
-                if (btnAddSongs) btnAddSongs.innerHTML = `⏳ ${processed}/${_uploadStats.total} | noch ${_uploadQueue.length}...`;
-                await Promise.all(batch.map(file => _uploadSingleFile(file)));
-            }
-            try { await fetchSongsFromDatabase(); } catch(e) {}
-            const summary = `✅ ${_uploadStats.success} importiert | ⏭️ ${_uploadStats.skipped} übersprungen | ❌ ${_uploadStats.failed} Fehler`;
-            if (typeof _showToast === 'function') _showToast(summary, 4000);
-        } catch(err) {
-            if (typeof _showToast === 'function') _showToast('❌ Import-Fehler – bitte erneut versuchen');
-        } finally {
-            _uploadRunning = false; _inFlightKeys.clear(); 
-            if (btnAddSongs) { btnAddSongs.innerHTML = 'Musik importieren'; btnAddSongs.disabled = false; }
-            if (fileUploadInput) fileUploadInput.value = '';
-        }
-    }
-
+    // ─── Datei-Import ────────────────────────────────────────────────────────
+    // WICHTIG: Hier stand frueher ein KOMPLETT ZWEITER Upload-Pfad (UPLOAD_CONFIG /
+    // _uploadSingleFile / _processUploadQueue) mit einem eigenen change-Listener auf DEMSELBEN
+    // Input. Der Handler weiter unten (~Z. 3260, "STAGING-PRINZIP") ersetzt den Input beim
+    // Skriptstart durch einen Klon und haengt SEINEN Listener an; initApp lief erst danach
+    // (DOMContentLoaded) und haengte seinen Listener an genau denselben Klon. Ergebnis: bei jedem
+    // Import liefen BEIDE Pfade gleichzeitig und luden jede Datei doppelt hoch - und der alte Pfad
+    // benutzte rohes fetch() OHNE X-Api-Key, bekam also 401 (live geprueft) und schickte den vollen
+    // Dateiinhalt danach noch 3x als Retry hinterher. Auf schwacher Leitung ging so der Grossteil
+    // der Bandbreite fuer fehlschlagende Doppel-Uploads drauf, waehrend die Anzeige minutenlang auf
+    // "0/27" stand. Der alte Pfad ist entfernt; hier wird nur noch der Dateidialog geoeffnet.
     if (btnAddSongs && fileUploadInput) {
         btnAddSongs.addEventListener('click', () => { fileUploadInput.value = ''; fileUploadInput.click(); });
-        fileUploadInput.addEventListener('change', async (e) => {
-            const files = Array.from(e.target.files || []);
-            if (!files.length) return;
-            _uploadQueue.push(...files);
-            btnAddSongs.disabled = true; btnAddSongs.innerHTML = `⏳ ${_uploadQueue.length} Songs in Queue...`;
-            if (!_uploadRunning) _processUploadQueue();
-        });
     }
+
+    // Haengt frisch importierte Songs SOFORT in die Liste ein, statt bis zum Ende des ganzen
+    // Stapels zu warten. Vorher wurde die Liste erst nach dem LETZTEN Upload einmal neu geladen -
+    // die Songs waren also laengst in der DB, aber erst nach einem App-Neustart zu sehen.
+    // Das Neuzeichnen ist gedrosselt (400ms), weil rerenderSongsList die komplette Liste neu
+    // aufbaut; pro einzelnem Song waere das bei grossen Bibliotheken teuer.
+    let _liveAddTimer = null;
+    window.addSongsLive = function(created) {
+        const list = Array.isArray(created) ? created : [created];
+        let added = 0;
+        window.globalSongsData = window.globalSongsData || [];
+        list.forEach(song => {
+            if (!song || song.id == null) return;
+            if (window._songIndex && window._songIndex.has(song.id)) return;
+            const newSong = { ...song, vibes: _parseVibes(song.vibes) };
+            window.globalSongsData.unshift(newSong); // GET /songs liefert id DESC - neueste zuerst
+            if (window._songIndex) window._songIndex.set(newSong.id, newSong);
+            added++;
+        });
+        if (!added || _liveAddTimer) return;
+        _liveAddTimer = setTimeout(() => {
+            _liveAddTimer = null;
+            rerenderSongsList(window.globalSongsData);
+        }, 400);
+    };
 
     document.getElementById('action-find-missing')?.addEventListener('click', () => { actionSheetOverlay.classList.remove('active'); setTimeout(() => document.getElementById('missing-songs-input')?.click(), 300); });
     document.getElementById('missing-songs-input')?.addEventListener('change', async (e) => {
@@ -3394,7 +3358,16 @@ if (oldFileInput) {
                 if (!songRes.ok) throw new Error('song create failed');
                 const result = await songRes.json().catch(() => ({}));
                 // Server-Tor hat entschieden: Datei war inhaltsgleich schon da → nicht doppelt gespeichert
-                if (result && result.duplicate) dupes++; else done++;
+                if (result && result.duplicate) {
+                    dupes++;
+                } else {
+                    done++;
+                    // Song sofort sichtbar machen, statt bis zum Ende des ganzen Stapels zu warten.
+                    // POST /songs gibt den angelegten Datensatz inkl. id zurueck, es braucht also
+                    // KEINEN zusaetzlichen /songs-Abruf - wichtig, weil genau der auf schwacher
+                    // Leitung mit den laufenden Uploads um die Bandbreite konkurrieren wuerde.
+                    if (window.addSongsLive) window.addSongsLive(result);
+                }
                 uploadedBytes += file.size;
             } catch(err) {
                 if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
