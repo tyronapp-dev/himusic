@@ -3633,7 +3633,10 @@ function _isYoutubeImportedUrl(fileUrl) {
 // überlebt und in Settings dauerhaft sichtbar bleibt - analog zum Freeze-Log weiter unten in
 // dieser Datei (renderFreezeLog/#freeze-log-list).
 const YT_QUEUE_KEY = 'himusic_yt_queue';
-const YT_ENQUEUE_CONCURRENCY = 3; // wie CONCURRENT im lokalen Watcher - schneller einreihen bringt nichts
+const YT_ENQUEUE_CONCURRENCY = 6; // war 3 ("wie CONCURRENT im Watcher"). Der Watcher kann aber nur Eintraege
+                                  // holen, die schon IN der Warteschlange stehen - stand das Einreihen selbst
+                                  // im Weg, liefen seine Bahnen anfangs leer. Jetzt liegt ein 18er-Stapel in
+                                  // unter einer Sekunde komplett bereit.
 const YT_QUEUE_POLL_MS = 3000; // Status-Poll gegen /youtube-queue (kleine Antwort) - war 6000. Halbiert die
                                // Zeit, bis ein fertiger Song bemerkt und auf der Seite angezeigt wird.
 const YT_FRESH_SAFETY_MS = 15000; // Sicherheitsnetz: falls der Watcher-PATCH "done" mal verloren geht, trotzdem
@@ -3999,7 +4002,7 @@ async function _enqueueYoutubeLinks(urls, meta) {
         while (idx < urls.length) {
             const url = urls[idx++];
             await _enqueueOneLink(url, meta);
-            await new Promise(r => setTimeout(r, 200));
+            await new Promise(r => setTimeout(r, 50));
         }
     }
     const lanes = Array.from({ length: Math.min(YT_ENQUEUE_CONCURRENCY, urls.length) }, () => lane());

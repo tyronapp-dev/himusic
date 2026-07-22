@@ -44,7 +44,11 @@ const IS_WINDOWS = process.platform === 'win32';
 const YTDLP_PATH = IS_WINDOWS ? path.join(__dirname, 'yt-dlp.exe') : 'yt-dlp';
 const FFMPEG_PATH = IS_WINDOWS ? path.join(__dirname, 'ffmpeg.exe') : 'ffmpeg';
 const POLL_INTERVAL_MS = 2000;
-const CONCURRENT = IS_WINDOWS ? 3 : 2; // Server-VM hat oft weniger RAM/CPU als ein PC
+// Seit der Umstellung auf das native m4a-Format (siehe downloadAudio) faellt der CPU-teure
+// opus->AAC-Transcode weg - die Arbeit ist jetzt fast nur noch Netzwerk-I/O, entsprechend
+// vertraegt der PC mehr parallele Songs. Ueber .env (HIMUSIC_CONCURRENT=8) anpassbar, falls
+// die eigene Leitung mehr hergibt oder YouTube bei zu vielen Parallelen zickt.
+const CONCURRENT = parseInt(process.env.HIMUSIC_CONCURRENT, 10) || (IS_WINDOWS ? 5 : 2); // Server-VM hat oft weniger RAM/CPU als ein PC
 
 function run(cmd, args, timeoutMs = 300000) {
     return new Promise((resolve, reject) => {
@@ -72,7 +76,21 @@ async function downloadAudio(url, outputDir) {
     for (let attempt = 1; attempt <= 2; attempt++) {
         try {
             const { stdout } = await run(YTDLP_PATH, [
-                '--no-playlist', '--extract-audio', '--audio-format', 'm4a', '--audio-quality', '0',
+                '--no-playlist',
+                // WICHTIG fuer die Geschwindigkeit: ohne "-f" waehlt yt-dlp "bestaudio" = meist
+                // opus/webm (Format 251). "--audio-format m4a" muss das dann per ffmpeg komplett
+                // neu enkodieren (opus->AAC) - ein CPU-teurer Transcode pro Song, dessen Kosten mit
+                // der Songlaenge wachsen. Format 140 ist bereits natives AAC im m4a-Container, yt-dlp
+                // meldet dann "Not converting audio; file is already in target format m4a" und
+                // ueberspringt ffmpeg ganz. Gemessen am selben Testvideo: 7,5s -> 4,2s, und Format 140
+                // hat sogar die hoehere Bitrate (130 statt 106 kbit/s). Der "/bestaudio"-Zweig bleibt
+                // als Rueckfall, falls ein Video ausnahmsweise kein m4a anbietet (dann wird konvertiert,
+                // deshalb steht --audio-quality weiter unten drin).
+                '-f', 'bestaudio[ext=m4a]/bestaudio',
+                // Laedt die DASH-Fragmente parallel statt eins nach dem anderen - reine Netzwerk-
+                // Beschleunigung, ohne mehr Songs gleichzeitig anzufassen.
+                '--concurrent-fragments', '4',
+                '--extract-audio', '--audio-format', 'm4a', '--audio-quality', '0',
                 '--ffmpeg-location', FFMPEG_PATH,
                 '--output', outputTemplate,
                 '--no-simulate', '--print', '%(title)s\t%(duration)s',
@@ -159,6 +177,13 @@ const IDLE_EXIT_MS = 90000; // 90s ohne irgendetwas zu tun -> vermutlich fertig,
 let lastActivityAt = Date.now();
 
 let active = 0;
+// Welche Eintraege dieser Watcher gerade selbst bearbeitet. Notwendig, weil der Server-Status erst
+// dann von "pending" weggeht, wenn das patchStatus(...,'processing') angekommen ist - das ist ein
+// eigener Netzwerk-Aufruf, dessen Fehler bewusst verschluckt werden (best effort). Ohne diese lokale
+// Merkliste wuerde der naechste Poll (alle 2s) denselben Eintrag nochmal als "pending" sehen und ein
+// ZWEITES Mal herunterladen; schlaegt der PATCH ganz fehl, sogar immer wieder. Das kostete genau die
+// Bandbreite/CPU, die den Import langsam macht.
+const inFlight = new Set();
 async function poll() {
     try {
         const res = await fetch(`${API_URL}/youtube-queue`, { headers: API_HEADERS });
@@ -166,12 +191,13 @@ async function poll() {
         const items = await res.json();
         // Nur wirklich wartende Eintraege beanspruchen - "!item.status" faengt alte Zeilen ab,
         // die vor der status-Spalte angelegt wurden.
-        const claimable = items.filter((item) => item.status === 'pending' || !item.status);
+        const claimable = items.filter((item) => (item.status === 'pending' || !item.status) && !inFlight.has(item.id));
         for (const item of claimable) {
             if (active >= CONCURRENT) break;
             active++;
+            inFlight.add(item.id);
             lastActivityAt = Date.now();
-            processOne(item).finally(() => { active--; lastActivityAt = Date.now(); });
+            processOne(item).finally(() => { active--; inFlight.delete(item.id); lastActivityAt = Date.now(); });
         }
     } catch (err) {
         console.error('Konnte Warteschlange nicht abrufen:', err.message);
