@@ -3409,128 +3409,207 @@ window.applySongPatch = function(id, patch) {
     });
 };
 
+// Lokale Merkliste: Name+Größe jeder erfolgreich importierten Datei. Rein clientseitig, gleiches
+// Prinzip wie die YouTube-URL-Historie weiter oben - Abgleich braucht kein Netzwerk und liest keine
+// Dateiinhalte, ist bei 2000+ ausgewählten Dateien darum praktisch sofort fertig (reiner Set-
+// Lookup über Metadaten). Fängt den häufigsten Fall ab: derselbe Ordner wird beim nächsten Mal
+// wieder komplett ausgewählt, statt jedes Mal einzeln auszusortieren, was schon drin ist. Songs mit
+// anderem Encoding/Dateinamen bleiben weiterhin Aufgabe des Server-Hash-Dedupes bzw. "Duplikate
+// bereinigen" (siehe Gedächtnis) - das hier ist bewusst nur die schnelle erste Schranke.
+const IMPORTED_FILES_KEY = 'himusic_imported_files_manifest';
+const IMPORTED_FILES_MAX = 20000;
+function _fileManifestKey(name, size) { return `${name}::${size}`; }
+function _loadImportedFilesManifest() { try { return new Set(JSON.parse(localStorage.getItem(IMPORTED_FILES_KEY) || '[]')); } catch(e) { return new Set(); } }
+function _rememberImportedFile(name, size) {
+    try {
+        const set = _loadImportedFilesManifest();
+        const key = _fileManifestKey(name, size);
+        if (set.has(key)) return;
+        set.add(key);
+        let arr = Array.from(set);
+        if (arr.length > IMPORTED_FILES_MAX) arr = arr.slice(arr.length - IMPORTED_FILES_MAX);
+        localStorage.setItem(IMPORTED_FILES_KEY, JSON.stringify(arr));
+    } catch(e) {}
+}
+
+// Der eigentliche Upload-Lauf (Worker-Pool + Fortschrittsanzeige), ausgelagert aus dem
+// change-Listener: läuft jetzt erst NACH Bestätigung der Vorschau (siehe _renderFileImportReview
+// unten), und nur noch für die Datei-Teilmenge, die dort als "neu" markiert wurde.
+async function _runFileImportBatch(toUpload) {
+    const uploadLabel = document.querySelector('label[for="native-file-upload"]');
+    const syncStatusDetail = document.getElementById('sync-status-detail');
+    // songs-import-status lebt AUF der Songs-Seite (wo btn-add-songs liegt) - sync-status-detail
+    // liegt in der Settings-Seite und war deshalb unsichtbar, solange man beim Import auf der
+    // Songs-Seite blieb. Beide werden befüllt, aber diese hier ist die, die man tatsächlich sieht.
+    const songsImportStatus = document.getElementById('songs-import-status');
+    const setStatus = (msg, color = '#fff') => {
+        if (syncStatusDetail) { syncStatusDetail.style.display = 'block'; syncStatusDetail.style.color = color; syncStatusDetail.innerText = msg; }
+        if (songsImportStatus) { songsImportStatus.style.display = 'block'; songsImportStatus.style.color = color; songsImportStatus.innerText = msg; }
+    };
+
+    if (toUpload.length === 0) { setStatus('✅ Keine neuen Dateien - alles schon importiert.', '#32d74b'); return; }
+
+    if (uploadLabel) uploadLabel.style.opacity = '0.5';
+    window._importActive = true; // Sync pausieren, damit er den Import nicht stört
+
+    // STAGING-PRINZIP – weiterhin keine Inhalts-Prüfung hier drin (nur Name+Größe oben, siehe
+    // _renderFileImportReview): Jede verbleibende Datei wird roh nach R2 hochgeladen (R2 =
+    // Zwischenlager). Die Duplikat-Entscheidung nach Inhalt trifft weiterhin ausschließlich der
+    // SERVER beim Registrieren (POST /songs): er liest die Inhalts-Prüfsumme (ETag), die Cloudflare
+    // beim Upload über die BYTES berechnet hat, vergleicht sie mit der Haupt-DB und verwirft
+    // Duplikate ({duplicate:true} + Datei wird im Zwischenlager sofort gelöscht).
+    const CONCURRENT = 5;
+    let done = 0, dupes = 0, failed = 0, uploadedBytes = 0;
+    const totalBytes = toUpload.reduce((a, x) => a + x.file.size, 0);
+    const t0 = Date.now();
+    const fmtMB = (b) => (b / 1048576).toFixed(0);
+    function updateProgress() {
+        const el = (Date.now() - t0) / 1000;
+        const mbps = el > 0 ? (uploadedBytes / 1048576 / el) : 0;
+        let eta = '';
+        if (mbps > 0.05 && uploadedBytes > 0) {
+            const secs = Math.round((totalBytes - uploadedBytes) / 1048576 / mbps);
+            eta = ` · noch ~${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
+        }
+        setStatus(`⬆️ ${done + dupes}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${dupes > 0 ? ` · ${dupes} Duplikate` : ''}`);
+    }
+    updateProgress();
+
+    async function uploadOne(file, title, attempt = 1) {
+        const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+        try {
+            const uploadRes = await _apiFetch(`${API_URL}/upload/${safeFilename}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': file.type || 'audio/mpeg' },
+                body: file,
+                signal: _mkTimeout(180000) // fängt hängende Verbindungen ab, damit der Pool nie festfriert
+            });
+            if (!uploadRes.ok) throw new Error('upload failed');
+            const uploadData = await uploadRes.json();
+
+            const songRes = await _apiFetch(`${API_URL}/songs`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title, artist: "Unbekannt", cover_data: "",
+                    file_url: uploadData.url, file_size: file.size, duration: 0, vibes: []
+                }),
+                signal: _mkTimeout(30000)
+            });
+            if (!songRes.ok) throw new Error('song create failed');
+            const result = await songRes.json().catch(() => ({}));
+            // Server-Tor hat entschieden: Datei war inhaltsgleich schon da → nicht doppelt gespeichert
+            if (result && result.duplicate) {
+                dupes++;
+            } else {
+                done++;
+                // Song sofort sichtbar machen, statt bis zum Ende des ganzen Stapels zu warten.
+                // POST /songs gibt den angelegten Datensatz inkl. id zurueck, es braucht also
+                // KEINEN zusaetzlichen /songs-Abruf - wichtig, weil genau der auf schwacher
+                // Leitung mit den laufenden Uploads um die Bandbreite konkurrieren wuerde.
+                if (window.addSongsLive) window.addSongsLive(result);
+            }
+            // Egal ob Duplikat oder nicht: die Merkliste soll diese Datei künftig sofort erkennen.
+            _rememberImportedFile(file.name, file.size);
+            uploadedBytes += file.size;
+        } catch(err) {
+            if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
+            failed++;
+        }
+        updateProgress();
+    }
+
+    // Worker-Pool: hält immer CONCURRENT Uploads gleichzeitig aktiv, ohne Head-of-Line-Blocking.
+    let uploadIdx = 0;
+    async function uploadWorker() {
+        while (uploadIdx < toUpload.length) {
+            const { file, title } = toUpload[uploadIdx++];
+            await uploadOne(file, title);
+        }
+    }
+    await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
+
+    // Sicherheitsnetz: Inhalts-Dedupe der Haupt-DB (fängt z.B. zwei zeitgleiche Uploads
+    // derselben Datei im selben Batch ab). Löscht ausschließlich Byte-identische Einträge.
+    let removed = 0;
+    if (done > 0) {
+        setStatus(`🧹 Prüfe auf Duplikate...`);
+        try {
+            const dRes = await _apiFetch(`${API_URL}/songs/dedupe`, { method: 'POST', signal: _mkTimeout(120000) });
+            if (dRes.ok) { const d = await dRes.json().catch(() => ({})); removed = d.deleted || 0; }
+        } catch(err) {}
+    }
+
+    window._importActive = false;
+    if (uploadLabel) uploadLabel.style.opacity = '1';
+    const skipped = dupes + removed;
+    const summary = `✅ ${done - removed} neu importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}`;
+    setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
+
+    // Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
+    if (window.fetchSongsFromDatabase) await window.fetchSongsFromDatabase(true);
+    if (done > 0) setTimeout(processBackgroundSync, 1500);
+}
+
+// Vorschau vor dem eigentlichen Upload: zeigt ALLE ausgewählten Dateien (bis zu einer Anzeige-
+// Obergrenze, siehe FILE_REVIEW_DISPLAY_CAP - bei 2000+ Dateien kostet mehr DOM nur Zeit/Speicher,
+// ohne dass es dem Nutzer noch etwas bringt), bereits bekannte Dateien ausgegraut und durch-
+// gestrichen, neue normal. Import startet erst nach Bestätigung, und nur für die neuen Dateien -
+// verhindert genau das befürchtete Szenario "2000 Dateien lösen 2000 Uploads aus".
+const FILE_REVIEW_DISPLAY_CAP = 300;
+let _fileReviewPending = null;
+
+function _renderFileImportReview(allFiles) {
+    const manifest = _loadImportedFilesManifest();
+    let freshCount = 0;
+    const fresh = [];
+    allFiles.forEach(file => {
+        if (manifest.has(_fileManifestKey(file.name, file.size))) return;
+        freshCount++;
+        fresh.push({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() });
+    });
+    _fileReviewPending = fresh;
+
+    const knownCount = allFiles.length - freshCount;
+    const summaryEl = document.getElementById('fir-summary');
+    const listEl = document.getElementById('fir-list');
+    const confirmBtn = document.getElementById('fir-confirm');
+    if (summaryEl) summaryEl.innerText = `${freshCount} neu${knownCount > 0 ? ` · ${knownCount} bereits importiert (werden übersprungen)` : ''}`;
+    if (confirmBtn) { confirmBtn.innerText = freshCount > 0 ? `${freshCount} importieren` : 'Nichts Neues zu importieren'; confirmBtn.disabled = freshCount === 0; confirmBtn.style.opacity = freshCount === 0 ? '0.5' : '1'; }
+
+    if (listEl) {
+        const shown = allFiles.slice(0, FILE_REVIEW_DISPLAY_CAP);
+        listEl.innerHTML = shown.map(file => {
+            const isKnown = manifest.has(_fileManifestKey(file.name, file.size));
+            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06);${isKnown ? 'opacity:0.45;' : ''}">
+                <span style="flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${isKnown ? 'text-decoration:line-through;' : ''}">${_esc(file.name)}</span>
+                <span style="font-size:11px;flex-shrink:0;color:${isKnown ? 'var(--text-secondary)' : '#32d74b'};">${isKnown ? '✓ schon da' : 'neu'}</span>
+            </div>`;
+        }).join('');
+        if (allFiles.length > FILE_REVIEW_DISPLAY_CAP) {
+            listEl.innerHTML += `<div style="text-align:center;color:var(--text-secondary);font-size:12px;padding:8px 0;">+ ${allFiles.length - FILE_REVIEW_DISPLAY_CAP} weitere</div>`;
+        }
+    }
+    document.getElementById('file-import-review-overlay')?.classList.add('active');
+}
+
 const oldFileInput = document.getElementById('native-file-upload');
 if (oldFileInput) {
     const newFileInput = oldFileInput.cloneNode(true);
     oldFileInput.parentNode.replaceChild(newFileInput, oldFileInput);
 
-    newFileInput.addEventListener('change', async (e) => {
+    newFileInput.addEventListener('change', (e) => {
         const files = Array.from(e.target.files);
         if (files.length === 0) return;
+        _renderFileImportReview(files);
+    });
 
-        const uploadLabel = document.querySelector('label[for="native-file-upload"]');
-        const syncStatusDetail = document.getElementById('sync-status-detail');
-        // songs-import-status lebt AUF der Songs-Seite (wo btn-add-songs liegt) - sync-status-detail
-        // liegt in der Settings-Seite und war deshalb unsichtbar, solange man beim Import auf der
-        // Songs-Seite blieb. Beide werden befüllt, aber diese hier ist die, die man tatsächlich sieht.
-        const songsImportStatus = document.getElementById('songs-import-status');
-        const setStatus = (msg, color = '#fff') => {
-            if (syncStatusDetail) { syncStatusDetail.style.display = 'block'; syncStatusDetail.style.color = color; syncStatusDetail.innerText = msg; }
-            if (songsImportStatus) { songsImportStatus.style.display = 'block'; songsImportStatus.style.color = color; songsImportStatus.innerText = msg; }
-        };
-
-        if (uploadLabel) uploadLabel.style.opacity = '0.5';
-        window._importActive = true; // Sync pausieren, damit er den Import nicht stört
-
-        // STAGING-PRINZIP – bewusst KEINE clientseitige Duplikat-Logik mehr:
-        // Jede Datei wird roh nach R2 hochgeladen (R2 = Zwischenlager). Die Duplikat-Entscheidung
-        // trifft ausschließlich der SERVER beim Registrieren (POST /songs): er liest die
-        // Inhalts-Prüfsumme (ETag), die Cloudflare beim Upload über die BYTES berechnet hat,
-        // vergleicht sie mit der Haupt-DB und verwirft Duplikate ({duplicate:true} + Datei wird
-        // im Zwischenlager sofort gelöscht). Namen sind egal – nur der Inhalt zählt. Dadurch kann
-        // hier clientseitig nichts mehr schiefgehen (alte Namensschemata, umbenannte Dateien etc.).
-        const toUpload = files.map(file => ({ file, title: file.name.replace(/\.[^/.]+$/, "").trim() }));
-
-        // Upload startet SOFORT. Worker-Pool + Durchsatz + Restzeit-Anzeige.
-        const CONCURRENT = 5;
-        let done = 0, dupes = 0, failed = 0, uploadedBytes = 0;
-        const totalBytes = toUpload.reduce((a, x) => a + x.file.size, 0);
-        const t0 = Date.now();
-        const fmtMB = (b) => (b / 1048576).toFixed(0);
-        function updateProgress() {
-            const el = (Date.now() - t0) / 1000;
-            const mbps = el > 0 ? (uploadedBytes / 1048576 / el) : 0;
-            let eta = '';
-            if (mbps > 0.05 && uploadedBytes > 0) {
-                const secs = Math.round((totalBytes - uploadedBytes) / 1048576 / mbps);
-                eta = ` · noch ~${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} min`;
-            }
-            setStatus(`⬆️ ${done + dupes}/${toUpload.length} · ${fmtMB(uploadedBytes)}/${fmtMB(totalBytes)} MB · ${mbps.toFixed(1)} MB/s${eta}${dupes > 0 ? ` · ${dupes} Duplikate` : ''}`);
-        }
-        updateProgress();
-
-        async function uploadOne(file, title, attempt = 1) {
-            const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
-            try {
-                const uploadRes = await _apiFetch(`${API_URL}/upload/${safeFilename}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': file.type || 'audio/mpeg' },
-                    body: file,
-                    signal: _mkTimeout(180000) // fängt hängende Verbindungen ab, damit der Pool nie festfriert
-                });
-                if (!uploadRes.ok) throw new Error('upload failed');
-                const uploadData = await uploadRes.json();
-
-                const songRes = await _apiFetch(`${API_URL}/songs`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        title, artist: "Unbekannt", cover_data: "",
-                        file_url: uploadData.url, file_size: file.size, duration: 0, vibes: []
-                    }),
-                    signal: _mkTimeout(30000)
-                });
-                if (!songRes.ok) throw new Error('song create failed');
-                const result = await songRes.json().catch(() => ({}));
-                // Server-Tor hat entschieden: Datei war inhaltsgleich schon da → nicht doppelt gespeichert
-                if (result && result.duplicate) {
-                    dupes++;
-                } else {
-                    done++;
-                    // Song sofort sichtbar machen, statt bis zum Ende des ganzen Stapels zu warten.
-                    // POST /songs gibt den angelegten Datensatz inkl. id zurueck, es braucht also
-                    // KEINEN zusaetzlichen /songs-Abruf - wichtig, weil genau der auf schwacher
-                    // Leitung mit den laufenden Uploads um die Bandbreite konkurrieren wuerde.
-                    if (window.addSongsLive) window.addSongsLive(result);
-                }
-                uploadedBytes += file.size;
-            } catch(err) {
-                if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
-                failed++;
-            }
-            updateProgress();
-        }
-
-        // Worker-Pool: hält immer CONCURRENT Uploads gleichzeitig aktiv, ohne Head-of-Line-Blocking.
-        let uploadIdx = 0;
-        async function uploadWorker() {
-            while (uploadIdx < toUpload.length) {
-                const { file, title } = toUpload[uploadIdx++];
-                await uploadOne(file, title);
-            }
-        }
-        await Promise.all(Array.from({ length: CONCURRENT }, uploadWorker));
-
-        // Sicherheitsnetz: Inhalts-Dedupe der Haupt-DB (fängt z.B. zwei zeitgleiche Uploads
-        // derselben Datei im selben Batch ab). Löscht ausschließlich Byte-identische Einträge.
-        let removed = 0;
-        if (done > 0) {
-            setStatus(`🧹 Prüfe auf Duplikate...`);
-            try {
-                const dRes = await _apiFetch(`${API_URL}/songs/dedupe`, { method: 'POST', signal: _mkTimeout(120000) });
-                if (dRes.ok) { const d = await dRes.json().catch(() => ({})); removed = d.deleted || 0; }
-            } catch(err) {}
-        }
-
-        window._importActive = false;
-        if (uploadLabel) uploadLabel.style.opacity = '1';
-        const skipped = dupes + removed;
-        const summary = `✅ ${done - removed} neu importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}`;
-        setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
-
-        // Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
-        if (window.fetchSongsFromDatabase) await window.fetchSongsFromDatabase(true);
-        if (done > 0) setTimeout(processBackgroundSync, 1500);
+    document.getElementById('fir-confirm')?.addEventListener('click', () => {
+        if (!_fileReviewPending || _fileReviewPending.length === 0) return;
+        document.getElementById('file-import-review-overlay')?.classList.remove('active');
+        const toUpload = _fileReviewPending;
+        _fileReviewPending = null;
+        _runFileImportBatch(toUpload);
     });
 }
 

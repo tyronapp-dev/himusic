@@ -731,6 +731,21 @@
         </div>
     </div>
 
+    <div id="file-import-review-overlay" class="action-sheet-overlay">
+        <div class="action-sheet" style="max-height:90vh; display:flex; flex-direction:column;">
+            <div class="sheet-handle"></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:16px 20px 10px; flex-shrink:0;">
+                <h3 style="font-size:17px; font-weight:700; margin:0;">Songs importieren</h3>
+                <button class="close-alert icon-btn" style="font-size:26px; color:var(--text-secondary); line-height:1; padding:4px 8px;">×</button>
+            </div>
+            <div id="fir-summary" style="padding:0 20px 10px; font-size:13px; color:var(--text-secondary); flex-shrink:0;"></div>
+            <div id="fir-list" style="overflow-y:auto; flex:1; padding:0 20px;"></div>
+            <div style="padding:14px 20px; flex-shrink:0; border-top:1px solid rgba(255,255,255,0.08);">
+                <button id="fir-confirm" style="width:100%; padding:13px; background:var(--accent); color:var(--accent-text); border:none; border-radius:12px; font-size:15px; font-weight:600; cursor:pointer;">Importieren</button>
+            </div>
+        </div>
+    </div>
+
     <audio id="main-audio-player" playsinline webkit-playsinline x-webkit-airplay="allow" preload="auto"></audio>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"></script>
