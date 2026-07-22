@@ -719,10 +719,16 @@
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js')
+                // updateViaCache:'none' - GitHub Pages liefert alles mit "max-age=600" aus. Ohne das
+                // hier darf der Browser sw.js bis zu 10 Minuten aus seinem eigenen HTTP-Cache
+                // beantworten und merkt einen frischen Deploy schlicht nicht, egal wie oft man neu
+                // laedt. Mit 'none' wird sw.js immer beim Server rueckgefragt.
+                navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
                     .then(reg => {
                         console.log('[SW] Registered successfully', reg.scope);
                         window.SW_OK = true;
+                        // Aktiv nach einer neuen Version fragen, statt auf den Browser-Rhythmus zu warten.
+                        reg.update().catch(() => {});
                     })
                     .catch(err => {
                         console.warn('[SW] Registration failed:', err);

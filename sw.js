@@ -1,7 +1,7 @@
 // Himusic Cloud - Service Worker v1.0
 // Komplett optimiert für das neue Cloudflare / Firebase Setup
 
-const CACHE_NAME  = 'himusic-app-shell-v1.14';
+const CACHE_NAME  = 'himusic-app-shell-v1.15';
 const COVER_CACHE = 'himusic-covers-v1';
 const AUDIO_CACHE = 'himusic-audio-v1';
 
@@ -28,8 +28,13 @@ const APP_SHELL = [
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME).then((cache) =>
+            // {cache:'reload'} ist hier entscheidend: GitHub Pages liefert alles mit "max-age=600".
+            // Ein schlichtes cache.add(url) darf deshalb aus dem HTTP-Cache des Browsers bedient
+            // werden - der frisch installierte Service Worker legte dann bis zu 10 Minuten lang die
+            // ALTE Datei als vermeintlich neue App-Shell ab. Ergebnis: nach einem Deploy aenderte
+            // sich trotz mehrfachem Neuladen nichts. 'reload' erzwingt echtes Nachladen vom Server.
             Promise.allSettled(APP_SHELL.map(url =>
-                cache.add(url).catch(() => console.warn('[SW] Cache miss:', url))
+                cache.add(new Request(url, { cache: 'reload' })).catch(() => console.warn('[SW] Cache miss:', url))
             ))
         ).then(() => self.skipWaiting())
     );
@@ -164,7 +169,11 @@ self.addEventListener('fetch', (event) => {
             caches.match(event.request).then(async (cached) => {
                 // Gefunden → sofort ausliefern, Hintergrund-Update starten
                 if (cached) {
-                    fetch(event.request).then(r => {
+                    // {cache:'no-cache'} = beim Server rueckfragen statt den 10-Minuten-HTTP-Cache
+                    // zu akzeptieren. Sonst "aktualisiert" dieser Hintergrund-Abruf die App-Shell
+                    // mit genau der alten Datei, die schon drin liegt, und ein Deploy kommt erst
+                    // nach Ablauf der 10 Minuten an.
+                    fetch(event.request, { cache: 'no-cache' }).then(r => {
                         if (r && r.status === 200)
                             caches.open(CACHE_NAME).then(c => c.put(event.request, r.clone()));
                     }).catch(() => {});
