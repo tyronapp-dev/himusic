@@ -2784,6 +2784,27 @@ async function createNewPlaylistProcess() {
         }
     });
 
+    // Bookmarklets (javascript:-Lesezeichen) zum Auslesen von localStorage sind auf iOS-Browsern
+    // (Safari wie Brave) notorisch unzuverlässig - die Adressleiste/der Lesezeichen-Editor blockt
+    // oder verstümmelt "javascript:"-URLs oft aus Sicherheitsgründen. Direkter Button in der App
+    // liest denselben, bereits lokal vorhandenen Wert stattdessen zuverlässig aus - für eigene
+    // Kurzbefehle/Automationen, die dieselbe Worker-API ansprechen wollen wie die App selbst.
+    document.getElementById('btn-copy-api-key')?.addEventListener('click', async () => {
+        const key = localStorage.getItem('himusic_api_key');
+        if (!key) { _showToast('⚠️ Kein API-Key gefunden - bitte neu einloggen'); return; }
+        try {
+            await navigator.clipboard.writeText(key);
+            _showToast('📋 API-Key kopiert');
+        } catch (e) {
+            const ta = document.createElement('textarea');
+            ta.value = key; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); _showToast('📋 API-Key kopiert'); }
+            catch (e2) { prompt('API-Key (manuell kopieren):', key); }
+            document.body.removeChild(ta);
+        }
+    });
+
     document.getElementById('btn-clear-freeze-log')?.addEventListener('click', () => {
         localStorage.removeItem('himusic_freeze_log');
         window.renderFreezeLog();
