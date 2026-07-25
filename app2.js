@@ -831,7 +831,8 @@ let _bgCacheActive = false;
             const url = _bgCacheQueue.shift();
             
             await downloadToLocal(url, '').catch(() => {});
-            
+            window._refreshOfflineLabel?.();
+
             _bgActiveCount--;
             // Sobald fertig, sofort den nächsten starten:
             setTimeout(processNext, 100); 
@@ -872,16 +873,25 @@ let _bgCacheActive = false;
         });
         const offlineBtn = document.getElementById('btn-offline-mode');
         if (offlineBtn) {
-            const label = document.getElementById('offline-btn-label');
             offlineBtn.style.setProperty('background', 'rgba(48,209,88,0.18)', 'important');
             offlineBtn.style.setProperty('border-color', '#30d158', 'important');
             offlineBtn.style.setProperty('color', '#30d158', 'important');
-            const validOfflineCount = window.globalSongsData ? window.globalSongsData.filter(s => s.file_url && localUrls.has(s.file_url)).length : localUrls.size;
-            if (label) label.textContent = `${validOfflineCount} Songs offline ✓`;
         }
+        window._refreshOfflineLabel();
     }, 1500);
 
     window.hbLocal = { clearLocalAudio, getLocalStorageInfo, getAllLocalUrls, downloadToLocal };
+
+    // Einzige Quelle der Wahrheit fuer die Settings-Zeilen-Anzeige ("X Songs offline"): fragt
+    // IndexedDB live ab statt eine einmalig berechnete Zahl stehen zu lassen. Vorher wurde die
+    // Zahl nur einmal 1.5s nach Start gesetzt und lief dem Hintergrund-Cache-Fortschritt hinterher.
+    window._refreshOfflineLabel = async function() {
+        const label = document.getElementById('offline-btn-label');
+        if (!label) return;
+        const urls = await getAllLocalUrls();
+        const count = window.globalSongsData ? window.globalSongsData.filter(s => s.file_url && urls.has(s.file_url)).length : urls.size;
+        label.textContent = count > 0 ? `${count} Songs offline ✓` : 'Offline-Modus aktivieren';
+    };
 
     let _skipNextHistoryPush = false;
     window.playSong = async function(title, artist, coverUrl, fileUrl) {
@@ -3158,7 +3168,7 @@ async function createNewPlaylistProcess() {
                 btn.style.background   = 'rgba(48,209,88,0.18)';
                 btn.style.borderColor  = '#30d158';
                 btn.style.color        = '#30d158';
-                if (label) label.textContent = 'Offline bereit ✓';
+                window._refreshOfflineLabel?.();
             } else if (state === 'loading') {
                 btn.style.background  = 'rgba(255,159,10,0.18)';
                 btn.style.borderColor = '#ff9f0a';
@@ -3168,7 +3178,7 @@ async function createNewPlaylistProcess() {
                 btn.style.background  = 'rgba(255,255,255,0.07)';
                 btn.style.borderColor = 'rgba(255,255,255,0.15)';
                 btn.style.color       = 'var(--text-secondary)';
-                if (label) label.textContent = 'Offline-Modus aktivieren';
+                window._refreshOfflineLabel?.();
             }
         }
 
@@ -3328,6 +3338,7 @@ let currentIndex = 0;
                     : 'Noch keine Songs lokal gespeichert.';
                 if (clearBtn) clearBtn.style.display = localUrls.size > 0 ? 'block' : 'none';
             }
+            window._refreshOfflineLabel?.();
         });
     })();
 
