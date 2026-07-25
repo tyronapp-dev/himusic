@@ -452,6 +452,86 @@ function initApp() {
     window.currentPlaylistSongs = [];
     window.currentSongDuration = 0;
     
+    // === Lautstärke-Boost (Web Audio: Gain + Limiter) =========================================
+    // Das <audio>-Element kann maximal volume=1.0 (100%). Für "lauter als Maximum" wird das Signal
+    // durch eine Web-Audio-Kette geschleust: MediaElementSource -> GainNode (Verstärkung) ->
+    // DynamicsCompressor als Limiter (fängt Übersteuern/Clipping ab) -> Lautsprecher.
+    // Wichtig: createMediaElementSource ist EINE Einbahnstraße - einmal verbunden, läuft das
+    // Element für immer durch den AudioContext. Deshalb wird die Kette nur lazy aufgebaut, wenn
+    // Boost tatsächlich > 100% ist. Bei Boost = 100% (Standard) bleibt der Wiedergabepfad komplett
+    // unangetastet - kein Risiko für die bekannten iOS-Hintergrund-Probleme im Normalbetrieb.
+    // Cross-Origin: Damit Web Audio das Signal vom Worker anfassen darf, braucht das <audio>-Element
+    // crossOrigin="anonymous" (Worker liefert Access-Control-Allow-Origin: * auf allen Antworten,
+    // live verifiziert; der Service Worker setzt die Header auch auf synthetische Range-Antworten).
+    // blob:-URLs aus dem IndexedDB-Offline-Cache sind same-origin und brauchen das nicht.
+    let _boostLevel = 1; // 1 = aus (100%), max 3 (300%)
+    let _boostCtx = null, _boostGain = null;
+    let _boostCorsFallbackDone = false; // Sicherheitsnetz nur einmal pro Session auslösen
+
+    function _ensureBoostChain() {
+        if (_boostCtx) return true;
+        const audio = document.getElementById('main-audio-player');
+        if (!audio) return false;
+        try {
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            _boostCtx = new Ctx();
+            const srcNode = _boostCtx.createMediaElementSource(audio);
+            _boostGain = _boostCtx.createGain();
+            const limiter = _boostCtx.createDynamicsCompressor();
+            // Limiter-Charakteristik (kein "musikalischer" Kompressor): erst kurz unter 0 dBFS
+            // hart eingreifen, sehr schnelle Attack, damit Pegelspitzen nicht knacksen.
+            limiter.threshold.value = -3;
+            limiter.knee.value = 0;
+            limiter.ratio.value = 20;
+            limiter.attack.value = 0.002;
+            limiter.release.value = 0.25;
+            srcNode.connect(_boostGain);
+            _boostGain.connect(limiter);
+            limiter.connect(_boostCtx.destination);
+            _boostGain.gain.value = _boostLevel;
+            // iOS pausiert AudioContexte gern (Autoplay-Policy, Sperrbildschirm, App-Wechsel).
+            // Ohne resume() liefe das Element stumm weiter -> an allen relevanten Stellen aufwecken.
+            const tryResume = () => { if (_boostCtx && _boostCtx.state !== 'running') _boostCtx.resume().catch(() => {}); };
+            audio.addEventListener('play', tryResume);
+            audio.addEventListener('playing', tryResume);
+            document.addEventListener('visibilitychange', tryResume);
+            _boostCtx.onstatechange = () => { if (_boostCtx && _boostCtx.state !== 'running' && !audio.paused) _boostCtx.resume().catch(() => {}); };
+            // Debug-Haken für Tests/Fehlersuche (z.B. AnalyserNode anhängen und Pegel messen)
+            window._boostDebug = { ctx: _boostCtx, gain: _boostGain, limiter: limiter };
+            return true;
+        } catch(e) {
+            console.warn('[Boost] Web-Audio-Kette konnte nicht erstellt werden:', e);
+            _boostCtx = null; _boostGain = null;
+            return false;
+        }
+    }
+
+    window.setBoostLevel = function(level) {
+        level = Math.min(3, Math.max(1, parseFloat(level) || 1));
+        _boostLevel = level;
+        const audio = document.getElementById('main-audio-player');
+        if (level > 1 && audio) {
+            // crossOrigin wirkt erst beim (Neu-)Laden der Quelle. Läuft gerade ein Song über eine
+            // Netzwerk-URL, muss er einmal mit CORS-Modus neu geladen werden (Position bleibt).
+            if (audio.crossOrigin !== 'anonymous') {
+                audio.crossOrigin = 'anonymous';
+                if (audio.src && !audio.src.startsWith('blob:')) {
+                    const t = audio.currentTime, wasPlaying = !audio.paused;
+                    audio.load();
+                    audio.addEventListener('canplay', function reseek() {
+                        audio.removeEventListener('canplay', reseek);
+                        audio.currentTime = t;
+                        if (wasPlaying) audio.play().catch(() => {});
+                    });
+                }
+            }
+            if (_ensureBoostChain()) _boostGain.gain.value = level;
+        } else if (_boostGain) {
+            _boostGain.gain.value = 1;
+        }
+        savePlayerState();
+    };
+
     let _saveTimer = null;
     function savePlayerState() {
         clearTimeout(_saveTimer);
@@ -464,7 +544,8 @@ function initApp() {
             playingPlaylistId: window.currentPlayingPlaylistId || null,
             currentTime: document.getElementById('main-audio-player')?.currentTime || 0,
             queue: (playbackQueue || []).slice(0, 100),
-            volume: document.getElementById('volume-slider')?.value || 1
+            volume: document.getElementById('volume-slider')?.value || 1,
+            boost: _boostLevel
         };
         try { localStorage.setItem('heatbox_state', JSON.stringify(state)); } catch(e) {}
     }
@@ -480,6 +561,16 @@ function initApp() {
                 if(volSlider) { volSlider.value = state.volume; updateSliderFill(volSlider, 0, 1); }
                 const audio = document.getElementById('main-audio-player');
                 if(audio) audio.volume = state.volume;
+            }
+
+            // Boost-Level VOR dem src-Setzen unten wiederherstellen: crossOrigin muss am Element
+            // hängen, bevor die Quelle geladen wird, sonst wäre das Signal für Web Audio "tainted"
+            // (Browser-Schutz: fremde Inhalte ohne CORS-Freigabe -> Web Audio liefert nur Stille).
+            const savedBoost = parseFloat(state.boost);
+            if (!isNaN(savedBoost) && savedBoost > 1) {
+                _boostLevel = Math.min(3, savedBoost);
+                const audioB = document.getElementById('main-audio-player');
+                if (audioB) audioB.crossOrigin = 'anonymous';
             }
 
             if (state.currentSong) {
@@ -542,6 +633,45 @@ function initApp() {
     }
 
     loadPlayerState();
+
+    // Boost: Kette lazy beim ersten Play aufbauen (Play-Event = Nutzergeste, dann darf ein
+    // AudioContext direkt "running" starten statt suspended). Bei Boost = 100% passiert nichts.
+    (function() {
+        const audio = document.getElementById('main-audio-player');
+        if (!audio) return;
+        audio.addEventListener('play', () => {
+            if (_boostLevel > 1 && _ensureBoostChain()) _boostGain.gain.value = _boostLevel;
+        });
+        // Sicherheitsnetz: Sollte je eine Song-URL auftauchen, deren Host KEINE CORS-Header
+        // liefert, schlägt das Laden im crossOrigin-Modus komplett fehl (error statt Wiedergabe).
+        // Dann: Boost dauerhaft ausschalten (sofort persistieren, nicht debounced) und den Song
+        // ohne CORS-Modus neu laden - lieber normale Lautstärke als gar keine Musik. Nur einmal
+        // pro Session und nur online (offline-503s sollen den Boost nicht fälschlich abschalten).
+        audio.addEventListener('error', () => {
+            if (_boostCorsFallbackDone || audio.crossOrigin !== 'anonymous') return;
+            if (!audio.src || audio.src.startsWith('blob:') || !navigator.onLine) return;
+            _boostCorsFallbackDone = true;
+            console.warn('[Boost] Ladefehler im CORS-Modus - Boost wird deaktiviert, Song wird normal neu geladen.');
+            _boostLevel = 1;
+            try {
+                const s = JSON.parse(localStorage.getItem('heatbox_state') || '{}');
+                s.boost = 1;
+                localStorage.setItem('heatbox_state', JSON.stringify(s));
+            } catch(e) {}
+            const bSlider = document.getElementById('boost-slider');
+            const bLabel = document.getElementById('boost-value-label');
+            if (bSlider) bSlider.value = 100;
+            if (bLabel) bLabel.innerText = '100 %';
+            audio.removeAttribute('crossorigin');
+            const t = audio.currentTime || 0;
+            audio.load();
+            audio.addEventListener('canplay', function reseek() {
+                audio.removeEventListener('canplay', reseek);
+                audio.currentTime = t;
+                audio.play().catch(() => {});
+            });
+        });
+    })();
 
     window.currentPlayingSongId = null;
     window.currentPlayingPlaylistId = null;
@@ -2734,6 +2864,19 @@ async function createNewPlaylistProcess() {
     function updateSliderFill(slider, min, max) { const percentage = ((slider.value - min) / (max - min)) * 100; slider.style.background = `linear-gradient(to right, #ffffff ${percentage}%, rgba(255,255,255,0.2) ${percentage}%)`; }
     const volSlider = document.getElementById('volume-slider');
     if(volSlider && audioPlayer) { updateSliderFill(volSlider, 0, 1); volSlider.addEventListener('input', (e) => { audioPlayer.volume = e.target.value; updateSliderFill(e.target, 0, 1); }); }
+
+    // Lautstärke-Boost-Regler (Settings) - Prozentwert (100-300) -> Faktor (1.0-3.0)
+    const boostSlider = document.getElementById('boost-slider');
+    const boostLabel = document.getElementById('boost-value-label');
+    if (boostSlider) {
+        boostSlider.value = Math.round(_boostLevel * 100);
+        if (boostLabel) boostLabel.innerText = Math.round(_boostLevel * 100) + ' %';
+        boostSlider.addEventListener('input', (e) => {
+            const pct = Math.min(300, Math.max(100, parseInt(e.target.value, 10) || 100));
+            if (boostLabel) boostLabel.innerText = pct + ' %';
+            window.setBoostLevel(pct / 100);
+        });
+    }
 
     let isShuffle = false; let isRepeat = false;
     document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; });

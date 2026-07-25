@@ -212,6 +212,20 @@
                     </div>
                 </div>
 
+                <div class="settings-section" style="margin-top: 30px;">
+                    <h3 class="section-title">Audio</h3>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin: -8px 0 10px;">Verstärkt die Wiedergabe digital über das normale Maximum hinaus. Ein Limiter fängt Übersteuern ab - klingt es trotzdem verzerrt, einfach wieder runterregeln. Wirkt nur in der Web-App, nicht im nativen Player.</p>
+                    <div class="settings-list">
+                        <div class="settings-row" style="display: block;">
+                            <div class="settings-row-info" style="display: flex; justify-content: space-between; align-items: center;">
+                                <h4>Lautstärke-Boost</h4>
+                                <span id="boost-value-label" style="color: var(--accent); font-weight: 600; font-size: 15px;">100 %</span>
+                            </div>
+                            <input type="range" id="boost-slider" min="100" max="300" step="5" value="100" style="width: 100%; margin-top: 12px; accent-color: var(--accent);">
+                        </div>
+                    </div>
+                </div>
+
                 <div class="settings-section">
                     <h3 class="section-title">System & Auto</h3>
                     <div class="settings-list">
