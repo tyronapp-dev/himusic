@@ -73,6 +73,65 @@ function _esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Hauptvibes markieren, welche Vibes eines Songs die STÄRKSTEN/wichtigsten sind (z.B. bei einem
+// Song, der zu mehreren Stimmungen passt). Rein clientseitig in localStorage (songId -> Vibe-Liste),
+// kein Backend-Feld nötig - apiUpdateSong()/PUT /songs/:id unterstützt aktuell nur title/artist/
+// cover_data/album/vibes (siehe Kommentar bei btn-trim-song), eine Worker-Erweiterung wäre für ein
+// rein persönliches Extra-Flag unverhältnismäßig. Läuft daher pro Gerät, kein Cross-Device-Sync.
+function _getMainVibes(songId) {
+    try {
+        const map = JSON.parse(localStorage.getItem('himusic_main_vibes') || '{}');
+        return Array.isArray(map[songId]) ? map[songId] : [];
+    } catch(e) { return []; }
+}
+function _setMainVibes(songId, vibesArr) {
+    const map = JSON.parse(localStorage.getItem('himusic_main_vibes') || '{}');
+    if (vibesArr.length === 0) delete map[songId]; else map[songId] = vibesArr;
+    localStorage.setItem('himusic_main_vibes', JSON.stringify(map));
+}
+
+// Baut den Vibes-Text für den Big Player, Hauptvibes fett hervorgehoben.
+function _renderVibesText(el, vibesArr, songId) {
+    if (!el) return;
+    const vibes = _parseVibes(vibesArr);
+    if (vibes.length === 0) { el.innerText = 'Aktueller Titel'; return; }
+    const mainVibes = songId != null ? _getMainVibes(songId) : [];
+    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b>${_esc(v)}</b>` : _esc(v)).join(' • ');
+}
+
+// Sender-Songliste für einen Ausgangssong: gewichtete Ähnlichkeit statt reinem Overlap-Zähler.
+// Ein gemeinsamer Vibe zählt 1 Punkt, ist er bei EINEM der beiden Songs als Hauptvibe markiert
+// 2 Punkte, ist er bei BEIDEN Hauptvibe 3 Punkte - der Sender "passt" so in erster Linie nach
+// Hauptvibes, fällt aber auf lockerere Übereinstimmungen zurück statt leerzulaufen. Schwelle
+// (score >= 2) ist bewusst identisch mit der alten "mind. 2 gemeinsame Vibes"-Regel: ohne
+// gesetzte Hauptvibes verhält sich das hier exakt wie vorher. Ergebnis nach Score sortiert,
+// aber innerhalb gleicher Score-Stufe gemischt, damit trotzdem ein Mix rauskommt statt einer
+// starren Bestenliste.
+function _buildStationSongs(song) {
+    const sourceVibes = song.vibes || [];
+    const sourceMain = _getMainVibes(song.id);
+    const scored = [];
+    window.globalSongsData.forEach(s => {
+        if (s.id === song.id) { scored.push({ song: s, score: Infinity }); return; }
+        const sVibes = s.vibes || [];
+        const sMain = _getMainVibes(s.id);
+        let score = 0;
+        sVibes.forEach(v => {
+            if (!sourceVibes.includes(v)) return;
+            const mainHits = (sourceMain.includes(v) ? 1 : 0) + (sMain.includes(v) ? 1 : 0);
+            score += 1 + mainHits;
+        });
+        if (score > 0) scored.push({ song: s, score });
+    });
+    scored.sort((a, b) => b.score - a.score || Math.random() - 0.5);
+    let stationSongs = scored.filter(x => x.score >= 2).map(x => x.song);
+    if (stationSongs.length <= 1) {
+        const randomFill = [...window.globalSongsData].sort(() => 0.5 - Math.random()).slice(0, 5);
+        stationSongs = Array.from(new Set([song, ...stationSongs, ...randomFill]));
+    }
+    return stationSongs;
+}
+
 // Kurzer haptischer Tick (Vibration API). Funktioniert nur auf Android-Browsern – iOS Safari/
 // PWAs unterstützen navigator.vibrate() nicht (Apple bietet dafür keine Web-API). Dort greift
 // automatisch nur das visuelle Feedback (Puls-Animation), ganz ohne Fehler oder Crash.
@@ -460,13 +519,7 @@ function initApp() {
                 if(bpArtist) bpArtist.innerText = state.currentSong.artist;
 
                 const bpHv = document.getElementById('bp-header-vibes');
-                if (bpHv) {
-                    if (_parseVibes(state.currentSong.vibes).length > 0) {
-                        bpHv.innerText = _parseVibes(state.currentSong.vibes).join(' • ');
-                    } else {
-                        bpHv.innerText = "Aktueller Titel";
-                    }
-                }
+                _renderVibesText(bpHv, state.currentSong.vibes, state.currentSong.id);
 
                 const coverUrl = state.currentSong.coverUrl || state.currentSong.cover_data;
                 const bgStyle = coverUrl && coverUrl.length > 10 ? `url('${coverUrl}')` : 'none';
@@ -526,7 +579,7 @@ function initApp() {
 
     window.updateActiveHighlights = function() {
         document.querySelectorAll('.song-item.playing-active, .station-card.playing-active').forEach(el => el.classList.remove('playing-active'));
-        let activeVibes = null;
+        let activeVibes = null; let activeVibesSongId = null;
 
         if (window.currentPlayingSongId) {
             document.querySelectorAll(`.song-item[data-id="${window.currentPlayingSongId}"]`).forEach(el => {
@@ -535,15 +588,15 @@ function initApp() {
             if (window.globalSongsData && window.globalSongsData.length > 0) {
                 const currentSong = ( window._songIndex?.get(window.currentPlayingSongId) );
                 if (currentSong && currentSong.vibes && currentSong.vibes.length > 0) {
-                    activeVibes = _parseVibes(currentSong.vibes).join(' • ');
+                    activeVibes = currentSong.vibes; activeVibesSongId = currentSong.id;
                 }
             }
         }
 
         const bpHv = document.getElementById('bp-header-vibes');
         if (bpHv) {
-            if (activeVibes) { bpHv.innerText = activeVibes; } 
-            else if (window.currentSongData && window.currentSongData.vibes && window.currentSongData.vibes.length > 0) { bpHv.innerText = _parseVibes(window.currentSongData.vibes).join(' • '); } 
+            if (activeVibes) { _renderVibesText(bpHv, activeVibes, activeVibesSongId); }
+            else if (window.currentSongData && window.currentSongData.vibes && window.currentSongData.vibes.length > 0) { _renderVibesText(bpHv, window.currentSongData.vibes, window.currentSongData.id); }
             else { bpHv.innerText = "Aktueller Titel"; }
         }
         
@@ -1017,7 +1070,7 @@ let _bgCacheActive = false;
         if(bpTitle) bpTitle.innerText = title;
         if(bpArtist) bpArtist.innerText = artist;
         if(largeCover) { largeCover.style.backgroundImage = bgStyle !== 'none' ? bgStyle : 'var(--accent)'; largeCover.style.backgroundSize = 'cover'; }
-        if(bpHv) bpHv.innerText = window.currentSongData.vibes?.join(' • ') || "Aktueller Titel";
+        _renderVibesText(bpHv, window.currentSongData.vibes, window.currentSongData.id);
         const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
         if (bpNoVibesDot) bpNoVibesDot.style.display = (window.currentSongData.vibes && window.currentSongData.vibes.length > 0) ? 'none' : 'block';
 
@@ -1621,18 +1674,7 @@ let _bgCacheActive = false;
             songContextOverlay.classList.remove('active');
             const song = (window._songIndex?.get(window.currentContextSongId));
             if (!song) return;
-            const sourceVibes = song.vibes || [];
-            let stationSongs = window.globalSongsData.filter(s => {
-                if (s.id === song.id) return true; 
-                const sVibes = s.vibes || [];
-                const matchCount = sVibes.filter(v => sourceVibes.includes(v)).length;
-                return matchCount >= 2;
-            });
-            if (stationSongs.length <= 1) {
-                const randomFill = [...window.globalSongsData].sort(() => 0.5 - Math.random()).slice(0, 5);
-                stationSongs = Array.from(new Set([...stationSongs, ...randomFill]));
-            }
-            stationSongs = stationSongs.sort(() => 0.5 - Math.random());
+            const stationSongs = _buildStationSongs(song);
             const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data, songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000), pinned: false };
             const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]');
             savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
@@ -1677,12 +1719,30 @@ let _bgCacheActive = false;
             let songVibes = song.vibes || [];
             if (typeof songVibes === 'string') { try { songVibes = JSON.parse(songVibes); } catch(e) { songVibes = []; } }
             if (!Array.isArray(songVibes)) songVibes = [];
+            const songMainVibes = _getMainVibes(song.id);
             editVibesContainer.innerHTML = '';
             AVAILABLE_VIBES.forEach(vibe => {
                 const pill = document.createElement('div');
-                pill.className = `vibe-pill ${songVibes.includes(vibe) ? 'active' : ''}`;
+                const isActive = songVibes.includes(vibe);
+                pill.className = `vibe-pill ${isActive ? 'active' : ''} ${isActive && songMainVibes.includes(vibe) ? 'main-vibe' : ''}`;
                 pill.innerText = vibe; pill.dataset.vibe = vibe;
-                pill.addEventListener('click', () => pill.classList.toggle('active'));
+                // Longpress markiert einen bereits ausgewählten Vibe als "Hauptvibe" (siehe
+                // _renderVibesText/CSS .main-vibe) - ein nicht ausgewählter Vibe kann nicht Hauptvibe
+                // sein. longPressFired unterdrückt den synthetischen Klick, den mobile Browser nach
+                // touchend meist noch hinterherfeuern, sonst würde ein Longpress die Auswahl selbst
+                // gleich wieder umschalten.
+                let longPressFired = false;
+                pill.addEventListener('click', () => {
+                    if (longPressFired) { longPressFired = false; return; }
+                    pill.classList.toggle('active');
+                    if (!pill.classList.contains('active')) pill.classList.remove('main-vibe');
+                });
+                addLongPressListener(pill, () => {
+                    if (!pill.classList.contains('active')) return;
+                    longPressFired = true;
+                    pill.classList.toggle('main-vibe');
+                    _hapticTick();
+                });
                 editVibesContainer.appendChild(pill);
             });
             editOverlay.classList.add('active');
@@ -1773,6 +1833,9 @@ let _bgCacheActive = false;
             btnSaveTags.innerText = "Speichere...";
             const selectedVibes = [];
             document.querySelectorAll('#edit-tags-overlay .vibe-pill.active').forEach(pill => selectedVibes.push(pill.dataset.vibe));
+            const mainVibes = [];
+            document.querySelectorAll('#edit-tags-overlay .vibe-pill.main-vibe').forEach(pill => mainVibes.push(pill.dataset.vibe));
+            _setMainVibes(window.currentEditSongId, mainVibes); // rein lokal, kein Backend-Feld - siehe Kommentar bei _getMainVibes
             const changes = { title: editTitle.value, artist: editArtist.value, cover_data: currentEditCoverData, vibes: selectedVibes };
 
             const song = window._songIndex?.get(window.currentEditSongId) || window._songIndex?.get(parseInt(window.currentEditSongId));
@@ -1809,7 +1872,7 @@ let _bgCacheActive = false;
                     const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
                     if (bpNoVibesDot) bpNoVibesDot.style.display = hasVibesNow ? 'none' : 'block';
                     const bpHv = document.getElementById('bp-header-vibes');
-                    if (bpHv) bpHv.innerText = selectedVibes.join(' • ') || 'Aktueller Titel';
+                    _renderVibesText(bpHv, selectedVibes, songId);
                     const bpTitle = document.getElementById('bp-song-name');
                     const bpArtist = document.getElementById('bp-artist-name');
                     if (bpTitle) bpTitle.innerText = changes.title;
@@ -2468,20 +2531,50 @@ async function createNewPlaylistProcess() {
         if(cont && cont.innerHTML === '') {
             const noVibePill = document.createElement('div'); noVibePill.className = 'vibe-pill'; noVibePill.innerText = '🚫 Kein Vibe'; noVibePill.dataset.vibe = '__no_vibe__';
             noVibePill.addEventListener('click', () => { noVibePill.classList.toggle('active'); if (noVibePill.classList.contains('active')) { cont.querySelectorAll('.vibe-pill:not([data-vibe="__no_vibe__"])').forEach(p => p.classList.remove('active')); } }); cont.appendChild(noVibePill);
-            AVAILABLE_VIBES.forEach(vibe => { const pill = document.createElement('div'); pill.className = 'vibe-pill'; pill.innerText = vibe; pill.dataset.vibe = vibe; pill.addEventListener('click', () => { pill.classList.toggle('active'); if (pill.classList.contains('active')) { cont.querySelector('[data-vibe="__no_vibe__"]')?.classList.remove('active'); } }); cont.appendChild(pill); });
+            // Antippen = einschließen (UND-Pflicht bzw. Hauptvibe-Treffer, siehe Handler unten), Longpress
+            // = ausschließen. Beide Zustände schließen sich pro Pille gegenseitig aus. longPressFired
+            // unterdrückt den synthetischen Klick nach touchend, sonst würde ein Longpress sofort wieder
+            // "einschließen" auslösen.
+            AVAILABLE_VIBES.forEach(vibe => {
+                const pill = document.createElement('div'); pill.className = 'vibe-pill'; pill.innerText = vibe; pill.dataset.vibe = vibe;
+                let longPressFired = false;
+                pill.addEventListener('click', () => {
+                    if (longPressFired) { longPressFired = false; return; }
+                    pill.classList.remove('excluded');
+                    pill.classList.toggle('active');
+                    if (pill.classList.contains('active')) { cont.querySelector('[data-vibe="__no_vibe__"]')?.classList.remove('active'); }
+                });
+                addLongPressListener(pill, () => {
+                    longPressFired = true;
+                    pill.classList.remove('active');
+                    pill.classList.toggle('excluded');
+                    if (pill.classList.contains('excluded')) { cont.querySelector('[data-vibe="__no_vibe__"]')?.classList.remove('active'); }
+                    _hapticTick();
+                });
+                cont.appendChild(pill);
+            });
         }
         document.getElementById('vibe-mix-overlay')?.classList.add('active');
     });
 
     document.getElementById('btn-create-vibe-mix')?.addEventListener('click', () => {
         const selectedVibes = []; document.querySelectorAll('#mix-vibes-container .vibe-pill.active').forEach(p => selectedVibes.push(p.dataset.vibe));
+        const excludedVibes = []; document.querySelectorAll('#mix-vibes-container .vibe-pill.excluded').forEach(p => excludedVibes.push(p.dataset.vibe));
         if(selectedVibes.length === 0) return alert('Wähle mindestens einen Vibe!');
-        const isNoVibe = selectedVibes.includes('__no_vibe__'); let matchedSongs;
-        if (isNoVibe) { matchedSongs = window.globalSongsData.filter(s => !s.vibes || s.vibes.length === 0); } 
+        const isNoVibe = selectedVibes.includes('__no_vibe__');
+        const onlyMain = document.getElementById('mix-only-main-toggle')?.checked;
+        let matchedSongs;
+        if (isNoVibe) { matchedSongs = window.globalSongsData.filter(s => !s.vibes || s.vibes.length === 0); }
+        // Hauptvibe-Filter nutzt ODER statt UND: verlangt man bei mehreren gewählten Vibes, dass
+        // JEDER davon beim selben Song als Hauptvibe markiert ist, bleibt fast nie ein Treffer übrig
+        // (ein Song hat selten 2+ gleichrangige Hauptstimmungen). "Mindestens einer davon ist
+        // Hauptvibe" ist die sinnvollere Lesart.
+        else if (onlyMain) { matchedSongs = window.globalSongsData.filter(song => selectedVibes.some(v => _getMainVibes(song.id).includes(v))); }
         else { matchedSongs = window.globalSongsData.filter(song => selectedVibes.every(v => song.vibes && song.vibes.includes(v))); }
+        if (excludedVibes.length > 0) { matchedSongs = matchedSongs.filter(song => !excludedVibes.some(v => song.vibes && song.vibes.includes(v))); }
         if (matchedSongs.length === 0) return alert('Keine passenden Songs gefunden.');
 
-        const mixName = 'Vibe Mix: ' + (isNoVibe ? 'Ohne Vibe' : selectedVibes.join(', ')); const shuffledIds = [...matchedSongs].sort(() => Math.random() - 0.5).map(s => s.id);
+        const mixName = 'Vibe Mix: ' + (isNoVibe ? 'Ohne Vibe' : selectedVibes.join(', ')) + (excludedVibes.length > 0 ? ` (ohne ${excludedVibes.join(', ')})` : ''); const shuffledIds = [...matchedSongs].sort(() => Math.random() - 0.5).map(s => s.id);
         const newMix = { id: 'temp_' + Date.now(), name: mixName, cover_data: matchedSongs[0].cover_data || '', songIds: shuffledIds, expires: Date.now() + 86400000, pinned: false };
         const mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); mixes.unshift(newMix); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(mixes));
         
@@ -2740,10 +2833,7 @@ async function createNewPlaylistProcess() {
         document.getElementById('big-player-context-overlay').classList.remove('active');
         const activeId = window.currentPlayingSongId || (window.currentSongData ? window.currentSongData.id : null); if (!activeId) return;
         const song = window._songIndex?.get(parseInt(activeId)); if (!song) return;
-        const sourceVibes = song.vibes || [];
-        let stationSongs = window.globalSongsData.filter(s => { if (s.id === song.id) return true; const sVibes = s.vibes || []; const matchCount = sVibes.filter(v => sourceVibes.includes(v)).length; return matchCount >= 2; });
-        if (stationSongs.length <= 1) { const randomFill = [...window.globalSongsData].sort(() => 0.5 - Math.random()).slice(0, 5); stationSongs = Array.from(new Set([...stationSongs, ...randomFill])); }
-        stationSongs = stationSongs.sort(() => 0.5 - Math.random());
+        const stationSongs = _buildStationSongs(song);
         const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data, songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000), pinned: false };
         const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]'); savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
         if (typeof window.renderHomeSections === 'function') window.renderHomeSections(); _showToast(`Sender für "${song.title}" erstellt!`);

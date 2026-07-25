@@ -866,6 +866,11 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     transition: background 0.18s, color 0.18s, border-color 0.18s;
 }
 .vibe-pill.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+/* Hauptvibe: zusätzlicher Ring um die normale aktive Pille, gut sichtbar auch im Glass-Stil weiter unten. */
+.vibe-pill.main-vibe { box-shadow: 0 0 0 2px var(--accent-text, #fff); }
+/* Ausschluss-Pille (Vibe-Mix): Standard-Akzentfarbe ist selbst oft Rot (siehe --accent oben), darum
+   nicht per Farbe allein von "aktiv" abgesetzt, sondern zusätzlich durchgestrichen + dunkler Grund. */
+.vibe-pill.excluded { background: rgba(255,255,255,0.04); color: #ff6b6b; border-color: #ff6b6b; text-decoration: line-through; }
 
 /* ─── Cover Play Button ─────────────────────────────────────────────────────── */
 .song-cover, .station-cover { position: relative; }

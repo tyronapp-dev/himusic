@@ -642,7 +642,11 @@
             <div class="sheet-handle"></div>
             <div class="sheet-content" style="padding: 20px;">
                 <h3 style="text-align: center; margin-bottom: 10px; font-weight: 600;">Vibe Mix erstellen</h3>
-                <p style="font-size: 13px; color: var(--text-secondary); text-align: center; margin-bottom: 15px;">Lieder müssen <strong style="color:white;">ALLE</strong> gewählten Vibes enthalten.</p>
+                <p style="font-size: 13px; color: var(--text-secondary); text-align: center; margin-bottom: 10px;">Lieder müssen <strong style="color:white;">ALLE</strong> gewählten Vibes enthalten. Antippen = auswählen, <strong style="color:white;">lang drücken</strong> = ausschließen.</p>
+                <label style="display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:15px; font-size:14px; color:var(--text-secondary); cursor:pointer;">
+                    <input type="checkbox" id="mix-only-main-toggle" style="width:18px;height:18px;">
+                    Nur Hauptvibes berücksichtigen
+                </label>
                 <div class="vibes-container" id="mix-vibes-container"></div>
                 <button class="secondary-btn" id="btn-create-vibe-mix" style="width: 100%; background: var(--accent); color: var(--accent-text); border-color: var(--accent);">Mix generieren</button>
             </div>
