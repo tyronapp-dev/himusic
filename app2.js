@@ -90,13 +90,14 @@ function _setMainVibes(songId, vibesArr) {
     localStorage.setItem('himusic_main_vibes', JSON.stringify(map));
 }
 
-// Baut den Vibes-Text für den Big Player, Hauptvibes fett hervorgehoben.
+// Baut den Vibes-Text für den Big Player, Hauptvibes fett + in der aktuellen Akzentfarbe (var(--accent),
+// live vom Farbwähler in den Einstellungen gesetzt - siehe _setAccentColor) hervorgehoben.
 function _renderVibesText(el, vibesArr, songId) {
     if (!el) return;
     const vibes = _parseVibes(vibesArr);
     if (vibes.length === 0) { el.innerText = 'Aktueller Titel'; return; }
     const mainVibes = songId != null ? _getMainVibes(songId) : [];
-    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b>${_esc(v)}</b>` : _esc(v)).join(' • ');
+    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b style="color:var(--accent)">${_esc(v)}</b>` : _esc(v)).join(' • ');
 }
 
 // Sender-Songliste für einen Ausgangssong: gewichtete Ähnlichkeit statt reinem Overlap-Zähler.
