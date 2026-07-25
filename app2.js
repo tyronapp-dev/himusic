@@ -245,6 +245,16 @@ function _stringSimilarity(a, b) {
 }
 // Unterhalb dieser Ähnlichkeit gilt ein Treffer als "vermutlich falscher Song", nicht als Match.
 const _META_MATCH_THRESHOLD = 0.35;
+// Zweite, unabhängige Absicherung neben dem Text-Vergleich oben: zwei verschiedene Songs können
+// einen ähnlich klingenden Titel/Künstler haben (z.B. Radio-Edit vs. Album-Version, Cover eines
+// anderen Künstlers mit angepasstem Namen) und den Text-Check trotzdem bestehen - ihre Länge
+// unterscheidet sich aber fast immer deutlich. Nur angewendet, wenn beide Längen bekannt sind
+// (>0) - sonst kein Rückschluss möglich, dann zählt weiterhin nur der Text-Check.
+const _META_DURATION_TOLERANCE_SEC = 10;
+function _durationMismatch(localDurationSec, resultDurationSec) {
+    if (!localDurationSec || !resultDurationSec) return false; // eine Seite unbekannt -> keine Aussage möglich
+    return Math.abs(localDurationSec - resultDurationSec) > _META_DURATION_TOLERANCE_SEC;
+}
 // Spotify darf lockerer matchen als iTunes (z.B. leicht verschriebene/rohe YouTube-Titel sollen
 // trotzdem noch treffen) - niedrigerer Schwellwert nur für die Spotify-Prüfung.
 const _META_MATCH_THRESHOLD_SPOTIFY = 0.22;
@@ -252,7 +262,7 @@ const _META_MATCH_THRESHOLD_SPOTIFY = 0.22;
 // Spotify-Suche über den Worker. Liefert das volle Metadaten-Objekt {title, artist, cover}
 // oder null. data.error === "rate_limited" → Spotify drosselt gerade unsere App-Kennung;
 // der Aufrufer kann das anzeigen bzw. auf iTunes ausweichen.
-async function searchSongMetaSpotify(title, artist, retryCount = 0) {
+async function searchSongMetaSpotify(title, artist, localDurationSec = 0, retryCount = 0) {
     const q = _cleanSearchTerm(title, artist);
     if (!q) return null;
     try {
@@ -266,18 +276,23 @@ async function searchSongMetaSpotify(title, artist, retryCount = 0) {
         // YouTube-Titel zurückgibt, statt es blind zu übernehmen.
         const resultLabel = `${data.result.title || ''} ${data.result.artist || ''}`;
         if (_stringSimilarity(title, resultLabel) < _META_MATCH_THRESHOLD_SPOTIFY) return null;
+        // Zweite Absicherung per Songlänge, siehe _durationMismatch weiter oben. Feldname beim
+        // Worker nicht sicher bekannt (Worker-Quelltext liegt nicht im Repo) - probiert beide
+        // gängigen Varianten, wird sonst einfach übersprungen statt einen echten Treffer zu verwerfen.
+        const resultDurationSec = data.result.duration_ms ? Math.round(data.result.duration_ms / 1000) : (data.result.duration ? Math.round(data.result.duration) : 0);
+        if (_durationMismatch(localDurationSec, resultDurationSec)) return null;
         return { title: data.result.title, artist: data.result.artist, album: data.result.album || "", cover: data.result.cover_data || null };
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
             await new Promise(resolve => setTimeout(resolve, 1000));
-            return searchSongMetaSpotify(title, artist, retryCount + 1);
+            return searchSongMetaSpotify(title, artist, localDurationSec, retryCount + 1);
         }
         return null;
     }
 }
 
 // iTunes-Suche (direkt, kein Key). Liefert {title, artist, cover} oder null.
-async function searchSongMetaItunes(title, artist, retryCount = 0) {
+async function searchSongMetaItunes(title, artist, localDurationSec = 0, retryCount = 0) {
     const q = _cleanSearchTerm(title, artist);
     if (!q) return null;
     try {
@@ -288,11 +303,15 @@ async function searchSongMetaItunes(title, artist, retryCount = 0) {
         if (!t) return null;
         const resultLabel = `${t.trackName || ''} ${t.artistName || ''}`;
         if (_stringSimilarity(title, resultLabel) < _META_MATCH_THRESHOLD) return null;
+        // Zweite Absicherung per Songlänge (siehe _durationMismatch) - iTunes liefert die Länge in
+        // der Suchantwort immer mit (trackTimeMillis), bisher ungenutzt.
+        const resultDurationSec = t.trackTimeMillis ? Math.round(t.trackTimeMillis / 1000) : 0;
+        if (_durationMismatch(localDurationSec, resultDurationSec)) return null;
         return { title: t.trackName, artist: t.artistName, album: t.collectionName || "", cover: (t.artworkUrl100 || '').replace('100x100bb', '600x600bb') || null };
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
             await new Promise(resolve => setTimeout(resolve, 1000));
-            return searchSongMetaItunes(title, artist, retryCount + 1);
+            return searchSongMetaItunes(title, artist, localDurationSec, retryCount + 1);
         }
         return null;
     }
@@ -1697,7 +1716,8 @@ let _bgCacheActive = false;
     if (btnSearchItunes) {
         btnSearchItunes.addEventListener('click', async () => {
             btnSearchItunes.innerText = "Suche...";
-            const meta = await searchSongMetaItunes(editTitle.value, editArtist.value);
+            const editDuration = window._songIndex?.get(window.currentEditSongId)?.duration;
+            const meta = await searchSongMetaItunes(editTitle.value, editArtist.value, editDuration);
             btnSearchItunes.innerText = _applyEditorMeta(meta) ? "Gefunden!" : "Nichts gefunden";
             setTimeout(() => btnSearchItunes.innerHTML = ITUNES_BTN_HTML, 2000);
         });
@@ -1706,7 +1726,8 @@ let _bgCacheActive = false;
     if (btnSearchSpotify) {
         btnSearchSpotify.addEventListener('click', async () => {
             btnSearchSpotify.innerText = "Suche...";
-            const meta = await searchSongMetaSpotify(editTitle.value, editArtist.value);
+            const editDuration = window._songIndex?.get(window.currentEditSongId)?.duration;
+            const meta = await searchSongMetaSpotify(editTitle.value, editArtist.value, editDuration);
             if (meta && meta.rateLimited) {
                 // Spotify drosselt gerade → dem Nutzer sagen, was los ist, statt "nichts gefunden"
                 btnSearchSpotify.innerText = "Spotify überlastet – nutze iTunes";
@@ -2913,7 +2934,7 @@ async function createNewPlaylistProcess() {
                 const song = todo[idx++];
                 if (window._spotifyCooldownUntil && Date.now() < window._spotifyCooldownUntil) break; // Rate-Limit: Rest bleibt für den nächsten Klick offen
                 try {
-                    const meta = await searchSongMetaSpotify(song.title, song.artist);
+                    const meta = await searchSongMetaSpotify(song.title, song.artist, song.duration);
                     if (meta && meta.rateLimited) break;
                     if (meta && meta.cover) {
                         const patch = { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover, vibes: _parseVibes(song.vibes) };
@@ -3768,7 +3789,7 @@ async function processBackgroundSync() {
                 const song = todo[idx++];
                 let patch = null, matched = false, giveUpNow = false;
                 try {
-                    const meta = await searchSongMetaItunes(song.title, song.artist);
+                    const meta = await searchSongMetaItunes(song.title, song.artist, song.duration);
                     if (meta && meta.cover) {
                         patch = { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover };
                         matched = true;
@@ -3779,7 +3800,7 @@ async function processBackgroundSync() {
                         // nicht für jeden Song.
                         const spotifyCoolingDown = window._spotifyCooldownUntil && Date.now() < window._spotifyCooldownUntil;
                         if (!spotifyCoolingDown) {
-                            const sMeta = await searchSongMetaSpotify(song.title, song.artist);
+                            const sMeta = await searchSongMetaSpotify(song.title, song.artist, song.duration);
                             if (sMeta && sMeta.rateLimited) {
                                 // Rate-Limit gerade erst ausgelöst – nicht aufgeben, später erneut versuchen.
                             } else if (sMeta && sMeta.cover) {
