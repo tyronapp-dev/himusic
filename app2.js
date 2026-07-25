@@ -1727,19 +1727,22 @@ let _bgCacheActive = false;
                 const isActive = songVibes.includes(vibe);
                 pill.className = `vibe-pill ${isActive ? 'active' : ''} ${isActive && songMainVibes.includes(vibe) ? 'main-vibe' : ''}`;
                 pill.innerText = vibe; pill.dataset.vibe = vibe;
-                // Doppelklick/Doppeltipp markiert einen bereits ausgewählten Vibe als "Hauptvibe"
-                // (siehe _renderVibesText/CSS .main-vibe) - ein nicht ausgewählter Vibe kann nicht
-                // Hauptvibe sein. Ein Doppelklick löst technisch IMMER erst zwei "click"-Events und
-                // danach "dblclick" aus - die beiden click-Toggles auf "active" heben sich also von
-                // selbst wieder auf (Pille bleibt im selben Auswahlzustand wie vor dem Doppelklick),
-                // bevor dblclick den Hauptvibe umschaltet. Kein künstliches Timing/Debounce nötig,
-                // dadurch bleibt der normale Einzelklick weiterhin verzögerungsfrei.
+                // Doppelklick/Doppeltipp markiert einen Vibe DIREKT als "Hauptvibe" (siehe
+                // _renderVibesText/CSS .main-vibe) - wählt ihn dabei zwangsläufig mit aus, falls er
+                // das noch nicht war. Kein Vorher-erst-auswählen nötig. Technisch löst ein echter
+                // Doppelklick IMMER erst zwei "click"-Events aus (die sich beim active-Toggle
+                // gegenseitig aufheben, Pille bleibt im Auswahlzustand von vor dem Doppelklick) und
+                // danach "dblclick" - der erzwingt active deshalb aktiv, statt nur zu prüfen, sonst
+                // bliebe eine vorher nicht ausgewählte Pille trotz Hauptvibe-Markierung unausgewählt.
+                // Zwei langsame, einzelne Klicks (kein echter Doppelklick) lösen browserseitig gar
+                // kein "dblclick" aus und bleiben normale Einzelklicks - kein künstliches
+                // Timing/Debounce nötig, der normale Einzelklick bleibt verzögerungsfrei.
                 pill.addEventListener('click', () => {
                     pill.classList.toggle('active');
                     if (!pill.classList.contains('active')) pill.classList.remove('main-vibe');
                 });
                 pill.addEventListener('dblclick', () => {
-                    if (!pill.classList.contains('active')) return;
+                    pill.classList.add('active');
                     pill.classList.toggle('main-vibe');
                     _hapticTick();
                 });
