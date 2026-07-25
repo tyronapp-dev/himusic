@@ -1727,20 +1727,19 @@ let _bgCacheActive = false;
                 const isActive = songVibes.includes(vibe);
                 pill.className = `vibe-pill ${isActive ? 'active' : ''} ${isActive && songMainVibes.includes(vibe) ? 'main-vibe' : ''}`;
                 pill.innerText = vibe; pill.dataset.vibe = vibe;
-                // Longpress markiert einen bereits ausgewählten Vibe als "Hauptvibe" (siehe
-                // _renderVibesText/CSS .main-vibe) - ein nicht ausgewählter Vibe kann nicht Hauptvibe
-                // sein. longPressFired unterdrückt den synthetischen Klick, den mobile Browser nach
-                // touchend meist noch hinterherfeuern, sonst würde ein Longpress die Auswahl selbst
-                // gleich wieder umschalten.
-                let longPressFired = false;
+                // Doppelklick/Doppeltipp markiert einen bereits ausgewählten Vibe als "Hauptvibe"
+                // (siehe _renderVibesText/CSS .main-vibe) - ein nicht ausgewählter Vibe kann nicht
+                // Hauptvibe sein. Ein Doppelklick löst technisch IMMER erst zwei "click"-Events und
+                // danach "dblclick" aus - die beiden click-Toggles auf "active" heben sich also von
+                // selbst wieder auf (Pille bleibt im selben Auswahlzustand wie vor dem Doppelklick),
+                // bevor dblclick den Hauptvibe umschaltet. Kein künstliches Timing/Debounce nötig,
+                // dadurch bleibt der normale Einzelklick weiterhin verzögerungsfrei.
                 pill.addEventListener('click', () => {
-                    if (longPressFired) { longPressFired = false; return; }
                     pill.classList.toggle('active');
                     if (!pill.classList.contains('active')) pill.classList.remove('main-vibe');
                 });
-                addLongPressListener(pill, () => {
+                pill.addEventListener('dblclick', () => {
                     if (!pill.classList.contains('active')) return;
-                    longPressFired = true;
                     pill.classList.toggle('main-vibe');
                     _hapticTick();
                 });
