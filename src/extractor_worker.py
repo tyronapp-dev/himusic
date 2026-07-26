@@ -2,20 +2,27 @@
 Himusic Cloud – YouTube Extractor
 Läuft auf einem GitHub Actions Ubuntu-Runner.
 Ablauf:
+  0. Cobalt-Instanz-Pool wird zuerst versucht (siehe ADR-009) – deren eigener Server kontaktiert
+     YouTube, nicht dieser Runner, das IP-Reputations-Problem entfällt für diesen Pfad komplett.
+     Nur bei Fehlschlag aller Instanzen fällt der Job auf den bisherigen Weg zurück:
   1. yt-dlp lädt beste Audio-Spur als .m4a (Android-Client-Spoofing)
   2. boto3 lädt die Datei per Multipart-Upload nach Cloudflare R2
   3. requests ruft /internal/register am Cloudflare Worker auf
 """
 
+import ipaddress
 import json
 import math
 import os
+import random
 import re
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import boto3
 import requests
@@ -74,6 +81,148 @@ def _diagnose_environment() -> None:
     gh_notice(
         f"Umgebungs-Check: yt-dlp={ytdlp_version} | PO-Token-Server={po_status} | curl_cffi={cffi_status}"
     )
+
+
+# ──────────────────────────────────────────────
+# Cobalt-Fallback (siehe ADR-009)
+# ──────────────────────────────────────────────
+
+# Community-Instanzen von cobalt.tools (Open-Source-Downloader). Jede Instanz kontaktiert
+# YouTube mit ihren EIGENEN Cookies/ihrer eigenen IP – wir schicken nur die Video-URL raus, nie
+# eigene Zugangsdaten. Live getestet am 2026-07-26 (echter Audio-Download, ID3-Tag verifiziert),
+# alle vier ohne Turnstile-Captcha (also automatisierbar ohne Browser). Reihenfolge wird pro Lauf
+# zufällig gemischt, damit nicht immer dieselbe Instanz die Last trägt. Community-Betreiber können
+# jederzeit abschalten oder überlastet sein – deshalb mehrere statt einer einzigen, und deshalb
+# bleibt yt-dlp+Cookies als Sicherheitsnetz bestehen, falls der gesamte Pool ausfällt.
+COBALT_INSTANCES = [
+    "https://api.cobalt.liubquanti.click",
+    "https://cobaltapi.kittycat.boo",
+    "https://rue-cobalt.xenon.zone",
+    "https://cobaltapi.cjs.nz",
+]
+
+_YOUTUBE_URL_RE = re.compile(r"^https://(www\.|m\.)?(youtube\.com/watch\?v=|youtu\.be/)", re.IGNORECASE)
+
+# Harte Obergrenze gegen eine fehlerhafte/kompromittierte Instanz, die endlos oder riesige Daten
+# streamt (Platte des Runners volllaufen lassen) – ein einzelner Song braucht dafür nie annähernd
+# so viel.
+_COBALT_MAX_BYTES = 60 * 1024 * 1024  # 60 MB
+
+
+def _is_safe_tunnel_url(url: str) -> bool:
+    """
+    SSRF-Schutz (siehe ADR-009-Review): eine boesartige oder kompromittierte Cobalt-Instanz
+    koennte statt einer echten Audio-Tunnel-URL ein internes Ziel zurueckgeben (Cloud-Metadaten-
+    Dienst 169.254.169.254, localhost, Intranet-Host) - der Runner/Watcher wuerde das blind
+    anfragen. _YOUTUBE_URL_RE oben schuetzt nur die AUSGEHENDE Video-URL, nicht diese
+    zurueckkommende. Ein Host-Allowlist (nur derselbe Host wie die API-Instanz) waere zu streng:
+    Cobalt-Tunnel liegen haeufig auf einem ANDEREN Host als die API (live beobachtet:
+    api.cobalt.liubquanti.click lieferte einen Tunnel auf einem voelling anderen Cobalt-Mirror-
+    Host). Deshalb stattdessen: nur https, und die aufgeloeste IP darf nicht in einem privaten/
+    reservierten Bereich liegen (RFC1918, loopback, link-local - deckt auch die Cloud-Metadaten-
+    Adresse ab).
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return False
+        for info in socket.getaddrinfo(parsed.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except (socket.gaierror, ValueError, UnicodeError):
+        return False
+
+
+def _ffprobe_duration(file_path: str) -> int:
+    """Dauer in Sekunden per ffprobe – Cobalt liefert selbst keine Dauer in der Antwort."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file_path],
+            capture_output=True, text=True, timeout=20,
+        )
+        return int(float(result.stdout.strip()))
+    except (ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def try_cobalt_download(youtube_url: str, output_dir: str):
+    """
+    Versucht den Download über den Cobalt-Instanz-Pool statt direkt über yt-dlp/YouTube.
+    Gibt {"path", "title", "duration"} zurück oder None, wenn alle Instanzen scheitern
+    (dann übernimmt der Aufrufer den bisherigen yt-dlp-Weg als Fallback).
+    """
+    if not _YOUTUBE_URL_RE.match(youtube_url):
+        return None  # Sicherheitsnetz: nur echte YouTube-URLs gehen an fremde Server raus
+
+    instances = COBALT_INSTANCES[:]
+    random.shuffle(instances)
+
+    for base_url in instances:
+        try:
+            resp = requests.post(
+                base_url + "/",
+                json={"url": youtube_url, "downloadMode": "audio", "audioFormat": "mp3"},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                timeout=20,
+            )
+            if not resp.ok:
+                print(f"[INFO] Cobalt-Instanz {base_url} antwortete mit HTTP {resp.status_code}, probiere nächste.", flush=True)
+                continue
+            data = resp.json()
+            # Manche Instanzen liefern bei Fehlern gueltiges JSON, das aber kein Objekt ist
+            # (z.B. eine leere Liste oder null) - data.get(...) wuerde dann mit AttributeError
+            # crashen, was NICHT vom except-Block unten gefangen wird und den ganzen Job statt
+            # nur diese eine Instanz scheitern liesse (Fund aus Security-Review).
+            if not isinstance(data, dict):
+                print(f"[INFO] Cobalt-Instanz {base_url} lieferte kein JSON-Objekt, probiere nächste.", flush=True)
+                continue
+            if data.get("status") != "tunnel" or not data.get("url"):
+                print(f"[INFO] Cobalt-Instanz {base_url} lieferte keinen Download-Tunnel (status={data.get('status')}), probiere nächste.", flush=True)
+                continue
+            if not _is_safe_tunnel_url(data["url"]):
+                print(f"[INFO] Cobalt-Instanz {base_url} lieferte eine unsichere Tunnel-URL, probiere nächste (SSRF-Schutz).", flush=True)
+                continue
+
+            # Titel aus dem von Cobalt vorgeschlagenen Dateinamen ableiten (z.B. "Titel - Kanal.mp3"),
+            # analog zur bisherigen Behandlung von YouTube-Titeln als freier Text (siehe ADR-004,
+            # _esc() beim Rendern) – hier nur auf sinnvolle Länge begrenzt, kein Escaping nötig
+            # (Backend rendert kein HTML, Frontend escaped ohnehin beim Anzeigen).
+            raw_name = str(data.get("filename") or "cobalt_import.mp3")
+            title = re.sub(r"\.mp3$", "", raw_name, flags=re.IGNORECASE).strip()[:300] or "YouTube Import"
+
+            audio_path = os.path.join(output_dir, "cobalt_audio.mp3")
+            with requests.get(data["url"], stream=True, timeout=60) as dl:
+                if not dl.ok:
+                    print(f"[INFO] Cobalt-Tunnel von {base_url} lieferte HTTP {dl.status_code}, probiere nächste Instanz.", flush=True)
+                    continue
+                written = 0
+                with open(audio_path, "wb") as f:
+                    for chunk in dl.iter_content(chunk_size=1024 * 256):
+                        written += len(chunk)
+                        if written > _COBALT_MAX_BYTES:
+                            raise ValueError(f"Cobalt-Tunnel lieferte mehr als {_COBALT_MAX_BYTES // 1024 // 1024} MB, abgebrochen (Sicherheitslimit)")
+                        f.write(chunk)
+
+            # Mini-Plausibilitätscheck: echte MP3s beginnen mit "ID3" (v2-Tag) oder dem Frame-Sync
+            # 0xFFFB/0xFFFA – schützt davor, eine HTML-Fehlerseite als "Song" hochzuladen.
+            with open(audio_path, "rb") as f:
+                header = f.read(3)
+            if written < 10_000 or not (header == b"ID3" or header[:2] in (b"\xff\xfb", b"\xff\xfa")):
+                print(f"[INFO] Cobalt-Instanz {base_url} lieferte keine plausible Audiodatei ({written} Bytes), probiere nächste.", flush=True)
+                continue
+
+            duration = _ffprobe_duration(audio_path)
+            print(f"[INFO] Cobalt-Download über {base_url} erfolgreich: {title} ({written / 1024:.0f} KB, {duration}s)", flush=True)
+            return {"path": audio_path, "title": title, "duration": duration}
+
+        except (requests.RequestException, ValueError, OSError) as exc:
+            print(f"[INFO] Cobalt-Instanz {base_url} fehlgeschlagen ({exc}), probiere nächste.", flush=True)
+            continue
+
+    print("[INFO] Alle Cobalt-Instanzen fehlgeschlagen – falle zurück auf yt-dlp+Cookies.", flush=True)
+    return None
 
 
 # Mehrere YouTube-Player-Clients in EINEM yt-dlp-Aufruf anbieten. YouTube blockt einzelne
@@ -209,6 +358,7 @@ def upload_to_r2(
     access_key_id: str,
     secret_access_key: str,
     bucket_name: str,
+    content_type: str = "audio/mp4",
 ) -> None:
     """Multipart-Upload nach Cloudflare R2 via boto3 S3-API."""
     s3 = boto3.client(
@@ -228,11 +378,11 @@ def upload_to_r2(
 
     if num_parts <= 1:
         with open(file_path, "rb") as f:
-            s3.put_object(Bucket=bucket_name, Key=r2_key, Body=f, ContentType="audio/mp4")
+            s3.put_object(Bucket=bucket_name, Key=r2_key, Body=f, ContentType=content_type)
         print("[INFO] Single-Part-Upload abgeschlossen.", flush=True)
         return
 
-    mpu = s3.create_multipart_upload(Bucket=bucket_name, Key=r2_key, ContentType="audio/mp4")
+    mpu = s3.create_multipart_upload(Bucket=bucket_name, Key=r2_key, ContentType=content_type)
     upload_id = mpu["UploadId"]
     parts = []
 
@@ -321,21 +471,34 @@ def main() -> None:
     _diagnose_environment()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Cookies EINMAL schreiben, für Metadaten- und Download-Aufruf gemeinsam nutzen
-        cookies_args = _cookies_args(tmpdir)
+        # 0. Cobalt-Pool zuerst versuchen (siehe ADR-009): deren eigener Server kontaktiert
+        # YouTube, nicht dieser Runner – kein Cookie-Bedarf, kein IP-Reputations-Risiko für
+        # diesen Pfad. Nur bei Fehlschlag aller Instanzen folgt der bisherige yt-dlp-Weg.
+        cobalt_result = try_cobalt_download(youtube_url, tmpdir)
+        if cobalt_result:
+            audio_path  = cobalt_result["path"]
+            title       = cobalt_result["title"]
+            duration    = cobalt_result["duration"]
+            file_ext    = "mp3"
+            content_type = "audio/mpeg"
+        else:
+            # Cookies EINMAL schreiben, für Metadaten- und Download-Aufruf gemeinsam nutzen
+            cookies_args = _cookies_args(tmpdir)
 
-        # 1. Metadaten abrufen
-        info = get_video_info(youtube_url, cookies_args)
-        title    = info["title"]
-        duration = info["duration"]
-        print(f"[INFO] Titel: {title} | Dauer: {duration}s", flush=True)
+            # 1. Metadaten abrufen
+            info = get_video_info(youtube_url, cookies_args)
+            title    = info["title"]
+            duration = info["duration"]
+            print(f"[INFO] Titel: {title} | Dauer: {duration}s", flush=True)
 
-        # 2. Audio herunterladen
-        audio_path = download_audio(youtube_url, tmpdir, cookies_args)
+            # 2. Audio herunterladen
+            audio_path = download_audio(youtube_url, tmpdir, cookies_args)
+            file_ext    = "m4a"
+            content_type = "audio/mp4"
 
         # 3. R2-Schlüssel aufbauen (job_id sorgt für Eindeutigkeit)
         safe_job = re.sub(r"[^a-zA-Z0-9\-]", "", job_id)[:36]
-        r2_key   = f"yt/{safe_job}.m4a"
+        r2_key   = f"yt/{safe_job}.{file_ext}"
 
         # 4. Nach R2 hochladen
         upload_to_r2(
@@ -345,6 +508,7 @@ def main() -> None:
             access_key_id=r2_access_key_id,
             secret_access_key=r2_secret_access_key,
             bucket_name=r2_bucket_name,
+            content_type=content_type,
         )
 
     # 5. In D1 registrieren (außerhalb des tmpdir – Datei bereits hochgeladen)

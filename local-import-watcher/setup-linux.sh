@@ -13,7 +13,8 @@ curl -sL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.
 mkdir -p /tmp/ffmpeg_extract
 tar xf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg_extract --strip-components=1
 sudo cp /tmp/ffmpeg_extract/ffmpeg /usr/local/bin/ffmpeg
-sudo chmod a+rx /usr/local/bin/ffmpeg
+sudo cp /tmp/ffmpeg_extract/ffprobe /usr/local/bin/ffprobe
+sudo chmod a+rx /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 rm -rf /tmp/ffmpeg.tar.xz /tmp/ffmpeg_extract
 
 echo "Installiere Node.js 20..."

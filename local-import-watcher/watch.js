@@ -14,6 +14,7 @@
 // Start: node watch.js   (einfach laufen lassen, solange du Importe machen willst)
 
 const { spawn } = require('child_process');
+const dns = require('dns').promises;
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -43,6 +44,7 @@ const IS_WINDOWS = process.platform === 'win32';
 // installierten Programme (liegen im PATH, z.B. nach "sudo dnf install yt-dlp ffmpeg").
 const YTDLP_PATH = IS_WINDOWS ? path.join(__dirname, 'yt-dlp.exe') : 'yt-dlp';
 const FFMPEG_PATH = IS_WINDOWS ? path.join(__dirname, 'ffmpeg.exe') : 'ffmpeg';
+const FFPROBE_PATH = IS_WINDOWS ? path.join(__dirname, 'ffprobe.exe') : 'ffprobe';
 const POLL_INTERVAL_MS = 2000;
 // Seit der Umstellung auf das native m4a-Format (siehe downloadAudio) faellt der CPU-teure
 // opus->AAC-Transcode weg - die Arbeit ist jetzt fast nur noch Netzwerk-I/O, entsprechend
@@ -64,6 +66,142 @@ function run(cmd, args, timeoutMs = 300000) {
         });
         proc.on('error', (err) => { clearTimeout(timer); reject(err); });
     });
+}
+
+// Community-Instanzen von cobalt.tools (Open-Source-Downloader, siehe ADR-009). Jede Instanz
+// kontaktiert YouTube mit ihren EIGENEN Cookies/ihrer eigenen IP - wir schicken nur die Video-URL
+// raus, nie eigene Zugangsdaten. Live getestet am 2026-07-26 (echter Audio-Download, ID3-Tag
+// verifiziert), alle vier ohne Turnstile-Captcha (also automatisierbar). Reihenfolge wird pro
+// Aufruf gemischt. Community-Betreiber koennen jederzeit abschalten/ueberlastet sein - deshalb
+// bleibt yt-dlp als Sicherheitsnetz bestehen, wenn der ganze Pool scheitert (siehe processOne).
+const COBALT_INSTANCES = [
+    'https://api.cobalt.liubquanti.click',
+    'https://cobaltapi.kittycat.boo',
+    'https://rue-cobalt.xenon.zone',
+    'https://cobaltapi.cjs.nz',
+];
+const YOUTUBE_URL_RE = /^https:\/\/(www\.|m\.)?(youtube\.com\/watch\?v=|youtu\.be\/)/i;
+const COBALT_MAX_BYTES = 60 * 1024 * 1024; // Sicherheitsnetz gegen eine fehlerhafte/kompromittierte Instanz
+
+function shuffled(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
+// SSRF-Schutz (siehe ADR-009-Review): eine boesartige/kompromittierte Cobalt-Instanz koennte
+// statt einer echten Audio-Tunnel-URL ein internes Ziel zurueckgeben (Cloud-Metadaten-Dienst
+// 169.254.169.254, localhost, Intranet-Host im Firmennetz dieses PCs) - dieser Watcher wuerde
+// das sonst blind anfragen. YOUTUBE_URL_RE oben schuetzt nur die AUSGEHENDE Video-URL, nicht
+// diese zurueckkommende. Kein Host-Allowlist (Tunnel liegen oft auf einem ANDEREN Host als die
+// API-Instanz, live beobachtet), stattdessen: nur https, und die aufgeloeste IP darf nicht in
+// einem privaten/reservierten Bereich liegen.
+function isPrivateIp(ip, family) {
+    if (family === 4) {
+        const p = ip.split('.').map(Number);
+        return p[0] === 10 || p[0] === 127 || p[0] === 0
+            || (p[0] === 172 && p[1] >= 16 && p[1] <= 31)
+            || (p[0] === 192 && p[1] === 168)
+            || (p[0] === 169 && p[1] === 254); // link-local, deckt Cloud-Metadaten-IP ab
+    }
+    const lower = ip.toLowerCase();
+    return lower === '::1' || /^fe[89ab][0-9a-f]:/.test(lower) /* fe80::/10 */ || /^f[cd][0-9a-f]{2}:/.test(lower) /* fc00::/7 */;
+}
+
+async function isSafeTunnelUrl(urlStr) {
+    try {
+        const u = new URL(urlStr);
+        if (u.protocol !== 'https:') return false;
+        const results = await dns.lookup(u.hostname, { all: true });
+        return results.length > 0 && results.every((r) => !isPrivateIp(r.address, r.family));
+    } catch (err) {
+        return false;
+    }
+}
+
+// Liest den Response-Body inkrementell und bricht SOFORT ab, sobald das Sicherheitslimit
+// ueberschritten wird - anders als "erst voll in den Speicher laden, danach Groesse pruefen"
+// (das wuerde eine boesartige Instanz trotzdem den vollen RAM fuellen lassen, bevor der Cap je
+// greift).
+async function readWithCap(response, maxBytes) {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > maxBytes) {
+            await reader.cancel();
+            throw new Error(`Tunnel lieferte mehr als ${(maxBytes / 1024 / 1024).toFixed(0)} MB, abgebrochen (Sicherheitslimit)`);
+        }
+        chunks.push(value);
+    }
+    return Buffer.concat(chunks);
+}
+
+// Dauer per ffprobe - Cobalt liefert selbst keine Dauer in der Antwort. Fehlt ffprobe.exe (altere
+// Windows-Installation vor diesem Update), liefert run() einen Spawn-Fehler, der hier abgefangen
+// wird - Dauer faellt dann auf 0 zurueck statt den ganzen Import zu blockieren.
+async function ffprobeDuration(filePath) {
+    try {
+        const { stdout } = await run(FFPROBE_PATH, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath], 20000);
+        return parseInt(parseFloat(stdout.trim()), 10) || 0;
+    } catch (err) {
+        return 0;
+    }
+}
+
+async function tryCobaltDownload(youtubeUrl, outputDir) {
+    if (!YOUTUBE_URL_RE.test(youtubeUrl)) return null; // Sicherheitsnetz: nur echte YouTube-URLs gehen an fremde Server raus
+
+    for (const baseUrl of shuffled(COBALT_INSTANCES)) {
+        try {
+            const apiRes = await fetch(`${baseUrl}/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify({ url: youtubeUrl, downloadMode: 'audio', audioFormat: 'mp3' }),
+                signal: AbortSignal.timeout(20000),
+            });
+            if (!apiRes.ok) { console.log(`Cobalt-Instanz ${baseUrl}: HTTP ${apiRes.status}, naechste.`); continue; }
+            const data = await apiRes.json();
+            // Manche Instanzen liefern bei Fehlern gueltiges JSON, das aber kein Objekt ist
+            // (z.B. eine leere Liste) - "data.status" waere dann nur undefined (kein Crash in
+            // JS, anders als Pythons data.get() auf einer Liste), faellt also schon sauber in
+            // die naechste Bedingung durch.
+            if (!data || typeof data !== 'object' || data.status !== 'tunnel' || !data.url) { console.log(`Cobalt-Instanz ${baseUrl}: kein Download-Tunnel (status=${data && data.status}), naechste.`); continue; }
+            if (!(await isSafeTunnelUrl(data.url))) { console.log(`Cobalt-Instanz ${baseUrl}: unsichere Tunnel-URL, naechste (SSRF-Schutz).`); continue; }
+
+            const dlRes = await fetch(data.url, { signal: AbortSignal.timeout(60000) });
+            if (!dlRes.ok) { console.log(`Cobalt-Tunnel ${baseUrl}: HTTP ${dlRes.status}, naechste.`); continue; }
+            const buf = await readWithCap(dlRes, COBALT_MAX_BYTES);
+
+            // Mini-Plausibilitaetscheck: echte MP3s beginnen mit "ID3" (v2-Tag) oder dem Frame-Sync
+            // 0xFFFB/0xFFFA - schuetzt davor, eine HTML-Fehlerseite als "Song" hochzuladen.
+            const isId3 = buf.length >= 3 && buf.toString('latin1', 0, 3) === 'ID3';
+            const isFrameSync = buf.length >= 2 && buf[0] === 0xff && (buf[1] === 0xfb || buf[1] === 0xfa);
+            if (buf.length < 10000 || !(isId3 || isFrameSync)) { console.log(`Cobalt-Instanz ${baseUrl}: keine plausible Audiodatei (${buf.length} Bytes), naechste.`); continue; }
+
+            // Titel aus dem von Cobalt vorgeschlagenen Dateinamen ableiten (z.B. "Titel - Kanal.mp3"),
+            // analog zur bisherigen Behandlung von YouTube-Titeln als freier Text (siehe ADR-004,
+            // _esc() beim Rendern im Frontend) - hier nur auf sinnvolle Laenge begrenzt.
+            const rawName = String(data.filename || 'cobalt_import.mp3');
+            const title = rawName.replace(/\.mp3$/i, '').trim().slice(0, 300) || 'YouTube Import';
+
+            const filePath = path.join(outputDir, 'cobalt_audio.mp3');
+            fs.writeFileSync(filePath, buf);
+            const duration = await ffprobeDuration(filePath);
+            console.log(`Cobalt-Download ueber ${baseUrl} erfolgreich: ${title} (${(buf.length / 1024).toFixed(0)} KB, ${duration}s)`);
+            return { filePath, title, duration };
+        } catch (err) {
+            console.log(`Cobalt-Instanz ${baseUrl} fehlgeschlagen (${err.message}), naechste.`);
+        }
+    }
+    console.log('Alle Cobalt-Instanzen fehlgeschlagen - falle zurueck auf yt-dlp.');
+    return null;
 }
 
 // Download UND Titel/Dauer in EINEM yt-dlp-Aufruf. Frueher lief davor ein separates getVideoInfo()
@@ -135,14 +273,20 @@ async function processOne(item) {
     await patchStatus(item.id, 'processing');
     try {
         console.log(`[${item.id}] Download: ${item.youtube_url}`);
-        const info = await downloadAudio(item.youtube_url, tmpDir);
+        // Cobalt-Pool zuerst versuchen (siehe ADR-009): kein Cookie-Bedarf, deren eigener Server
+        // kontaktiert YouTube statt dieser IP. Nur bei Fehlschlag aller Instanzen folgt yt-dlp.
+        const cobaltInfo = await tryCobaltDownload(item.youtube_url, tmpDir);
+        const info = cobaltInfo || await downloadAudio(item.youtube_url, tmpDir);
+        const isCobalt = !!cobaltInfo;
         const fileBuf = fs.readFileSync(info.filePath);
 
         console.log(`[${item.id}] Upload nach R2 (${(fileBuf.length / 1048576).toFixed(1)} MB)...`);
-        const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_local_yt.m4a`;
+        const ext = isCobalt ? 'mp3' : 'm4a';
+        const contentType = isCobalt ? 'audio/mpeg' : 'audio/mp4';
+        const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_local_yt.${ext}`;
         const uploadRes = await fetch(`${API_URL}/upload/${safeFilename}`, {
             method: 'PUT',
-            headers: { ...API_HEADERS, 'Content-Type': 'audio/mp4' },
+            headers: { ...API_HEADERS, 'Content-Type': contentType },
             body: fileBuf,
         });
         if (!uploadRes.ok) throw new Error(`Upload fehlgeschlagen: HTTP ${uploadRes.status}`);

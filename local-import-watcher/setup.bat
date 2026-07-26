@@ -11,10 +11,11 @@ curl -sL -o ffmpeg_temp.zip "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-e
 echo Entpacke ffmpeg...
 powershell -Command "Expand-Archive -Path 'ffmpeg_temp.zip' -DestinationPath 'ffmpeg_extract' -Force"
 for /d %%D in (ffmpeg_extract\ffmpeg-*) do copy "%%D\bin\ffmpeg.exe" . >nul
+for /d %%D in (ffmpeg_extract\ffmpeg-*) do copy "%%D\bin\ffprobe.exe" . >nul
 del ffmpeg_temp.zip
 rmdir /s /q ffmpeg_extract
 
 echo.
-echo Fertig! yt-dlp.exe und ffmpeg.exe liegen jetzt in diesem Ordner.
+echo Fertig! yt-dlp.exe, ffmpeg.exe und ffprobe.exe liegen jetzt in diesem Ordner.
 echo Starte den Watcher mit: start.bat
 pause
