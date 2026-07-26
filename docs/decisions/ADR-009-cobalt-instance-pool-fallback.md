@@ -123,6 +123,16 @@ statt den Import zu blockieren — kein Breaking Change für bestehende Watcher-
   spätere Eskalationsstufe, falls der öffentliche Instanz-Pool sich als zu unzuverlässig
   erweist.
 
+## Update (2026-07-26, gleicher Tag)
+Nutzer wollte die reale Cobalt-Erfolgsquote sehen, bevor der yt-dlp-Fallback sie verdeckt.
+`COBALT_ONLY_TESTING` (Konstante, `True` in beiden Dateien) deaktiviert den yt-dlp-Fallback
+testweise komplett: scheitert der Cobalt-Pool, bricht der Job hart ab (`watch.js`: Queue-Eintrag
+landet auf `failed`, manuell nachzuholen; `extractor_worker.py`: `sys.exit(1)`, was in der
+GitHub-Actions-Kette den nächsten der bis zu 8 Versuchsjobs auslöst — die probieren dann
+allerdings ebenfalls nur den Cobalt-Pool erneut, da die IP für Cobalt-Erfolg irrelevant ist).
+Zum Zurückschalten auf das ursprüngliche Verhalten (Cobalt zuerst, dann automatisch yt-dlp)
+einfach `COBALT_ONLY_TESTING = False` setzen.
+
 ## Consequences
 - Im Erfolgsfall (Cobalt-Pfad greift) wird für GitHub Actions **kein** `YOUTUBE_COOKIES`-Secret
   mehr gebraucht — Cookie-Export wird zur reinen Rückfalloption für Videos, bei denen der

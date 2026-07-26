@@ -83,6 +83,12 @@ const COBALT_INSTANCES = [
 const YOUTUBE_URL_RE = /^https:\/\/(www\.|m\.)?(youtube\.com\/watch\?v=|youtu\.be\/)/i;
 const COBALT_MAX_BYTES = 60 * 1024 * 1024; // Sicherheitsnetz gegen eine fehlerhafte/kompromittierte Instanz
 
+// Testphase (Nutzerwunsch 2026-07-26): yt-dlp-Fallback bewusst deaktiviert, damit die ECHTE
+// Erfolgsquote des Cobalt-Pools sichtbar wird, statt von yt-dlp automatisch verdeckt zu werden.
+// Scheitert der Cobalt-Pool, landet der Eintrag bewusst auf "failed" (manuell nachzuholen)
+// statt automatisch auf yt-dlp+Cookies umzuschwenken. Zum Reaktivieren einfach auf false setzen.
+const COBALT_ONLY_TESTING = true;
+
 function shuffled(arr) {
     const a = arr.slice();
     for (let i = a.length - 1; i > 0; i--) {
@@ -276,6 +282,9 @@ async function processOne(item) {
         // Cobalt-Pool zuerst versuchen (siehe ADR-009): kein Cookie-Bedarf, deren eigener Server
         // kontaktiert YouTube statt dieser IP. Nur bei Fehlschlag aller Instanzen folgt yt-dlp.
         const cobaltInfo = await tryCobaltDownload(item.youtube_url, tmpDir);
+        if (!cobaltInfo && COBALT_ONLY_TESTING) {
+            throw new Error('Cobalt-Pool fehlgeschlagen (yt-dlp-Fallback ist zur Testphase deaktiviert)');
+        }
         const info = cobaltInfo || await downloadAudio(item.youtube_url, tmpDir);
         const isCobalt = !!cobaltInfo;
         const fileBuf = fs.readFileSync(info.filePath);

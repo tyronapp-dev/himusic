@@ -108,6 +108,12 @@ _YOUTUBE_URL_RE = re.compile(r"^https://(www\.|m\.)?(youtube\.com/watch\?v=|yout
 # so viel.
 _COBALT_MAX_BYTES = 60 * 1024 * 1024  # 60 MB
 
+# Testphase (Nutzerwunsch 2026-07-26): yt-dlp-Fallback bewusst deaktiviert, damit die ECHTE
+# Erfolgsquote des Cobalt-Pools sichtbar wird, statt von yt-dlp automatisch verdeckt zu werden.
+# Scheitert der Cobalt-Pool, bricht der Job hart ab (kein stiller Umstieg auf yt-dlp+Cookies) -
+# der Nutzer holt den Import dann manuell nach. Zum Reaktivieren einfach auf False setzen.
+COBALT_ONLY_TESTING = True
+
 
 def _is_safe_tunnel_url(url: str) -> bool:
     """
@@ -481,6 +487,9 @@ def main() -> None:
             duration    = cobalt_result["duration"]
             file_ext    = "mp3"
             content_type = "audio/mpeg"
+        elif COBALT_ONLY_TESTING:
+            gh_error("Cobalt-Pool fehlgeschlagen – yt-dlp-Fallback ist zur Testphase deaktiviert (COBALT_ONLY_TESTING=True), Job bricht ab statt auf Cookies umzuschwenken.")
+            sys.exit(1)
         else:
             # Cookies EINMAL schreiben, für Metadaten- und Download-Aufruf gemeinsam nutzen
             cookies_args = _cookies_args(tmpdir)
