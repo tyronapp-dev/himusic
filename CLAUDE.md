@@ -65,7 +65,7 @@ Key runtime state lives on `window` so UI fragments in `app2.js` can share it:
 3. **localStorage** — `himusic_auth` (login flag), `heatbox_state` (player state: current song, queue, volume, EQ settings), `himusic_sync_giveup` (song IDs the background metadata sync gave up on — see below)
 
 ### YouTube Import
-Songs can be added by pasting a YouTube URL or by name search (`app2.js` ~line 3085: `yt-search-input` → `GET /youtube-search?q=` → result list with thumbnail/title/channel/duration, no audio preview player yet → click imports via the same path as URL paste).
+Songs can be added by pasting a YouTube URL or by name search (`app2.js` ~line 4780: `yt-search-input` → `GET /youtube-search?q=` → result list with thumbnail/title/channel/duration). Each result row has a play button (embedded hidden YouTube IFrame player + seek bar, `_toggleYtPreview`/`_stopYtPreview` ~line 4661) to preview before committing, and a separate download button that stops the preview and enqueues that video via the same path as URL paste.
 
 `startYoutubeImport()` (`app2.js` ~line 3012) tries two paths in order:
 1. **Primary:** `POST /youtube-queue` — polled by `local-import-watcher/watch.js` running on a normal (non-datacenter) IP, since YouTube's bot detection blocks cloud/datacenter IPs far more often. No watcher is guaranteed to be running at any given time. Since ADR-005, `watch.js` needs a local, gitignored `.env` file next to it (`HIMUSIC_API_KEY=...`) — it refuses to start without one.
