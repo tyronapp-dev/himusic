@@ -169,7 +169,9 @@ def try_cobalt_download(youtube_url: str, output_dir: str):
         try:
             resp = requests.post(
                 base_url + "/",
-                json={"url": youtube_url, "downloadMode": "audio", "audioFormat": "mp3"},
+                # audioBitrate explizit auf 320 (Cobalt-Default waere 128 kbit/s) - Cobalt ist seit
+                # ADR-009 der primaere Importweg, Standard-Bitrate war unnoetig niedrig fuer Musik.
+                json={"url": youtube_url, "downloadMode": "audio", "audioFormat": "mp3", "audioBitrate": "320"},
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 timeout=20,
             )
@@ -297,6 +299,13 @@ def _run_ytdlp_download(youtube_url: str, output_template: str, cookies_args: li
     cmd = [
         "yt-dlp",
         "--no-playlist",
+        # Ohne "-f" waehlt yt-dlp "bestaudio" = meist Opus/webm, das "--audio-format m4a" dann per
+        # ffmpeg komplett neu enkodieren muss (Opus->AAC, verlustbehafteter Doppel-Transcode).
+        # Format 140 ist bereits natives AAC im m4a-Container - yt-dlp ueberspringt den Re-Encode
+        # dann ganz und behaelt die hoehere Quell-Bitrate (gemessen: 130 statt 106 kbit/s, siehe
+        # gleiche Optimierung in local-import-watcher/watch.js). "/bestaudio" bleibt als Rueckfall,
+        # falls ein Video ausnahmsweise kein m4a anbietet (dann greift --audio-quality unten).
+        "-f", "bestaudio[ext=m4a]/bestaudio",
         "--extract-audio",
         "--audio-format", "m4a",
         "--audio-quality", "0",

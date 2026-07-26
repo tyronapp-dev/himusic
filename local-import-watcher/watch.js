@@ -169,7 +169,9 @@ async function tryCobaltDownload(youtubeUrl, outputDir) {
             const apiRes = await fetch(`${baseUrl}/`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                body: JSON.stringify({ url: youtubeUrl, downloadMode: 'audio', audioFormat: 'mp3' }),
+                // audioBitrate explizit auf 320 (Cobalt-Default waere 128 kbit/s) - Cobalt ist seit
+                // ADR-009 der primaere Importweg, Standard-Bitrate war unnoetig niedrig fuer Musik.
+                body: JSON.stringify({ url: youtubeUrl, downloadMode: 'audio', audioFormat: 'mp3', audioBitrate: '320' }),
                 signal: AbortSignal.timeout(20000),
             });
             if (!apiRes.ok) { console.log(`Cobalt-Instanz ${baseUrl}: HTTP ${apiRes.status}, naechste.`); continue; }
