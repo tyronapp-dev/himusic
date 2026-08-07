@@ -58,11 +58,29 @@ function _audioBufferToWav(buffer) {
     return new Blob([arrBuf], { type: 'audio/wav' });
 }
 
-function _parseVibes(v) {
+function _rawVibesArray(v) {
     if (!v) return [];
     if (Array.isArray(v)) return v;
     if (typeof v === 'string') { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch(e) { return []; } }
     return [];
+}
+
+// Hauptvibe-Markierung reist als Prefix "*" direkt im vibes-Feld mit (siehe
+// _getMainVibes/btnSaveTags) - kein eigenes Backend-Feld noetig, das Feld wird ohnehin
+// schon per PUT /songs/:id gespeichert und ueberlebt damit Reinstall/Geraetewechsel.
+// _parseVibes() entfernt den Marker IMMER - jeder der ueber 40 Aufrufer im Code sieht
+// weiterhin nur den reinen Vibe-Namen, keiner muss vom Marker wissen.
+const MAIN_VIBE_MARKER = '*';
+
+function _parseVibes(v) {
+    return _rawVibesArray(v).map(x => (typeof x === 'string' && x.startsWith(MAIN_VIBE_MARKER)) ? x.slice(MAIN_VIBE_MARKER.length) : x);
+}
+
+// Gegenstueck zu _parseVibes: statt den Marker zu entfernen, liefert diese Funktion nur
+// die Namen, die ihn TRUGEN - genutzt beim Laden, um den lokalen Hauptvibe-Cache
+// (_setMainVibes) aus den frisch vom Server gekommenen Rohdaten wiederherzustellen.
+function _extractMainVibes(v) {
+    return _rawVibesArray(v).filter(x => typeof x === 'string' && x.startsWith(MAIN_VIBE_MARKER)).map(x => x.slice(MAIN_VIBE_MARKER.length));
 }
 
 // Song-Titel/Künstler etc. können aus externen Quellen kommen (YouTube-Videotitel, von jedem
@@ -74,10 +92,11 @@ function _esc(s) {
 }
 
 // Hauptvibes markieren, welche Vibes eines Songs die STÄRKSTEN/wichtigsten sind (z.B. bei einem
-// Song, der zu mehreren Stimmungen passt). Rein clientseitig in localStorage (songId -> Vibe-Liste),
-// kein Backend-Feld nötig - apiUpdateSong()/PUT /songs/:id unterstützt aktuell nur title/artist/
-// cover_data/album/vibes (siehe Kommentar bei btn-trim-song), eine Worker-Erweiterung wäre für ein
-// rein persönliches Extra-Flag unverhältnismäßig. Läuft daher pro Gerät, kein Cross-Device-Sync.
+// Song, der zu mehreren Stimmungen passt). Schneller lokaler Cache in localStorage (songId ->
+// Vibe-Liste) - die eigentliche Persistenz laeuft ueber den "*"-Marker im vibes-Feld selbst
+// (MAIN_VIBE_MARKER, siehe _parseVibes/_extractMainVibes weiter oben), dieser Cache wird bei
+// jedem fetchSongsFromDatabase() aus den Server-Daten neu aufgebaut. Ueberlebt damit Reinstall
+// und synct geraeteuebergreifend, weil vibes ohnehin schon ganz normal ueber PUT /songs/:id geht.
 function _getMainVibes(songId) {
     try {
         const map = JSON.parse(localStorage.getItem('himusic_main_vibes') || '{}');
@@ -1669,6 +1688,9 @@ let _bgCacheActive = false;
         try {
             const all = await apiGetAllSongs();
             if (all) {
+                // Hauptvibe-Cache aus den ROHEN Server-Daten wiederherstellen, BEVOR
+                // _parseVibes() den Marker gleich darunter entfernt - siehe MAIN_VIBE_MARKER.
+                all.forEach(s => { _setMainVibes(s.id, _extractMainVibes(s.vibes)); });
                 all.forEach(s => { s.vibes = _parseVibes(s.vibes); });
                 window.globalSongsData = all;
                 window._songIndex = new Map(all.map(s => [s.id, s]));
@@ -2098,20 +2120,24 @@ let _bgCacheActive = false;
             document.querySelectorAll('#edit-tags-overlay .vibe-pill.active').forEach(pill => selectedVibes.push(pill.dataset.vibe));
             const mainVibes = [];
             document.querySelectorAll('#edit-tags-overlay .vibe-pill.main-vibe').forEach(pill => mainVibes.push(pill.dataset.vibe));
-            _setMainVibes(window.currentEditSongId, mainVibes); // rein lokal, kein Backend-Feld - siehe Kommentar bei _getMainVibes
+            _setMainVibes(window.currentEditSongId, mainVibes);
             const changes = { title: editTitle.value, artist: editArtist.value, cover_data: currentEditCoverData, vibes: selectedVibes };
+            // Ans Backend geht eine EIGENE Kopie mit "*"-markierten Hauptvibes (siehe
+            // MAIN_VIBE_MARKER) - changes selbst bleibt unmarkiert, weil es auch fuers lokale
+            // Song-Objekt und applySongPatch (DOM) verwendet wird und dort niemand den Marker kennt.
+            const apiPayload = { ...changes, vibes: selectedVibes.map(v => mainVibes.includes(v) ? MAIN_VIBE_MARKER + v : v) };
 
             const song = window._songIndex?.get(window.currentEditSongId) || window._songIndex?.get(parseInt(window.currentEditSongId));
             if (song) Object.assign(song, changes);
 
             if (!navigator.onLine) {
-                _savePendingEdit(window.currentEditSongId, changes);
+                _savePendingEdit(window.currentEditSongId, apiPayload);
                 editOverlay.classList.remove('active'); btnSaveTags.innerText = "Speichern"; _showToast('✈️ Offline gespeichert – wird synchronisiert wenn online');
                 return;
             }
 
             try {
-                await apiUpdateSong(window.currentEditSongId, changes);
+                await apiUpdateSong(window.currentEditSongId, apiPayload);
                 editOverlay.classList.remove('active');
 
                 const songId = window.currentEditSongId;
