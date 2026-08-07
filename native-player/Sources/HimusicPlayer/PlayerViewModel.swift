@@ -19,6 +19,13 @@ final class PlayerViewModel: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var artworkCache: [Int: MPMediaItemArtwork] = [:]
 
+    /// Steigt bei jedem playCurrent()-Aufruf. beginPlayback() prueft vor jeder Mutation an
+    /// "player", ob sein Token noch aktuell ist - verhindert, dass ein aelterer, an einem
+    /// await noch haengender Aufruf (z.B. Songende-Auto-Skip) einen neueren (z.B. manueller
+    /// Skip-Tap kurz danach) ueberschreibt. Ohne das entscheidet reine Ausfuehrungsreihenfolge
+    /// der async Tasks, welcher Song am Ende wirklich laeuft - nicht der zuletzt angeforderte.
+    private var playbackToken = 0
+
     var currentItem: QueueItem? {
         queue.indices.contains(currentIndex) ? queue[currentIndex] : nil
     }
@@ -71,19 +78,28 @@ final class PlayerViewModel: ObservableObject {
 
     func playCurrent() {
         guard let item = currentItem else { return }
-        Task { await beginPlayback(item) }
+        playbackToken += 1
+        let token = playbackToken
+        Task { await beginPlayback(item, token: token) }
     }
 
     /// Loest zuerst gegen AudioFileCache auf. Liegt der Song schon lokal, spielt er
     /// von Platte (funktioniert ohne Netz im Hintergrund) - sonst wird direkt
     /// gestreamt und nebenbei fuer naechstes Mal heruntergeladen.
-    private func beginPlayback(_ item: QueueItem) async {
+    ///
+    /// Zwei Token-Checks nach den beiden await-Punkten: kam waehrenddessen ein neuerer
+    /// playCurrent()-Aufruf dazwischen (z.B. Songende-Auto-Skip UND manueller Skip fast
+    /// gleichzeitig), bricht dieser veraltete Aufruf hier ab, statt den "player" noch mit
+    /// dem falschen/alten Song zu ueberschreiben.
+    private func beginPlayback(_ item: QueueItem, token: Int) async {
         let cache = AudioFileCache.shared
         await cache.markCurrentlyPlaying(id: item.id)
         let localURL = await cache.localFileURL(forId: item.id)
+        guard token == playbackToken else { return }
         guard let url = localURL ?? item.fileURL else { return }
         if localURL == nil {
             await cache.ensureCached(item: item)
+            guard token == playbackToken else { return }
         }
 
         let playerItem = AVPlayerItem(url: url)
