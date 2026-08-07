@@ -12,9 +12,26 @@ Chronologie:
   durch**, `xcodegen generate` + `xcodebuild` ohne Fehler, Artefakt
   `HimusicPlayer-unsigned-ipa` (58,3 KB). Der ohne Xcode geschriebene Swift-Code kompiliert
   also unverändert.
-- **Offen:** Signierung über SideStore und der erste Test auf dem echten iPhone
+- 2026-08-07 — per SideStore auf dem iPhone installiert. **Erster Gerätetest schlug fehl:**
+  Safari meldete beim Antippen eines Songs „Die Adresse ist ungültig", der Hand-off kam nie
+  an. **Ursache:** XcodeGen *erzeugt* die Info.plist am Pfad unter `info.path` aus
+  `info.properties` und überschreibt dabei die handgeschriebene Datei. Dort stand
+  `properties: {}`, also entstand ein Rumpf. Am gebauten Artefakt verifiziert: die
+  Info.plist in der IPA war 749 Bytes und enthielt **weder** `CFBundleURLTypes` **noch**
+  `UIBackgroundModes: audio`. Es waren damit zwei Dinge kaputt — ohne das Schema kennt iOS
+  die URL nicht, und ohne `UIBackgroundModes` hätte die App auch nach geglückter Übergabe
+  bei gesperrtem Bildschirm nicht weitergespielt. Behoben in `091e15c`, alle Schlüssel
+  liegen jetzt in `project.yml`; neu gebaute Info.plist ist 1025 Bytes und enthält beide.
+- **Offen:** der Funktionstest auf dem Gerät mit dem korrigierten Paket
   (Hintergrund-Wiedergabe + Control Center). Bis dahin ist kein Verhalten dieser App auf
   einem Gerät belegt.
+
+## Lehre fürs nächste Mal
+
+Ein grüner CI-Build beweist nur, dass der Code **kompiliert** — nicht, dass das Paket
+richtig **konfiguriert** ist. Info.plist-Schlüssel, Berechtigungen und URL-Schemata werden
+von keinem Compiler geprüft. Nach jedem Build am Artefakt selbst nachsehen, ob sie drin
+sind, statt der Quelldatei zu vertrauen.
 
 ## Date
 2026-07-25
