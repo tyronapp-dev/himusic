@@ -1,14 +1,15 @@
-# Himusic Player (native Begleit-App)
+# Himusic Player (native Hülle)
 
-Kleine iOS-App, die ausschließlich zuverlässige Hintergrund-Wiedergabe + Control-Center-
-Integration übernimmt — der Grund dafür steht in
-[ADR-007](../docs/decisions/ADR-007-native-player-companion-app.md). Sie ersetzt NICHT die
-PWA: Bibliothek, Suche, Import, Tagging bleiben in Himusic Cloud wie gehabt. Nur der eigentliche
-Ton läuft hierüber, sobald du das in den Himusic-Einstellungen einschaltest.
+iOS-App, die die komplette himusic-Weboberfläche in einem WKWebView trägt und nur den Ton nativ
+über AVPlayer abspielt — der Grund dafür steht in
+[ADR-007](../docs/decisions/ADR-007-native-player-companion-app.md). Bibliothek, Suche, Import,
+Tagging laufen unverändert als dieselbe Webseite (live von GitHub Pages), UI-Änderungen brauchen
+deshalb keinen App-Neubau.
 
-**Status: ungetestet.** Dieser Code wurde ohne Zugriff auf einen Mac oder ein echtes iPhone
-geschrieben. Der erste Build + Sideload-Versuch wird vermutlich noch etwas Fehlersuche brauchen
-— das ist normal, kein Grund zur Sorge.
+**Status: auf Gerät getestet und funktionsfähig** (08.08.2026) — Hintergrund-Wiedergabe bei
+gesperrtem Bildschirm + korrekte Control-Center-Anzeige laufen. Zusätzlich ein persistenter
+nativer Datei-Cache (`AudioFileCache.swift`, 8 GB Cap, LRU-Verdrängung) — Songs spielen nach dem
+ersten Mal von Platte statt gestreamt zu werden, macht Wiedergabe auch ohne Netz möglich.
 
 ## Einmalige Einrichtung
 
@@ -41,10 +42,11 @@ Kurzfassung:
 2. In SideStore: **+** → die `.ipa`-Datei auswählen → installieren.
 3. Himusic Player erscheint als eigenes Icon auf dem Home-Bildschirm.
 
-### 4. In Himusic Cloud aktivieren
-Einstellungen → Abschnitt **"Nativer Hintergrund-Player (Beta)"** → antippen zum Einschalten.
-Ab jetzt übergibt ein Tap auf Play in der PWA die Wiedergabe an Himusic Player. Beim ersten Mal
-wechselt iOS kurz sichtbar die App — normal, lässt sich technisch nicht vermeiden.
+### 4. Fertig
+Himusic Player öffnen, einmal anmelden (eigener Speicher, getrennt von Safari) — läuft. Der
+Einstellungen-Schalter **"Nativer Hintergrund-Player (Beta)"** in der Webseite selbst betrifft
+nur den alten Weg über Safari + `himusicplayer://` und bleibt bewusst als Rückfallebene erhalten,
+falls die 7-Tage-Signatur der Hülle mal nicht rechtzeitig automatisch erneuert wird.
 
 ## Lokal bauen (falls du selbst einen Mac hast)
 ```

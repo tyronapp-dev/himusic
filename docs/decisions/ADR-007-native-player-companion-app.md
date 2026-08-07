@@ -1,8 +1,11 @@
 # ADR-007: Native Begleit-App für Hintergrund-Wiedergabe (statt volle Capacitor-Hülle)
 
 ## Status
-Proposed / in Umsetzung — **CI-Build erstmals erfolgreich am 2026-08-07**, Signierung und
-Gerätetest stehen weiterhin aus.
+**Accepted, in Betrieb.** Gerätetest am 2026-08-08 bestanden: Hintergrund-Wiedergabe bei
+gesperrtem Bildschirm läuft, Control Center zeigt himusic korrekt als Quelle. Zusätzlich
+gebaut: nativer Datei-Cache (`AudioFileCache.swift`), löst den zuvor offenen Punkt "echtes
+Offline-Abspielen im Hintergrund" — Songs spielen nach dem ersten Mal von Platte statt
+gestreamt zu werden, 8 GB Cap mit LRU-Verdrängung.
 
 Chronologie:
 - 2026-07-25 — Code-Gerüst geschrieben (`native-player/`, GitHub-Actions-Workflow,
@@ -22,9 +25,13 @@ Chronologie:
   die URL nicht, und ohne `UIBackgroundModes` hätte die App auch nach geglückter Übergabe
   bei gesperrtem Bildschirm nicht weitergespielt. Behoben in `091e15c`, alle Schlüssel
   liegen jetzt in `project.yml`; neu gebaute Info.plist ist 1025 Bytes und enthält beide.
-- **Offen:** der Funktionstest auf dem Gerät mit dem korrigierten Paket
-  (Hintergrund-Wiedergabe + Control Center). Bis dahin ist kein Verhalten dieser App auf
-  einem Gerät belegt.
+- 2026-08-08 — Funktionstest auf dem Gerät mit dem korrigierten Paket **bestanden**:
+  Hintergrund-Wiedergabe bei gesperrtem Bildschirm läuft, Control Center zeigt himusic
+  korrekt als Quelle.
+- 2026-08-08 — Nativer Datei-Cache ergänzt (`AudioFileCache.swift`): Songs werden beim
+  ersten Abspielen heruntergeladen und danach von Platte gelesen statt gestreamt, 8 GB
+  weiche Obergrenze, LRU-Verdrängung schont dabei den gerade laufenden Song. Löst den
+  bis dahin offenen Punkt "echtes Offline-Abspielen im Hintergrund" (siehe unten).
 
 ## Revision 2026-08-07: von zwei Apps auf eine native Hülle
 
@@ -67,8 +74,8 @@ Hülle abgelaufen ist und die Seite wieder in Safari läuft.
 `blob:`-URL übergeben. Die existiert nur im Browser — der native AVPlayer kann sie nicht
 lesen, solche Songs wären stumm geblieben. Jetzt wird immer die Netz-Adresse genommen
 (notfalls über `window._songIndex` nachgeschlagen). Folge: ein offline gecachter Song
-wird nativ **gestreamt**. Echtes Offline-Abspielen im Hintergrund braucht einen eigenen
-nativen Datei-Cache — bewusst als nächster Schritt offen.
+wurde nativ **gestreamt** statt lokal gelesen. **Seit 2026-08-08 gelöst** durch
+`AudioFileCache.swift` — siehe Chronologie oben.
 
 ## Lehre fürs nächste Mal
 
@@ -156,8 +163,7 @@ Capacitor-Hülle zu wrappen, bauen wir eine **kleine, eigenständige native App*
   nicht, was die native App gerade spielt.
 - **App-Icon/Assets fehlen** (kein `Assets.xcassets`) — funktional egal, kosmetisch nachträglich
   ergänzbar.
-- **Komplett ungetestet** bis zum ersten echten CI-Build + Sideload-Versuch des Nutzers — Swift-
-  Code wurde ohne Xcode/Mac geschrieben, kann beim ersten `xcodebuild` noch Fehler zeigen.
+- ~~Komplett ungetestet~~ → **seit 2026-08-08 auf Gerät getestet**, siehe Chronologie oben.
 
 ## Consequences
 **Positiv:** löst beide Symptome grundsätzlich (nicht nur kaschiert), nutzt ausschließlich

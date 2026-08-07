@@ -62,12 +62,29 @@ final class PlayerViewModel: ObservableObject {
         queue = payload.queue
         currentIndex = min(max(payload.startIndex, 0), queue.count - 1)
         playCurrent()
+        // Restliche Queue im Hintergrund vorladen (Schritt 3, ADR-007) - erst das
+        // macht Wiedergabe ohne Netz im Hintergrund moeglich, nicht nur den aktuellen Song.
+        Task { await AudioFileCache.shared.ensureCachedQueue(queue) }
     }
 
     // MARK: - Wiedergabe-Steuerung
 
     func playCurrent() {
-        guard let item = currentItem, let url = item.fileURL else { return }
+        guard let item = currentItem else { return }
+        Task { await beginPlayback(item) }
+    }
+
+    /// Loest zuerst gegen AudioFileCache auf. Liegt der Song schon lokal, spielt er
+    /// von Platte (funktioniert ohne Netz im Hintergrund) - sonst wird direkt
+    /// gestreamt und nebenbei fuer naechstes Mal heruntergeladen.
+    private func beginPlayback(_ item: QueueItem) async {
+        let cache = AudioFileCache.shared
+        await cache.markCurrentlyPlaying(id: item.id)
+        let localURL = await cache.localFileURL(forId: item.id)
+        guard let url = localURL ?? item.fileURL else { return }
+        if localURL == nil {
+            await cache.ensureCached(item: item)
+        }
 
         let playerItem = AVPlayerItem(url: url)
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
