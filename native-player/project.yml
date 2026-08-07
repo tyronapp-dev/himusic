@@ -14,9 +14,34 @@ targets:
     deploymentTarget: "16.0"
     sources:
       - path: Sources/HimusicPlayer
+        excludes:
+          - Info.plist
+    # WICHTIG: XcodeGen ERZEUGT die Info.plist an "path" aus "properties" und
+    # ueberschreibt dabei eine dort liegende handgeschriebene Datei. Bis 2026-08-07
+    # stand hier "properties: {}" - dadurch fehlten im gebauten Paket sowohl
+    # CFBundleURLTypes (himusicplayer://) als auch UIBackgroundModes: audio.
+    # Ergebnis: Safari meldete "Adresse ungueltig" und Hintergrund-Audio waere
+    # ohnehin nicht erlaubt gewesen. Alle Schluessel muessen deshalb HIER stehen -
+    # project.yml ist die einzige Quelle der Wahrheit fuer die Info.plist.
     info:
       path: Sources/HimusicPlayer/Info.plist
-      properties: {}
+      properties:
+        CFBundleDisplayName: Himusic Player
+        CFBundleName: HimusicPlayer
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        CFBundlePackageType: APPL
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # Erlaubt Wiedergabe bei gesperrtem Bildschirm - der ganze Zweck dieser App.
+        UIBackgroundModes:
+          - audio
+        # Registriert himusicplayer:// , damit die PWA per Hand-off uebergeben kann.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.himusic.player
+            CFBundleURLSchemes:
+              - himusicplayer
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.himusic.player
