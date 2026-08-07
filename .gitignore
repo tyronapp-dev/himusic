@@ -8,3 +8,6 @@ local-import-watcher/yt-dlp.exe
 local-import-watcher/ffmpeg.exe
 local-import-watcher/ffprobe.exe
 local-import-watcher/watcher.log
+# Claude-Code-Arbeitsdateien: Laufzeit-Locks, lokale Permissions (enthalten
+# alte Rechner-/Arbeitgeberpfade) und Agenten-Gedaechtnis - nicht ins oeffentliche Repo.
+.claude/

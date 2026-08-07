@@ -138,6 +138,53 @@ function _buildStationSongs(song) {
 // automatisch nur das visuelle Feedback (Puls-Animation), ganz ohne Fehler oder Crash.
 function _hapticTick(ms = 12) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch(e) {} }
 
+// iOS friert Web-Audio im Hintergrund/bei gesperrtem Bildschirm nach kurzer Zeit ein (WKWebView-
+// Limitierung, kein Bug in diesem Code) - deshalb optionaler Hand-off an eine kleine native
+// Begleit-App (native-player/), die denselben Song über echte iOS-Audio-APIs weiterspielt und
+// zuverlässig im Control Center erscheint. Siehe docs/decisions/ADR-007-native-player-companion-app.md.
+// Nur aktiv, wenn der Nutzer das in den Einstellungen bewusst eingeschaltet hat UND die native
+// App bereits separat installiert ist - ohne Installation tut dieser Schalter schlicht nichts.
+const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+function _base64urlEncode(str) {
+    const utf8Bytes = unescape(encodeURIComponent(str));
+    return btoa(utf8Bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Baut das kompakte Übergabe-Format für die native Player-App: aktueller Song + bis zu 24
+// nächste aus der Warteschlange (mehr würde die URL unnötig aufblähen - bewusste v1-Grenze,
+// siehe ADR-007 "offene Punkte"). Cover nur als http(s)-URL, nie als data:-URI (würde die
+// URL-Länge sprengen - die native App zeigt dann einfach kein Cover für den Song).
+// Gibt true zurück, wenn der Hand-off versucht wurde: der Aufrufer darf dann die lokale
+// <audio>-Wiedergabe NICHT zusätzlich starten, sonst läuft der Song doppelt (PWA + native App).
+function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
+    if (!_isIOS || localStorage.getItem('himusic_native_player_enabled') !== '1') return false;
+    if (!currentSong || !currentSong.fileUrl) return false;
+
+    const toItem = (id, title, artist, fileUrl, coverUrl) => ({
+        id: id ?? 0,
+        t: title || 'Unbekannt',
+        a: artist || '',
+        u: fileUrl,
+        c: (coverUrl && coverUrl.startsWith('http')) ? coverUrl : null
+    });
+
+    const queue = [
+        toItem(currentSong.id, currentSong.title, currentSong.artist, currentSong.fileUrl, currentSong.coverUrl),
+        ...(upcomingQueue || []).slice(0, 24).map(s => toItem(s.id, s.title, s.artist, s.file_url, s.cover_data))
+    ].filter(item => !!item.u);
+
+    if (queue.length === 0) return false;
+
+    try {
+        const payload = _base64urlEncode(JSON.stringify({ queue, startIndex: 0 }));
+        window.location.href = `himusicplayer://play?q=${payload}`;
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 async function apiGetAllSongs() {
   const response = await _apiFetch(`${API_URL}/songs`);
   if (!response.ok) throw new Error('Failed to fetch songs');
@@ -319,6 +366,48 @@ function _durationMismatch(localDurationSec, resultDurationSec) {
 // trotzdem noch treffen) - niedrigerer Schwellwert nur für die Spotify-Prüfung.
 const _META_MATCH_THRESHOLD_SPOTIFY = 0.22;
 
+// Levenshtein-Distanz: zählt einzelne Buchstaben-Änderungen (einfügen/löschen/ersetzen) zwischen
+// zwei Strings - bildet "X Buchstaben falsch" direkter ab als der Bigram-Vergleich oben, der bei
+// KURZEN Titeln schon bei 1-2 vertippten Buchstaben unverhältnismäßig stark einbricht (ein
+// falsches Zeichen zerstört bis zu 2 Bigramme statt nur als "1 Fehler" zu zählen).
+function _levenshteinDistance(a, b) {
+    const s = a || '', t = b || '';
+    const m = s.length, n = t.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    let prev = Array.from({ length: n + 1 }, (_, i) => i);
+    for (let i = 1; i <= m; i++) {
+        const curr = [i];
+        for (let j = 1; j <= n; j++) {
+            curr[j] = s[i - 1] === t[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+        }
+        prev = curr;
+    }
+    return prev[n];
+}
+
+// Erlaubt bis zu 3 falsche/fehlende/zusätzliche Buchstaben (weniger bei sehr kurzen Wörtern -
+// sonst wäre bei z.B. einem 3-Buchstaben-Titel quasi jede beliebige Zeichenkette ein "Treffer").
+function _closeEnough(localText, resultText) {
+    const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const a = norm(localText), b = norm(resultText);
+    if (!a || !b) return false;
+    const maxAllowed = Math.min(3, Math.max(1, Math.ceil(Math.min(a.length, b.length) * 0.4)));
+    return _levenshteinDistance(a, b) <= maxAllowed;
+}
+
+// Zweiter, unabhängiger Weg einen Treffer zu akzeptieren, NEBEN dem Bigram-Vergleich oben: gilt
+// als Treffer, wenn Titel UND (falls lokal überhaupt bekannt) Künstler jeweils nah genug sind -
+// direkt umgesetzter Nutzer-Wunsch "auch bei 1-2-3 falschen Buchstaben trotzdem finden". Künstler
+// wird nur verlangt, wenn lokal überhaupt einer bekannt ist (kein Platzhalter wie "Unbekannt...") -
+// sonst könnte ein zufällig ähnlicher Titel eines anderen Künstlers durchrutschen.
+function _typoToleratedMatch(localTitle, localArtist, resultTitle, resultArtist) {
+    if (!_closeEnough(localTitle, resultTitle)) return false;
+    const localArtistKnown = localArtist && !/^unbekannt/i.test(localArtist.trim());
+    if (localArtistKnown && !_closeEnough(localArtist, resultArtist)) return false;
+    return true;
+}
+
 // Spotify-Suche über den Worker. Liefert das volle Metadaten-Objekt {title, artist, cover}
 // oder null. data.error === "rate_limited" → Spotify drosselt gerade unsere App-Kennung;
 // der Aufrufer kann das anzeigen bzw. auf iTunes ausweichen.
@@ -331,11 +420,16 @@ async function searchSongMetaSpotify(title, artist, localDurationSec = 0, retryC
         const data = await response.json();
         if (data.error === 'rate_limited') { window._spotifyCooldownUntil = Date.now() + 15 * 60 * 1000; return { rateLimited: true }; }
         if (!data.result) return null;
-        // Treffer gegen den ORIGINAL-Titel prüfen (nicht gegen q, das schon bereinigt/gekürzt ist) -
-        // verwirft Fälle, in denen Spotify irgendein unpassendes Ergebnis für einen kryptischen
-        // YouTube-Titel zurückgibt, statt es blind zu übernehmen.
+        // Treffer gegen den ORIGINAL-Titel/Künstler prüfen (nicht gegen q, das schon bereinigt/
+        // gekürzt ist) - verwirft Fälle, in denen Spotify irgendein unpassendes Ergebnis für einen
+        // kryptischen YouTube-Titel zurückgibt, statt es blind zu übernehmen. Zwei unabhängige
+        // Wege, als Treffer zu gelten: der grobe Bigram-Vergleich (diceOk) ODER Tippfehler-Toleranz
+        // pro Feld (typoOk) - letzteres fängt genau die Fälle "1-3 Buchstaben falsch", die der
+        // Bigram-Vergleich bei kurzen Titeln fälschlich verwirft.
         const resultLabel = `${data.result.title || ''} ${data.result.artist || ''}`;
-        if (_stringSimilarity(title, resultLabel) < _META_MATCH_THRESHOLD_SPOTIFY) return null;
+        const diceOk = _stringSimilarity(`${title} ${artist || ''}`, resultLabel) >= _META_MATCH_THRESHOLD_SPOTIFY;
+        const typoOk = _typoToleratedMatch(title, artist, data.result.title, data.result.artist);
+        if (!diceOk && !typoOk) return null;
         // Zweite Absicherung per Songlänge, siehe _durationMismatch weiter oben. Feldname beim
         // Worker nicht sicher bekannt (Worker-Quelltext liegt nicht im Repo) - probiert beide
         // gängigen Varianten, wird sonst einfach übersprungen statt einen echten Treffer zu verwerfen.
@@ -362,7 +456,9 @@ async function searchSongMetaItunes(title, artist, localDurationSec = 0, retryCo
         const t = data.results && data.results[0];
         if (!t) return null;
         const resultLabel = `${t.trackName || ''} ${t.artistName || ''}`;
-        if (_stringSimilarity(title, resultLabel) < _META_MATCH_THRESHOLD) return null;
+        const diceOk = _stringSimilarity(`${title} ${artist || ''}`, resultLabel) >= _META_MATCH_THRESHOLD;
+        const typoOk = _typoToleratedMatch(title, artist, t.trackName, t.artistName);
+        if (!diceOk && !typoOk) return null;
         // Zweite Absicherung per Songlänge (siehe _durationMismatch) - iTunes liefert die Länge in
         // der Suchantwort immer mit (trackTimeMillis), bisher ungenutzt.
         const resultDurationSec = t.trackTimeMillis ? Math.round(t.trackTimeMillis / 1000) : 0;
@@ -1113,8 +1209,15 @@ let _bgCacheActive = false;
         window.currentSongDuration = foundSong ? foundSong.duration : 0;
         
         window.currentSongData = { id: window.currentPlayingSongId, title, artist, coverUrl, fileUrl, duration: window.currentSongDuration, vibes: _parseVibes(foundSong?.vibes) };
+
+        // Hand-off an die native Player-App hat Vorrang vor lokaler Wiedergabe (siehe
+        // _tryNativePlayerHandoff oben) - sonst würde derselbe Song doppelt laufen (PWA + App).
+        if (_tryNativePlayerHandoff(window.currentSongData, playbackQueue)) {
+            audioPlayer.pause();
+            window.updatePlayPauseIcons(true);
+        } else {
         audioPlayer.src = fileUrl;
-        
+
         if ('mediaSession' in navigator) {
             navigator.mediaSession.setActionHandler('play', async () => {
                 if (audioPlayer.src && audioPlayer.src !== window.location.href) { try { await audioPlayer.play(); } catch(err) {} } 
@@ -1179,6 +1282,7 @@ let _bgCacheActive = false;
 
         if (playPromise === undefined) playPromise = Promise.resolve();
         if (playPromise !== undefined) { playPromise.then(() => { window.updatePlayPauseIcons(true); }).catch(e => console.log("iOS Play blockiert", e)); }
+        } // Ende "kein Hand-off an native Player-App" - Zweig oben startet lokale <audio>-Wiedergabe
 
         const mp = document.getElementById('mini-player');
         if(mp) { mp.style.display = 'flex'; setTimeout(() => { mp.style.transform = 'none'; mp.style.opacity = '1'; }, 10); }
@@ -4758,4 +4862,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (searchBtn) searchBtn.addEventListener('click', runSearch);
     if (searchInput) searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
+});
+
+// --- NATIVER HINTERGRUND-PLAYER TOGGLE (Einstellungen) ---
+// Reiner An/Aus-Schalter für _tryNativePlayerHandoff() (oben im Datei-Kopf) - bewusst als
+// eigener DOMContentLoaded-Block statt in den grossen Init-Block oben eingehaengt, da er nur
+// auf localStorage + DOM zugreift und keine Player-internen Zustände braucht.
+document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('btn-native-player-toggle');
+    const label = document.getElementById('native-player-toggle-label');
+    if (!btn || !label) return;
+
+    function render() {
+        const on = localStorage.getItem('himusic_native_player_enabled') === '1';
+        label.textContent = on ? 'Eingeschaltet' : 'Ausgeschaltet';
+        btn.style.background  = on ? 'rgba(48,209,88,0.18)' : 'rgba(255,255,255,0.07)';
+        btn.style.borderColor = on ? '#30d158' : 'rgba(255,255,255,0.15)';
+        btn.style.color       = on ? '#30d158' : 'var(--text-secondary)';
+    }
+
+    btn.addEventListener('click', () => {
+        const on = localStorage.getItem('himusic_native_player_enabled') === '1';
+        localStorage.setItem('himusic_native_player_enabled', on ? '0' : '1');
+        render();
+    });
+
+    render();
 });

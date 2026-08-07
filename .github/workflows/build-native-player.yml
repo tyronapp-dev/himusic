@@ -1,0 +1,66 @@
+name: Build Himusic Player (iOS, unsigniert)
+
+# Baut die kleine native Begleit-App (native-player/), die ausschliesslich
+# Hintergrund-Wiedergabe + Control-Center-Integration uebernimmt - siehe
+# docs/decisions/ADR-007-native-player-companion-app.md fuer den Hintergrund.
+#
+# Erzeugt bewusst ein UNSIGNIERTES .ipa. SideStore/AltStore signieren beim
+# Sideload lokal mit dem eigenen (kostenlosen) Apple-Zertifikat neu - deshalb
+# braucht dieser Workflow keine Apple-Signing-Secrets.
+#
+# Kostenlos: das Repo ist oeffentlich, GitHub-Actions-Minuten (auch macOS-Runner)
+# sind fuer oeffentliche Repos unbegrenzt/unmetered.
+
+on:
+  push:
+    paths:
+      - 'native-player/**'
+      - '.github/workflows/build-native-player.yml'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: native-player
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: XcodeGen installieren
+        run: brew install xcodegen
+
+      - name: Xcode-Projekt generieren
+        run: xcodegen generate
+
+      - name: Unsigniert bauen
+        run: |
+          xcodebuild \
+            -project HimusicPlayer.xcodeproj \
+            -scheme HimusicPlayer \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: .ipa packen
+        run: |
+          set -e
+          APP_PATH="build/Build/Products/Release-iphoneos/HimusicPlayer.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Build-Produkt nicht gefunden: $APP_PATH"
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r HimusicPlayer.ipa Payload
+          rm -rf Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HimusicPlayer-unsigned-ipa
+          path: native-player/HimusicPlayer.ipa
+          retention-days: 30
