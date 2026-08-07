@@ -52,6 +52,16 @@ struct ContentView: View {
                 .foregroundColor(.white)
                 .disabled(player.currentItem == nil)
 
+                // Nach der Uebergabe springt die App von selbst zurueck. Dieser Knopf
+                // ist fuer den Fall, dass der Nutzer bewusst hier gelandet ist und
+                // wieder in die Bibliothek will.
+                Button(action: player.returnToHimusic) {
+                    Label("Zurück zu Himusic", systemImage: "arrow.uturn.backward")
+                        .font(.callout)
+                        .foregroundColor(.gray)
+                }
+                .padding(.top, 4)
+
                 Spacer(minLength: 40)
             }
         }

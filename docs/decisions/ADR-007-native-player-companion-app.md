@@ -102,8 +102,14 @@ Capacitor-Hülle zu wrappen, bauen wir eine **kleine, eigenständige native App*
 - **Cover-Bilder:** nur `http(s)`-URLs werden übergeben, keine `data:`-URIs (würden die
   Übergabe-URL sprengen). Songs mit nur lokal eingebettetem Cover zeigen in der nativen App
   vorübergehend kein Artwork.
-- **Kein automatischer Rücksprung in die PWA** beim Song-Wechsel aus der nativen App heraus —
-  reiner Player, keine Synchronisierung von Wiedergabestatus zurück in `heatbox_state`.
+- ~~Kein automatischer Rücksprung in die PWA~~ → **seit 2026-08-07 gelöst:** nach der
+  Übergabe wartet die App 0,7 s, bis der AVPlayer läuft, und schickt den Nutzer dann per
+  `UIApplication.open` zurück auf `https://tyronapp-dev.github.io/himusic/`. Der kurze
+  Wechsel selbst bleibt unvermeidbar — iOS erlaubt keinen stillen Start im Hintergrund,
+  ein Custom-URL-Aufruf holt die Ziel-App immer in den Vordergrund. Zusätzlich gibt es in
+  der App einen Knopf „Zurück zu Himusic".
+- **Keine Synchronisierung des Wiedergabestatus** zurück in `heatbox_state` — die PWA weiß
+  nicht, was die native App gerade spielt.
 - **App-Icon/Assets fehlen** (kein `Assets.xcassets`) — funktional egal, kosmetisch nachträglich
   ergänzbar.
 - **Komplett ungetestet** bis zum ersten echten CI-Build + Sideload-Versuch des Nutzers — Swift-

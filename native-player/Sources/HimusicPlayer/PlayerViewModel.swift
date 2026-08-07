@@ -19,8 +19,23 @@ final class PlayerViewModel: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var artworkCache: [Int: MPMediaItemArtwork] = [:]
 
+    /// Adresse der PWA - Ziel fuer den automatischen Ruecksprung nach der Uebergabe.
+    private static let himusicURL = URL(string: "https://tyronapp-dev.github.io/himusic/")!
+
     var currentItem: QueueItem? {
         queue.indices.contains(currentIndex) ? queue[currentIndex] : nil
+    }
+
+    /// Schickt den Nutzer zurueck in die PWA.
+    ///
+    /// Hintergrund: iOS erlaubt keinen stillen Start einer App im Hintergrund - ein
+    /// Custom-URL-Aufruf holt die Ziel-App IMMER in den Vordergrund. Der kurze Wechsel
+    /// ist deshalb technisch unvermeidbar. Was wir kontrollieren koennen, ist die Dauer:
+    /// sobald die Wiedergabe laeuft, geben wir den Bildschirm sofort wieder frei. Dank
+    /// UIBackgroundModes: audio spielt der AVPlayer im Hintergrund weiter, waehrend der
+    /// Nutzer wieder in seiner Bibliothek steht.
+    func returnToHimusic() {
+        UIApplication.shared.open(Self.himusicURL)
     }
 
     init() {
@@ -44,6 +59,15 @@ final class PlayerViewModel: ObservableObject {
         queue = payload.queue
         currentIndex = min(max(payload.startIndex, 0), queue.count - 1)
         playCurrent()
+
+        // Bildschirm zurueckgeben, sobald die Wiedergabe wirklich laeuft. Die kurze
+        // Wartezeit verhindert, dass wir den Vordergrund abgeben, bevor der AVPlayer
+        // gestartet ist - sonst kann iOS die Audio-Session gleich wieder abraeumen.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard let self, self.isPlaying else { return }
+            self.returnToHimusic()
+        }
     }
 
     // MARK: - Wiedergabe-Steuerung
