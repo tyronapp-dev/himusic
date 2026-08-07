@@ -157,15 +157,37 @@ function _base64urlEncode(str) {
 // URL-Länge sprengen - die native App zeigt dann einfach kein Cover für den Song).
 // Gibt true zurück, wenn der Hand-off versucht wurde: der Aufrufer darf dann die lokale
 // <audio>-Wiedergabe NICHT zusätzlich starten, sonst läuft der Song doppelt (PWA + native App).
+// Bruecke der nativen Huelle (native-player/Sources/HimusicPlayer/WebShellView.swift).
+// Ist sie vorhanden, laeuft diese Seite INNERHALB der App - dann geht Wiedergabe immer
+// nativ: kein App-Wechsel, kein Bestaetigungsdialog, kein Streit um die Audio-Sitzung.
+function _nativeBridge() {
+    return (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicNative) || null;
+}
+
 function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
-    if (!_isIOS || localStorage.getItem('himusic_native_player_enabled') !== '1') return false;
-    if (!currentSong || !currentSong.fileUrl) return false;
+    const bridge = _nativeBridge();
+    // In der Huelle immer nativ. Ausserhalb (normales Safari) nur, wenn der Nutzer den
+    // Schalter in den Einstellungen gesetzt hat - dort kostet es einen App-Wechsel.
+    if (!bridge && (!_isIOS || localStorage.getItem('himusic_native_player_enabled') !== '1')) return false;
+    if (!currentSong) return false;
+
+    // Der native AVPlayer kann blob:-URLs aus dem IndexedDB-Offline-Cache NICHT lesen -
+    // die existieren nur innerhalb des Browsers. Deshalb immer die Netz-Adresse
+    // uebergeben und sie notfalls im Song-Index nachschlagen. Folge: ein offline
+    // gecachter Song wird nativ aus dem Netz gestreamt statt lokal gelesen; echtes
+    // Offline-Abspielen im Hintergrund braucht einen eigenen nativen Datei-Cache.
+    const remoteUrl = (id, candidate) => {
+        if (candidate && !candidate.startsWith('blob:')) return candidate;
+        const indexed = window._songIndex && window._songIndex.get ? window._songIndex.get(id) : null;
+        const u = indexed && indexed.file_url;
+        return (u && !u.startsWith('blob:')) ? u : null;
+    };
 
     const toItem = (id, title, artist, fileUrl, coverUrl) => ({
         id: id ?? 0,
         t: title || 'Unbekannt',
         a: artist || '',
-        u: fileUrl,
+        u: remoteUrl(id, fileUrl),
         c: (coverUrl && coverUrl.startsWith('http')) ? coverUrl : null
     });
 
@@ -177,8 +199,12 @@ function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     if (queue.length === 0) return false;
 
     try {
-        const payload = _base64urlEncode(JSON.stringify({ queue, startIndex: 0 }));
-        window.location.href = `himusicplayer://play?q=${payload}`;
+        const payloadJson = JSON.stringify({ queue, startIndex: 0 });
+        if (bridge) {
+            bridge.postMessage(payloadJson);
+            return true;
+        }
+        window.location.href = `himusicplayer://play?q=${_base64urlEncode(payloadJson)}`;
         return true;
     } catch (e) {
         return false;

@@ -19,23 +19,8 @@ final class PlayerViewModel: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var artworkCache: [Int: MPMediaItemArtwork] = [:]
 
-    /// Adresse der PWA - Ziel fuer den automatischen Ruecksprung nach der Uebergabe.
-    private static let himusicURL = URL(string: "https://tyronapp-dev.github.io/himusic/")!
-
     var currentItem: QueueItem? {
         queue.indices.contains(currentIndex) ? queue[currentIndex] : nil
-    }
-
-    /// Schickt den Nutzer zurueck in die PWA.
-    ///
-    /// Hintergrund: iOS erlaubt keinen stillen Start einer App im Hintergrund - ein
-    /// Custom-URL-Aufruf holt die Ziel-App IMMER in den Vordergrund. Der kurze Wechsel
-    /// ist deshalb technisch unvermeidbar. Was wir kontrollieren koennen, ist die Dauer:
-    /// sobald die Wiedergabe laeuft, geben wir den Bildschirm sofort wieder frei. Dank
-    /// UIBackgroundModes: audio spielt der AVPlayer im Hintergrund weiter, waehrend der
-    /// Nutzer wieder in seiner Bibliothek steht.
-    func returnToHimusic() {
-        UIApplication.shared.open(Self.himusicURL)
     }
 
     init() {
@@ -44,9 +29,23 @@ final class PlayerViewModel: ObservableObject {
         observePlayerTime()
     }
 
-    // MARK: - Eingehender Aufruf aus der PWA
+    // MARK: - Eingehende Abspielwuensche
 
-    /// Erwartet: himusicplayer://play?q=<base64url(JSON IncomingPayload)>
+    /// Hauptweg: Aufruf aus der eingebetteten Seite ueber die JS-Bruecke.
+    /// Erwartet dasselbe JSON wie der URL-Weg, nur unverpackt - kein base64url und
+    /// keine Laengengrenze, die eine URL setzen wuerde.
+    func handleBridgeJSON(_ json: String) {
+        guard let data = json.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(IncomingPayload.self, from: data),
+              !payload.queue.isEmpty else {
+            return
+        }
+        start(with: payload)
+    }
+
+    /// Alter Weg, absichtlich behalten: himusicplayer://play?q=<base64url(JSON)>.
+    /// Greift, wenn die Seite in Safari statt in der Huelle laeuft - etwa wenn die
+    /// Signatur der Huelle abgelaufen ist und der Nutzer auf den Browser zurueckfaellt.
     func handleIncoming(url: URL) {
         guard url.scheme?.lowercased() == "himusicplayer", url.host == "play" else { return }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -56,18 +55,13 @@ final class PlayerViewModel: ObservableObject {
               !payload.queue.isEmpty else {
             return
         }
+        start(with: payload)
+    }
+
+    private func start(with payload: IncomingPayload) {
         queue = payload.queue
         currentIndex = min(max(payload.startIndex, 0), queue.count - 1)
         playCurrent()
-
-        // Bildschirm zurueckgeben, sobald die Wiedergabe wirklich laeuft. Die kurze
-        // Wartezeit verhindert, dass wir den Vordergrund abgeben, bevor der AVPlayer
-        // gestartet ist - sonst kann iOS die Audio-Session gleich wieder abraeumen.
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 700_000_000)
-            guard let self, self.isPlaying else { return }
-            self.returnToHimusic()
-        }
     }
 
     // MARK: - Wiedergabe-Steuerung
