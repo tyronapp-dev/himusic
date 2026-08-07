@@ -53,3 +53,7 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
+        # Assets.xcassets/AppIcon.appiconset liegt unter Sources/HimusicPlayer - XcodeGen
+        # nimmt .xcassets-Ordner automatisch als Ressource auf, dieser Schlüssel sagt dem
+        # Compiler nur, WELCHES appiconset als App-Icon dient.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
