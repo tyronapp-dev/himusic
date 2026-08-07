@@ -26,6 +26,50 @@ Chronologie:
   (Hintergrund-Wiedergabe + Control Center). Bis dahin ist kein Verhalten dieser App auf
   einem Gerät belegt.
 
+## Revision 2026-08-07: von zwei Apps auf eine native Hülle
+
+Der Ansatz „PWA in Safari + separate Player-App, Übergabe per URL-Schema" hat den
+Gerätetest **nicht** überlebt. Beobachtet:
+
+1. iOS fragt bei **jedem** Aufruf aus einer Webseite nach Bestätigung — pro Antippen
+   eines Songs ein Dialog. Von der Webseite aus nicht abschaltbar.
+2. Der eingebaute Rücksprung nach Safari ließ die Musik **sofort verstummen**, und der
+   Sperrbildschirm zeigte nichts Sinnvolles mehr.
+
+Ursache von (2) ist strukturell und nicht behebbar: **iOS lässt nur eine App
+gleichzeitig den Ton führen.** Kommt Safari in den Vordergrund, reißt es die
+Audio-Sitzung an sich und der Player verliert sie. Zwei beteiligte Apps streiten sich
+bei jedem Wechsel darum. Der Rücksprung wurde deshalb wieder entfernt.
+
+**Neue Entscheidung:** nur noch **eine** App. `WebShellView` trägt himusic als
+eingebettete Seite (WKWebView, persistenter Speicher), der Ton läuft weiter nativ im
+AVPlayer. Übergeben wird über die JS-Brücke `himusicNative` statt über eine URL —
+kein base64url, keine Längengrenze.
+
+**Das ist nicht die oben verworfene Capacitor-Hülle.** Verworfen wurde sie mit der
+ausdrücklichen Begründung „solange sie weiterhin `<audio>` in einer WKWebView
+abspielt". Genau das tut diese Hülle nicht: die Oberfläche ist Web, der Ton ist nativ.
+Damit fällt der damalige Einwand weg, und der Nutzen bleibt — die ~300 KB `app2.js`
+werden nicht neu geschrieben, und UI-Änderungen rollen weiter sofort über GitHub Pages
+aus, weil die Hülle die Seite live lädt.
+
+Der `himusicplayer://`-Weg bleibt absichtlich im Code: er greift, wenn die Signatur der
+Hülle abgelaufen ist und die Seite wieder in Safari läuft.
+
+**Preis dieser Entscheidung:**
+- Einmalige Neuanmeldung in der Hülle (eigener Speicher, getrennt von Safari)
+- Der IndexedDB-Offline-Cache wird in der Hülle **neu aufgebaut** — bei über 1300
+  Titeln spürbar an Zeit und Bandbreite
+- Die 7-Tage-Signatur betrifft jetzt die ganze App. Rückfallebene bleibt aber die
+  Website in Safari, also kein Totalausfall
+
+**Dabei ein vorher unbemerkter Fehler gefunden:** bei offline gecachten Songs wurde eine
+`blob:`-URL übergeben. Die existiert nur im Browser — der native AVPlayer kann sie nicht
+lesen, solche Songs wären stumm geblieben. Jetzt wird immer die Netz-Adresse genommen
+(notfalls über `window._songIndex` nachgeschlagen). Folge: ein offline gecachter Song
+wird nativ **gestreamt**. Echtes Offline-Abspielen im Hintergrund braucht einen eigenen
+nativen Datei-Cache — bewusst als nächster Schritt offen.
+
 ## Lehre fürs nächste Mal
 
 Ein grüner CI-Build beweist nur, dass der Code **kompiliert** — nicht, dass das Paket
