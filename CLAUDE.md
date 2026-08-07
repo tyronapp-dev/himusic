@@ -92,5 +92,53 @@ Song titles, artist names, playlist/station/vibe-mix names, and YouTube search r
 ### Service Worker update
 Bumping `CACHE_NAME` in `sw.js` triggers cache invalidation on next load. The SW uses `skipWaiting()` + `clients.claim()` so updates apply immediately. Currently at `v1.4`.
 
+## Native Hülle (iOS) — ADR-007
+
+Seit 2026-08-07 gibt es unter `native-player/` eine kleine native iOS-App, die **diese
+PWA in einem WKWebView trägt und den Ton nativ abspielt**. Grund: iOS gewährt Web-Apps
+kein `UIBackgroundModes: audio` — im Hintergrund friert die Wiedergabe ein und das
+Control Center zeigt die falsche App. Vorgeschichte, verworfene Alternativen und die
+Revision vom 07.08. (weg von zwei getrennten Apps): `docs/decisions/ADR-007-native-player-companion-app.md`.
+
+**Aufteilung:** Oberfläche = diese Webseite, unverändert, wird live von GitHub Pages
+geladen. Ton = `AVPlayer` in der App. **UI-Änderungen brauchen deshalb keinen
+App-Neubau** — nur Änderungen unter `native-player/` tun das.
+
+**Brücke:** `_tryNativePlayerHandoff()` (oben in app2.js) prüft
+`window.webkit.messageHandlers.himusicNative`. Existiert sie, läuft die Seite in der
+Hülle → Wiedergabe geht **immer** nativ, `himusic_native_player_enabled` ist dann
+irrelevant. Der Schalter betrifft nur den alten Weg aus Safari über
+`himusicplayer://`, der absichtlich als Rückfallebene erhalten bleibt (falls die
+7-Tage-Signatur der Hülle abläuft). Übergeben wird `{queue: [{id,t,a,u,c}], startIndex}`
+als JSON-String, maximal 25 Einträge.
+
+**Nie eine `blob:`-URL übergeben.** Offline gecachte Songs spielt die PWA aus IndexedDB
+über `blob:` — solche URLs existieren nur im Browser, der native AVPlayer kann sie nicht
+lesen (solche Songs wären stumm geblieben). `remoteUrl()` schlägt deshalb immer die
+Netz-Adresse nach, notfalls über `window._songIndex`. Folge: gecachte Songs werden nativ
+**gestreamt**. Echtes Offline-Abspielen im Hintergrund braucht einen eigenen nativen
+Datei-Cache — bewusst offen.
+
+**Release-Schleife:**
+1. Änderung unter `native-player/` committen und pushen → `.github/workflows/build-native-player.yml`
+   baut auf einem macOS-Runner ein unsigniertes `.ipa` (~40 s).
+2. Artefakt `HimusicPlayer-unsigned-ipa` holen: `gh run download <run-id> --repo tyronapp-dev/himusic`.
+3. **Immer im gebauten Paket nachsehen, nicht in der Quelldatei.** Ein grüner Build
+   beweist nur, dass der Code kompiliert. Am 07.08. fehlten `CFBundleURLTypes` und
+   `UIBackgroundModes` im Artefakt, weil XcodeGen die `Info.plist` aus
+   `project.yml → info.properties` **erzeugt** und eine dort liegende handgeschriebene
+   Datei überschreibt. Alle Plist-Schlüssel gehören deshalb in `project.yml`.
+4. `.ipa` aufs iPhone, in SideStore über „+" über die alte Fassung installieren.
+
+**Wird `app2.js` oder `index.html` geändert, `CACHE_NAME` in `sw.js` hochzählen** —
+sonst serviert der Service Worker weiter die alte Oberfläche.
+
+**Stolpersteine beim Übertragen aufs Gerät, alle real passiert:** Proton VPN zieht
+lokalen Verkehr in den Tunnel → LocalSend scheitert, VPN aus oder LAN erlauben. Die
+Datei landet je nach Weg als `HimusicPlayer.zip` → in `.ipa` umbenennen, SideStore nimmt
+nur `.ipa`. Auf dem Gerät entpacken (`Payload/`, `.app`) ist ein Irrweg — die IPA muss
+verpackt bleiben. Und der PC braucht Apples USB-Treiber: ohne den meldet Windows
+„Fehler beim Anfordern einer Gerätebeschreibung" und iloader sieht das iPhone nicht.
+
 ## Git workflow
 The user has authorized automatic `git add` / `git commit` / `git push` to `origin/main` after making requested code changes in this repo, without asking for confirmation each time. Still confirm before destructive/irreversible git operations (force-push, reset --hard, history rewrites, deleting branches).
