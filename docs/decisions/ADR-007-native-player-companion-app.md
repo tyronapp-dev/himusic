@@ -1,11 +1,20 @@
 # ADR-007: Native Begleit-App für Hintergrund-Wiedergabe (statt volle Capacitor-Hülle)
 
 ## Status
-Proposed / in Umsetzung — Code-Gerüst (`native-player/`, GitHub-Actions-Workflow,
-app2.js-Hand-off, Settings-Toggle) steht, aber **noch nicht gebaut, signiert oder auf einem
-echten Gerät getestet**. Nichts hiervon war bisher verifizierbar, da weder ein Mac noch das
-Zielgerät im Rahmen dieser Änderung zur Verfügung standen — der erste echte Test (CI-Build +
-SideStore-Sideload) steht beim Nutzer noch aus.
+Proposed / in Umsetzung — **CI-Build erstmals erfolgreich am 2026-08-07**, Signierung und
+Gerätetest stehen weiterhin aus.
+
+Chronologie:
+- 2026-07-25 — Code-Gerüst geschrieben (`native-player/`, GitHub-Actions-Workflow,
+  app2.js-Hand-off, Settings-Toggle), ohne Mac und ohne Xcode. Zunächst **nicht committet**;
+  die Arbeit lag wochenlang nur in einem lokalen Backup.
+- 2026-08-07 — committet (`95ed58b`) und gebaut: Workflow-Lauf `31133839373` lief in **45 s
+  durch**, `xcodegen generate` + `xcodebuild` ohne Fehler, Artefakt
+  `HimusicPlayer-unsigned-ipa` (58,3 KB). Der ohne Xcode geschriebene Swift-Code kompiliert
+  also unverändert.
+- **Offen:** Signierung über SideStore und der erste Test auf dem echten iPhone
+  (Hintergrund-Wiedergabe + Control Center). Bis dahin ist kein Verhalten dieser App auf
+  einem Gerät belegt.
 
 ## Date
 2026-07-25
