@@ -183,6 +183,63 @@ function _nativeBridge() {
     return (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicNative) || null;
 }
 
+// Rueckkanal: die Huelle ruft das nach JEDEM eigenen Songwechsel/Play-Pause auf
+// (WebShellView.Coordinator.pushNowPlaying in der Swift-Huelle), damit diese Seite mit dem
+// WIRKLICH laufenden nativen Zustand synchron bleibt. Ohne das zeigt die Oberflaeche nach
+// Auto-Skips im Hintergrund/gesperrtem Screen weiterhin den zuletzt manuell gestarteten Song
+// (bekannte Luecke, siehe ADR-007 "Keine Synchronisierung des Wiedergabestatus").
+// Reiner Anzeige-Sync - ruft NIE playSong()/_tryNativePlayerHandoff() auf, sonst wuerde die
+// Huelle denselben Song nochmal von vorn laden und hoerbar stottern.
+window._applyNativeNowPlaying = function(payload) {
+    if (!payload || payload.id == null) return;
+    const song = window._songIndex && window._songIndex.get ? window._songIndex.get(payload.id) : null;
+    window.currentPlayingSongId = payload.id;
+    window.currentContextSongId = payload.id;
+    window.currentSongData = {
+        id: payload.id, title: payload.t, artist: payload.a,
+        coverUrl: payload.c || (song && (song.cover_data || song.coverUrl)) || '',
+        fileUrl: payload.u, duration: song ? song.duration : 0,
+        vibes: song ? _parseVibes(song.vibes) : []
+    };
+
+    const bgStyle = window.currentSongData.coverUrl && window.currentSongData.coverUrl.length > 10 ? `url('${window.currentSongData.coverUrl}')` : 'none';
+
+    const mp = document.getElementById('mini-player');
+    if (mp) { mp.style.display = 'flex'; mp.style.transform = 'none'; mp.style.opacity = '1'; }
+    const dynamicBg = document.querySelector('.dynamic-bg');
+    if (dynamicBg) dynamicBg.style.backgroundImage = bgStyle;
+    const miniCover = document.querySelector('.mini-cover');
+    const miniTitle = document.querySelector('.mini-title');
+    const miniArtist = document.querySelector('.mini-artist');
+    if (miniCover) { miniCover.style.backgroundImage = bgStyle !== 'none' ? bgStyle : 'var(--accent)'; miniCover.style.backgroundSize = 'cover'; }
+    if (miniTitle) miniTitle.innerText = payload.t || '';
+    if (miniArtist) miniArtist.innerText = payload.a || '—';
+
+    const bpTitle = document.getElementById('bp-song-name');
+    const bpArtist = document.getElementById('bp-artist-name');
+    const largeCover = document.querySelector('.large-cover');
+    const bpHv = document.getElementById('bp-header-vibes');
+    if (bpTitle) bpTitle.innerText = payload.t || '';
+    if (bpArtist) bpArtist.innerText = payload.a || '';
+    if (largeCover) { largeCover.style.backgroundImage = bgStyle !== 'none' ? bgStyle : 'var(--accent)'; largeCover.style.backgroundSize = 'cover'; }
+    _renderVibesText(bpHv, window.currentSongData.vibes, payload.id);
+    const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
+    if (bpNoVibesDot) bpNoVibesDot.style.display = (window.currentSongData.vibes && window.currentSongData.vibes.length > 0) ? 'none' : 'block';
+
+    const homeNpCover = document.getElementById('home-np-cover');
+    const homeNpTitle = document.getElementById('home-np-title');
+    const homeNpArtist = document.getElementById('home-np-artist');
+    const homeNowPlayingSection = document.getElementById('home-now-playing-section');
+    if (homeNowPlayingSection) homeNowPlayingSection.style.display = 'block';
+    if (homeNpCover) homeNpCover.style.backgroundImage = bgStyle !== 'none' ? bgStyle : 'var(--accent)';
+    if (homeNpTitle) homeNpTitle.innerText = payload.t || '';
+    if (homeNpArtist) homeNpArtist.innerText = payload.a || '';
+
+    if (typeof window.updatePlayPauseIcons === 'function') window.updatePlayPauseIcons(!!payload.isPlaying);
+    if (typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
+    if (typeof window.savePlayerState === 'function') window.savePlayerState();
+};
+
 function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     const bridge = _nativeBridge();
     // In der Huelle immer nativ. Ausserhalb (normales Safari) nur, wenn der Nutzer den
@@ -678,6 +735,7 @@ function initApp() {
         clearTimeout(_saveTimer);
         _saveTimer = setTimeout(_doSavePlayerState, 800);
     }
+    window.savePlayerState = savePlayerState; // wird auch von _applyNativeNowPlaying gebraucht, das ausserhalb dieses initApp-Scopes liegt
     function _doSavePlayerState() {
         const state = {
             currentSong: window.currentSongData || null,

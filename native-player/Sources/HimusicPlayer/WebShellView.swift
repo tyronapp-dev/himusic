@@ -65,6 +65,28 @@ struct WebShellView: UIViewRepresentable {
 
         init(player: PlayerViewModel) {
             self.player = player
+            super.init()
+            // Rueckkanal: bei jedem echten Songwechsel/Play-Pause meldet PlayerViewModel sich
+            // hier, wir reichen es als JS an app2.js's _applyNativeNowPlaying weiter. Haelt die
+            // Seite synchron mit dem, was nativ WIRKLICH laeuft (z.B. nach Auto-Skip im
+            // Hintergrund) - siehe Kommentar bei onNowPlayingChanged.
+            self.player.onNowPlayingChanged = { [weak self] item, isPlaying in
+                self?.pushNowPlaying(item: item, isPlaying: isPlaying)
+            }
+        }
+
+        private func pushNowPlaying(item: QueueItem, isPlaying: Bool) {
+            guard let webView else { return }
+            // [String: Any] mit "c": item.c ?? "" statt [String: Any?] - Optionals bridgen
+            // nicht zuverlaessig zu NSNull fuer JSONSerialization. Leerer String ist hier
+            // gleichwertig: _applyNativeNowPlaying() in app2.js behandelt beides als "kein Cover".
+            let payload: [String: Any] = [
+                "id": item.id, "t": item.title, "a": item.artist,
+                "u": item.u, "c": item.c ?? "", "isPlaying": isPlaying
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window._applyNativeNowPlaying && window._applyNativeNowPlaying(\(json));")
         }
 
         func userContentController(

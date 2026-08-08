@@ -26,6 +26,19 @@ final class PlayerViewModel: ObservableObject {
     /// der async Tasks, welcher Song am Ende wirklich laeuft - nicht der zuletzt angeforderte.
     private var playbackToken = 0
 
+    /// Meldet der eingebetteten Webseite den echten nativen Zustand zurueck (WebShellView.
+    /// Coordinator schickt das als JS an app2.js's _applyNativeNowPlaying weiter). Ohne das
+    /// zeigt die Seite nach Auto-Skips im Hintergrund/gesperrtem Screen weiterhin den zuletzt
+    /// manuell gestarteten Song, waehrend nativ laengst ein anderer laeuft - genau die
+    /// gemeldete Inkonsistenz. Wird NUR bei echtem Songwechsel/Play-Pause ausgeloest, nicht
+    /// im Sekundentakt (siehe observePlayerTime) - waere unnoetiger Overhead ohne Mehrwert.
+    var onNowPlayingChanged: ((QueueItem, Bool) -> Void)?
+
+    private func notifyNowPlayingChanged() {
+        guard let item = currentItem else { return }
+        onNowPlayingChanged?(item, isPlaying)
+    }
+
     var currentItem: QueueItem? {
         queue.indices.contains(currentIndex) ? queue[currentIndex] : nil
     }
@@ -117,6 +130,7 @@ final class PlayerViewModel: ObservableObject {
         isPlaying = true
         updateNowPlayingInfo()
         loadArtworkIfNeeded(for: item)
+        notifyNowPlayingChanged()
     }
 
     func togglePlayPause() {
@@ -127,6 +141,7 @@ final class PlayerViewModel: ObservableObject {
         }
         isPlaying.toggle()
         updateNowPlayingInfo()
+        notifyNowPlayingChanged()
     }
 
     func next() {
@@ -172,6 +187,7 @@ final class PlayerViewModel: ObservableObject {
             self.player.play()
             self.isPlaying = true
             self.updateNowPlayingInfo()
+            self.notifyNowPlayingChanged()
             return .success
         }
         center.pauseCommand.addTarget { [weak self] _ in
@@ -179,6 +195,7 @@ final class PlayerViewModel: ObservableObject {
             self.player.pause()
             self.isPlaying = false
             self.updateNowPlayingInfo()
+            self.notifyNowPlayingChanged()
             return .success
         }
         center.nextTrackCommand.addTarget { [weak self] _ in
