@@ -20,6 +20,11 @@ struct IncomingPayload: Codable {
     let startIndex: Int
 }
 
+/// Zweite Bridge-Nachrichtenform neben IncomingPayload - siehe handleBridgeJSON().
+struct BridgeCommand: Codable {
+    let cmd: String
+}
+
 extension Data {
     /// Dekodiert Base64url (RFC 4648, "-"/"_" statt "+"/"/", ohne Padding) -
     /// so kommt der Queue-Payload sauber durch eine URL-Query ohne zusaetzliches Escaping.

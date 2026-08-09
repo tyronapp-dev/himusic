@@ -1084,6 +1084,15 @@ function initApp() {
 
     window.togglePlayPause = async function(e) {
         if(e) e.stopPropagation();
+        const bridge = _nativeBridge();
+        if (bridge) {
+            // In der Huelle spielt AVPlayer nativ, das lokale <audio>-Element ist inert
+            // (siehe playSong()) - dessen .paused sagt nichts ueber den echten Zustand.
+            // Eigenes Bridge-Kommando statt lokalem Toggle; das Icon aktualisiert sich
+            // danach ueber onNowPlayingChanged -> _applyNativeNowPlaying (echter Zustand).
+            bridge.postMessage(JSON.stringify({ cmd: 'toggle' }));
+            return;
+        }
         if(!audioPlayer.src) return;
         if (audioPlayer.paused) {
             window._userPausedManually = false;

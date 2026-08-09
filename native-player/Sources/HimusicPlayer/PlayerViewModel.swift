@@ -51,12 +51,18 @@ final class PlayerViewModel: ObservableObject {
 
     // MARK: - Eingehende Abspielwuensche
 
-    /// Hauptweg: Aufruf aus der eingebetteten Seite ueber die JS-Bruecke.
-    /// Erwartet dasselbe JSON wie der URL-Weg, nur unverpackt - kein base64url und
-    /// keine Laengengrenze, die eine URL setzen wuerde.
+    /// Hauptweg: Aufruf aus der eingebetteten Seite ueber die JS-Bruecke. Zwei Formen:
+    /// {cmd:"toggle"} fuers Play/Pause aus der Web-UI (app2.js kann den echten nativen
+    /// Zustand nicht selbst kennen, deshalb eigenes Kommando statt lokalem Toggle dort) -
+    /// sonst dasselbe Queue-JSON wie der alte URL-Weg, nur unverpackt (kein base64url,
+    /// keine Laengengrenze).
     func handleBridgeJSON(_ json: String) {
-        guard let data = json.data(using: .utf8),
-              let payload = try? JSONDecoder().decode(IncomingPayload.self, from: data),
+        guard let data = json.data(using: .utf8) else { return }
+        if let command = try? JSONDecoder().decode(BridgeCommand.self, from: data), command.cmd == "toggle" {
+            togglePlayPause()
+            return
+        }
+        guard let payload = try? JSONDecoder().decode(IncomingPayload.self, from: data),
               !payload.queue.isEmpty else {
             return
         }

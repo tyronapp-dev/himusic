@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UIKit
 
 /// Traegt die komplette himusic-Oberflaeche als eingebettete Webseite.
 ///
@@ -72,6 +73,28 @@ struct WebShellView: UIViewRepresentable {
             // Hintergrund) - siehe Kommentar bei onNowPlayingChanged.
             self.player.onNowPlayingChanged = { [weak self] item, isPlaying in
                 self?.pushNowPlaying(item: item, isPlaying: isPlaying)
+            }
+            // Zweite Absicherung noetig: evaluateJavaScript() waehrend die App im Hintergrund
+            // ist (z.B. Control-Center-Play, waehrend man in einer anderen App ist), kommt
+            // beim WKWebView oft gar nicht an - der Webinhalts-Prozess kann suspendiert sein.
+            // Ein Push allein reicht daher nicht. Beim Vordergrund-Comeback deshalb den
+            // AKTUELLEN Stand nochmal proaktiv schicken statt nur aufs naechste Event zu warten.
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(appDidBecomeActive),
+                name: UIApplication.didBecomeActiveNotification,
+                object: nil
+            )
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        @objc private func appDidBecomeActive() {
+            Task { @MainActor [weak self] in
+                guard let self, let item = self.player.currentItem else { return }
+                self.pushNowPlaying(item: item, isPlaying: self.player.isPlaying)
             }
         }
 
