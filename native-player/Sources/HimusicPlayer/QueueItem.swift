@@ -21,8 +21,10 @@ struct IncomingPayload: Codable {
 }
 
 /// Zweite Bridge-Nachrichtenform neben IncomingPayload - siehe handleBridgeJSON().
+/// "open" nur bei cmd == "playerView" gesetzt (meldet, ob der grosse Web-Player offen ist).
 struct BridgeCommand: Codable {
     let cmd: String
+    let open: Bool?
 }
 
 extension Data {

@@ -90,6 +90,9 @@ struct WebShellView: UIViewRepresentable {
             self.player.onNowPlayingChanged = { [weak self] item, isPlaying in
                 self?.pushNowPlaying(item: item, isPlaying: isPlaying)
             }
+            self.player.onProgressChanged = { [weak self] current, duration in
+                self?.pushProgress(current: current, duration: duration)
+            }
             // Zweite Absicherung noetig: evaluateJavaScript() waehrend die App im Hintergrund
             // ist (z.B. Control-Center-Play, waehrend man in einer anderen App ist), kommt
             // beim WKWebView oft gar nicht an - der Webinhalts-Prozess kann suspendiert sein.
@@ -136,6 +139,13 @@ struct WebShellView: UIViewRepresentable {
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8) else { return }
             webView.evaluateJavaScript("window._applyNativeNowPlaying && window._applyNativeNowPlaying(\(json));")
+        }
+
+        private func pushProgress(current: Double, duration: Double) {
+            guard let webView else { return }
+            webView.evaluateJavaScript(
+                "window._applyNativeProgress && window._applyNativeProgress(\(current), \(duration));"
+            )
         }
 
         func userContentController(

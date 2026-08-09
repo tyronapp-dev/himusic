@@ -39,6 +39,19 @@ final class PlayerViewModel: ObservableObject {
         onNowPlayingChanged?(item, isPlaying)
     }
 
+    /// Von der Webseite gemeldet (MutationObserver auf #fullscreen-player in app2.js, ueber
+    /// die Bridge als {cmd:"playerView", open}). Zwei Zwecke: (1) solange der grosse Player
+    /// offen ist, pushen wir Fortschritt/Zeit jede Sekunde nach - dessen Zeitanzeige haengt
+    /// sonst am lokalen <audio>-Element, das in der Huelle inert ist und nie "timeupdate"
+    /// feuert. (2) NativePlayerBar blendet sich aus, solange der Web-Vollbild-Player offen
+    /// ist - die native Leiste liegt AUSSERHALB der Webseite, ein Web-Overlay kann sie nie
+    /// verdecken, ohne dieses Signal bliebe sie sichtbar darueber liegen.
+    @Published var isBigPlayerOpen: Bool = false
+
+    /// Nur gefeuert, waehrend isBigPlayerOpen true ist (siehe dort) - kein Grund, das jede
+    /// Sekunde in die Seite zu pushen, wenn niemand hinschaut.
+    var onProgressChanged: ((Double, Double) -> Void)?
+
     var currentItem: QueueItem? {
         queue.indices.contains(currentIndex) ? queue[currentIndex] : nil
     }
@@ -51,15 +64,20 @@ final class PlayerViewModel: ObservableObject {
 
     // MARK: - Eingehende Abspielwuensche
 
-    /// Hauptweg: Aufruf aus der eingebetteten Seite ueber die JS-Bruecke. Zwei Formen:
+    /// Hauptweg: Aufruf aus der eingebetteten Seite ueber die JS-Bruecke. Drei Formen:
     /// {cmd:"toggle"} fuers Play/Pause aus der Web-UI (app2.js kann den echten nativen
-    /// Zustand nicht selbst kennen, deshalb eigenes Kommando statt lokalem Toggle dort) -
-    /// sonst dasselbe Queue-JSON wie der alte URL-Weg, nur unverpackt (kein base64url,
-    /// keine Laengengrenze).
+    /// Zustand nicht selbst kennen, deshalb eigenes Kommando statt lokalem Toggle dort),
+    /// {cmd:"playerView", open} meldet, ob der grosse Web-Player offen ist (siehe
+    /// isBigPlayerOpen) - sonst dasselbe Queue-JSON wie der alte URL-Weg, nur unverpackt
+    /// (kein base64url, keine Laengengrenze).
     func handleBridgeJSON(_ json: String) {
         guard let data = json.data(using: .utf8) else { return }
-        if let command = try? JSONDecoder().decode(BridgeCommand.self, from: data), command.cmd == "toggle" {
-            togglePlayPause()
+        if let command = try? JSONDecoder().decode(BridgeCommand.self, from: data) {
+            switch command.cmd {
+            case "toggle": togglePlayPause()
+            case "playerView": isBigPlayerOpen = command.open ?? false
+            default: break
+            }
             return
         }
         guard let payload = try? JSONDecoder().decode(IncomingPayload.self, from: data),
@@ -226,7 +244,11 @@ final class PlayerViewModel: ObservableObject {
             forInterval: CMTime(seconds: 1, preferredTimescale: 1),
             queue: .main
         ) { [weak self] _ in
-            self?.updateNowPlayingInfo()
+            guard let self else { return }
+            self.updateNowPlayingInfo()
+            guard self.isBigPlayerOpen else { return }
+            let duration = self.player.currentItem?.duration.seconds ?? 0
+            self.onProgressChanged?(self.player.currentTime().seconds, duration.isFinite ? duration : 0)
         }
     }
 

@@ -240,6 +240,37 @@ window._applyNativeNowPlaying = function(payload) {
     if (typeof window.savePlayerState === 'function') window.savePlayerState();
 };
 
+// Zeit/Fortschrittsbalken im grossen Player haengen normalerweise an timeupdate des lokalen
+// <audio>-Elements - das ist in der Huelle inert (nie befuellt), deshalb blieb die Anzeige
+// bei 0:00 stehen. PlayerViewModel schickt hier stattdessen den echten AVPlayer-Fortschritt
+// rein (nur waehrend der grosse Player offen ist, siehe playerViewObserver unten - kein Grund,
+// jede Sekunde zu pushen, wenn niemand hinschaut).
+window._applyNativeProgress = function(current, duration) {
+    if (typeof window.updateTimeUI === 'function') window.updateTimeUI(current, duration);
+};
+
+// Meldet der Huelle, ob der grosse Player (#fullscreen-player) gerade offen ist - zum einen
+// fuer obigen Progress-Push, zum anderen damit NativePlayerBar sich ausblendet, solange der
+// Web-Vollbild-Player sichtbar ist (die native Leiste liegt AUSSERHALB der Webseite, kann von
+// deren eigenem Overlay also nie verdeckt werden - ohne diese Meldung bliebe sie sichtbar
+// darueber). MutationObserver statt eigener Hooks an jedem Oeffnen/Schliessen-Pfad (Klick,
+// Swipe, Zurueck-Pfeil) - erfasst jede Aenderung an der "open"-Klasse unabhaengig vom Weg dorthin.
+(function () {
+    const fsPlayer = document.getElementById('fullscreen-player');
+    if (!fsPlayer) return;
+    let lastOpen = null;
+    const report = () => {
+        const bridge = _nativeBridge();
+        if (!bridge) return;
+        const open = fsPlayer.classList.contains('open');
+        if (open === lastOpen) return;
+        lastOpen = open;
+        bridge.postMessage(JSON.stringify({ cmd: 'playerView', open }));
+    };
+    new MutationObserver(report).observe(fsPlayer, { attributes: true, attributeFilter: ['class'] });
+    report();
+})();
+
 function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     const bridge = _nativeBridge();
     // In der Huelle immer nativ. Ausserhalb (normales Safari) nur, wenn der Nutzer den
@@ -1512,6 +1543,7 @@ let _bgCacheActive = false;
             if (miniProgressFill) miniProgressFill.style.width = ((current / duration) * 100) + '%';
         }
     }
+    window.updateTimeUI = updateTimeUI; // wird auch von _applyNativeProgress gebraucht, das ausserhalb dieses initApp-Scopes liegt
 
     function syncLockscreenPosition() {
         if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession) {
