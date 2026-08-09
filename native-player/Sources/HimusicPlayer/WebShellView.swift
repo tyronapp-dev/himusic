@@ -117,10 +117,21 @@ struct WebShellView: UIViewRepresentable {
         }
 
         @objc private func appDidBecomeActive() {
-            Task { @MainActor [weak self] in
-                guard let self, let item = self.player.currentItem else { return }
-                self.pushNowPlaying(item: item, isPlaying: self.player.isPlaying)
-            }
+            Task { @MainActor [weak self] in self?.pushCurrentStateIfAny() }
+        }
+
+        /// Gemeinsam fuer beide Resync-Ausloeser (Vordergrund-Comeback UND jeder abgeschlossene
+        /// Seiten-Ladevorgang, siehe didFinish unten). Zweiter Ausloeser noetig: loadPlayerState()
+        /// in app2.js zeigt bei JEDEM (Neu-)Laden der Seite erstmal den zuletzt lokal
+        /// gespeicherten Song aus localStorage - der kann veraltet sein, wenn die Huelle im
+        /// Hintergrund per Auto-Skip weitergesprungen ist und der 800ms-Debounce-Save davor nicht
+        /// mehr durchlief. appDidBecomeActive allein deckt das nicht zuverlaessig ab, weil ein
+        /// Seiten-Reload (z.B. WKWebView-Inhaltsprozess von iOS unter Speicherdruck neu erstellt)
+        /// nicht zwingend zeitgleich mit "App aktiv geworden" passiert.
+        @MainActor
+        private func pushCurrentStateIfAny() {
+            guard let item = player.currentItem else { return }
+            pushNowPlaying(item: item, isPlaying: player.isPlaying)
         }
 
         @objc private func expandFullscreenPlayer() {
@@ -156,6 +167,15 @@ struct WebShellView: UIViewRepresentable {
             Task { @MainActor in
                 self.player.handleBridgeJSON(json)
             }
+        }
+
+        /// Nach JEDEM abgeschlossenen Laden (Ersteinstieg, Retry nach weisser Flaeche, iOS-
+        /// initiiertes Neuladen unter Speicherdruck) lief gerade synchron loadPlayerState() in
+        /// app2.js durch und zeigt moeglicherweise einen veralteten Song - siehe
+        /// pushCurrentStateIfAny(). Laeuft strikt NACH diesem synchronen Code, korrigiert es
+        /// zuverlaessig, statt auf eine zufaellige zeitliche Naehe zu appDidBecomeActive zu hoffen.
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            Task { @MainActor [weak self] in self?.pushCurrentStateIfAny() }
         }
 
         /// Ohne Netz laedt die Seite nicht. Statt einer weissen Flaeche einmal
