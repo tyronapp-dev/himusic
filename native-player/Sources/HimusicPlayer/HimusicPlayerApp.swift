@@ -14,13 +14,23 @@ struct HimusicPlayerApp: App {
             // strukturell nicht mehr vom echten Zustand abweichen. Tippen (ausserhalb der
             // Buttons) oeffnet weiterhin den grossen Web-Player, wie es die ersetzte
             // Web-Leiste auch tat.
-            WebShellView(player: player)
-                .ignoresSafeArea(.container, edges: .bottom)
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    NativePlayerBar(player: player) {
-                        NotificationCenter.default.post(name: .himusicExpandFullscreenPlayer, object: nil)
-                    }
+            //
+            // ZStack statt safeAreaInset: safeAreaInset haette die WKWebView-Flaeche
+            // verkleinert, wodurch die Webseite ihren eigenen env(safe-area-inset-bottom)
+            // anders berechnet haette - #bottom-nav (die Home/Playlists/Songs/Settings-
+            // Leiste, komplett unabhaengig vom Mini-Player) landete dadurch verdeckt/
+            // verschoben. Die WebView bleibt deshalb unangetastet wie vor ADR-011; die
+            // native Leiste wird stattdessen exakt in den Slot gelegt, den #mini-player in
+            // style2.css immer hatte (56px Nav-Hoehe + 10px Abstand oberhalb von
+            // #bottom-nav, siehe --nav-h/--mini-gap) - ueberlappt dadurch #bottom-nav nie.
+            ZStack(alignment: .bottom) {
+                WebShellView(player: player)
+                    .ignoresSafeArea(.container, edges: .bottom)
+                NativePlayerBar(player: player) {
+                    NotificationCenter.default.post(name: .himusicExpandFullscreenPlayer, object: nil)
                 }
+                .padding(.bottom, 66)
+            }
                 .preferredColorScheme(.dark)
                 // Absichtlich behalten: greift nur, wenn die Seite in Safari laeuft
                 // und von dort per himusicplayer:// uebergibt.
