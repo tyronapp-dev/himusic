@@ -2,6 +2,12 @@ import SwiftUI
 import WebKit
 import UIKit
 
+/// Von NativePlayerBar gepostet, wenn ausserhalb der Steuerknoepfe getippt wird - oeffnet
+/// den grossen Web-Player, genau wie die ersetzte Web-Mini-Leiste es per Klick tat.
+extension Notification.Name {
+    static let himusicExpandFullscreenPlayer = Notification.Name("himusic.expandFullscreenPlayer")
+}
+
 /// Traegt die komplette himusic-Oberflaeche als eingebettete Webseite.
 ///
 /// Warum: Der vorherige Ansatz (separate Player-App, Aufruf per himusicplayer://) hat
@@ -30,9 +36,19 @@ struct WebShellView: UIViewRepresentable {
         // Marker fuer app2.js: laeuft die Seite in der Huelle, geht Wiedergabe immer
         // nativ - unabhaengig vom Schalter in den Einstellungen, der nur den alten
         // Weg aus Safari betraf. atDocumentStart, damit er vor app2.js gesetzt ist.
+        // Blendet zusaetzlich die Web-eigene Mini-Player-Leiste aus - die native
+        // NativePlayerBar ersetzt sie jetzt (siehe ADR-011). Als frueh injiziertes CSS
+        // statt JS-Style-Toggle, weil playSong()/_applyNativeNowPlaying an mehreren
+        // Stellen "display:flex" auf #mini-player setzen und ein einmaliger JS-Hide
+        // davon sonst wieder ueberschrieben wuerde.
         controller.addUserScript(
             WKUserScript(
-                source: "window.__himusicNativeShell = true;",
+                source: """
+                window.__himusicNativeShell = true;
+                var s = document.createElement('style');
+                s.textContent = '#mini-player{display:none!important;}';
+                document.documentElement.appendChild(s);
+                """,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             )
@@ -85,6 +101,12 @@ struct WebShellView: UIViewRepresentable {
                 name: UIApplication.didBecomeActiveNotification,
                 object: nil
             )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(expandFullscreenPlayer),
+                name: .himusicExpandFullscreenPlayer,
+                object: nil
+            )
         }
 
         deinit {
@@ -96,6 +118,10 @@ struct WebShellView: UIViewRepresentable {
                 guard let self, let item = self.player.currentItem else { return }
                 self.pushNowPlaying(item: item, isPlaying: self.player.isPlaying)
             }
+        }
+
+        @objc private func expandFullscreenPlayer() {
+            webView?.evaluateJavaScript("document.getElementById('fullscreen-player')?.classList.add('open');")
         }
 
         private func pushNowPlaying(item: QueueItem, isPlaying: Bool) {
