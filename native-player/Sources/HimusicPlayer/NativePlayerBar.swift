@@ -50,7 +50,16 @@ struct NativePlayerBar: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
-            .background(.black.opacity(0.94))
+            // Werte 1:1 aus style2.css' #mini-player uebernommen (Glas-Pille statt voller
+            // Balken, war der gemeldete Look-Unterschied zur Web-Leiste): border-radius 22,
+            // Rand 0.5pt bei 25% Weiss, 10pt Seitenabstand. .ultraThinMaterial statt fixem
+            // Schwarz als naechste native Entsprechung zu backdrop-filter: blur().
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5)
+            )
+            .padding(.horizontal, 10)
             .contentShape(Rectangle())
             .onTapGesture { onExpand() }
             .task(id: item.id) { await loadArtwork(item) }
