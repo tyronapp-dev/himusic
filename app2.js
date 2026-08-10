@@ -3156,9 +3156,19 @@ async function createNewPlaylistProcess() {
         });
     }
 
-    let isShuffle = false; let isRepeat = false;
-    document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; });
-    document.getElementById('btn-shuffle')?.addEventListener('click', (e) => { isShuffle = !isShuffle; e.currentTarget.classList.toggle('ctrl-active', isShuffle); if(isShuffle) { playbackQueue = playbackQueue.sort(() => 0.5 - Math.random()); } });
+    // Shuffle/Repeat ueberleben jetzt einen Neustart - vorher zwei reine In-Memory-Flags,
+    // bei jedem Seitenladen wieder aus (Icon zeigte "aus", obwohl der Nutzer es angelassen hatte).
+    let isShuffle = localStorage.getItem('himusic_shuffle') === '1';
+    let isRepeat = localStorage.getItem('himusic_repeat') === '1';
+    {
+        const btnShuffleEl = document.getElementById('btn-shuffle');
+        const btnRepeatEl = document.getElementById('btn-repeat');
+        if (btnShuffleEl) btnShuffleEl.classList.toggle('ctrl-active', isShuffle);
+        if (btnRepeatEl) btnRepeatEl.classList.toggle('ctrl-active', isRepeat);
+        if (audioPlayer) audioPlayer.loop = isRepeat;
+    }
+    document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; localStorage.setItem('himusic_repeat', isRepeat ? '1' : '0'); });
+    document.getElementById('btn-shuffle')?.addEventListener('click', (e) => { isShuffle = !isShuffle; e.currentTarget.classList.toggle('ctrl-active', isShuffle); if(isShuffle) { playbackQueue = playbackQueue.sort(() => 0.5 - Math.random()); } localStorage.setItem('himusic_shuffle', isShuffle ? '1' : '0'); });
     // btn-next/btn-prev werden bereits von setupSmartSkipButton() verdrahtet (weiter oben,
     // inkl. Langdruck-Suchlauf). Die hier zusaetzlich registrierten Listener liefen doppelt:
     // EIN Antippen rief playPrevSong() zweimal auf, der zweite Aufruf wurde als Doppeltipp

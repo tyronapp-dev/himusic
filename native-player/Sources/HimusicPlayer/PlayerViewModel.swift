@@ -37,6 +37,7 @@ final class PlayerViewModel: ObservableObject {
     private func notifyNowPlayingChanged() {
         guard let item = currentItem else { return }
         onNowPlayingChanged?(item, isPlaying)
+        saveSnapshot()
     }
 
     /// Von der Webseite gemeldet (MutationObserver auf #fullscreen-player in app2.js, ueber
@@ -60,6 +61,65 @@ final class PlayerViewModel: ObservableObject {
         configureAudioSession()
         configureRemoteCommands()
         observePlayerTime()
+        restoreLastSession()
+        // Zuverlaessigster Speicherpunkt: feuert garantiert beim Wechsel in den Hintergrund
+        // (Home-Geste, App-Wechsel, bevor iOS die App ggf. beendet) - im Gegensatz zu
+        // applicationWillTerminate, das iOS nicht in jedem Fall aufruft. Reine Closure-
+        // Registrierung statt #selector, weil PlayerViewModel kein NSObject ist.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.saveSnapshot() }
+        }
+    }
+
+    // MARK: - Wiedergabe-Stand ueberleben lassen
+
+    /// Warteschlange + Position, damit Mini-Leiste/Control-Center nach einem ECHTEN
+    /// Neustart (App vorher vollstaendig beendet, nicht nur backgrounded) sofort am
+    /// richtigen Song/Stand stehen - ein Tipp auf Play setzt exakt dort fort. Kein
+    /// automatisches Loslaufen beim Oeffnen, das macht auch keine andere Musik-App.
+    private struct PlaybackSnapshot: Codable {
+        let queue: [QueueItem]
+        let currentIndex: Int
+        let positionSeconds: Double
+    }
+    private static let snapshotDefaultsKey = "himusic.native.playbackSnapshot"
+    private var lastSnapshotSaveAt: Date = .distantPast
+
+    private func saveSnapshot() {
+        guard !queue.isEmpty else { return }
+        lastSnapshotSaveAt = Date()
+        let snapshot = PlaybackSnapshot(
+            queue: queue, currentIndex: currentIndex, positionSeconds: player.currentTime().seconds
+        )
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        UserDefaults.standard.set(data, forKey: Self.snapshotDefaultsKey)
+    }
+
+    private func loadSnapshot() -> PlaybackSnapshot? {
+        guard let data = UserDefaults.standard.data(forKey: Self.snapshotDefaultsKey) else { return nil }
+        return try? JSONDecoder().decode(PlaybackSnapshot.self, from: data)
+    }
+
+    private func restoreLastSession() {
+        guard let snapshot = loadSnapshot(), !snapshot.queue.isEmpty else { return }
+        queue = snapshot.queue
+        currentIndex = min(max(snapshot.currentIndex, 0), queue.count - 1)
+        guard let item = currentItem else { return }
+        playbackToken += 1
+        let token = playbackToken
+        Task { @MainActor in
+            await beginPlayback(item, token: token, autoplay: false)
+            // beginPlayback() -> notifyNowPlayingChanged() hat gerade schon einmal
+            // gespeichert, aber VOR diesem Seek - mit Position 0 statt der wirklich
+            // gespeicherten. Hier korrigiert, direkt nachdem der Sprung passiert ist.
+            seek(toSeconds: snapshot.positionSeconds)
+            saveSnapshot()
+        }
+        Task { await AudioFileCache.shared.ensureCachedQueue(queue) }
     }
 
     // MARK: - Eingehende Abspielwuensche
@@ -134,7 +194,10 @@ final class PlayerViewModel: ObservableObject {
     /// playCurrent()-Aufruf dazwischen (z.B. Songende-Auto-Skip UND manueller Skip fast
     /// gleichzeitig), bricht dieser veraltete Aufruf hier ab, statt den "player" noch mit
     /// dem falschen/alten Song zu ueberschreiben.
-    private func beginPlayback(_ item: QueueItem, token: Int) async {
+    ///
+    /// autoplay:false nur fuer restoreLastSession() - laedt Song+Cover+Control-Center-Info
+    /// vor, ohne loszuspielen, damit ein App-Neustart nichts hoerbar von selbst startet.
+    private func beginPlayback(_ item: QueueItem, token: Int, autoplay: Bool = true) async {
         let cache = AudioFileCache.shared
         await cache.markCurrentlyPlaying(id: item.id)
         let localURL = await cache.localFileURL(forId: item.id)
@@ -156,8 +219,10 @@ final class PlayerViewModel: ObservableObject {
         }
 
         player.replaceCurrentItem(with: playerItem)
-        player.play()
-        isPlaying = true
+        if autoplay {
+            player.play()
+            isPlaying = true
+        }
         updateNowPlayingInfo()
         loadArtworkIfNeeded(for: item)
         notifyNowPlayingChanged()
@@ -276,6 +341,12 @@ final class PlayerViewModel: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             self.updateNowPlayingInfo()
+            // Sicherheitsnetz zusaetzlich zum didEnterBackground-Speicherpunkt (Absturz,
+            // Batterie leer o.ae. ohne sauberes Hintergrund-Signal) - waehrend Wiedergabe
+            // hoechstens 10s alter Stand, nicht bei jedem Sekundentakt (unnoetige Schreiblast).
+            if self.isPlaying, Date().timeIntervalSince(self.lastSnapshotSaveAt) > 10 {
+                self.saveSnapshot()
+            }
             guard self.isBigPlayerOpen else { return }
             let duration = self.player.currentItem?.duration.seconds ?? 0
             self.onProgressChanged?(self.player.currentTime().seconds, duration.isFinite ? duration : 0)
