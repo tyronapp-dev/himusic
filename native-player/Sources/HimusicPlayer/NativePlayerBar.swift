@@ -32,7 +32,10 @@ struct NativePlayerBar: View {
 
                 Spacer(minLength: 8)
 
-                Button(action: player.previous) {
+                // previousTrack() bewusst statt previous(): in der App-Leiste soll ein
+                // Tipp immer einen Song zurueckgehen, ohne die 3-Sekunden-Neustart-Regel
+                // (die gilt nur fuers Sperrbildschirm/Control-Center, siehe previous()).
+                Button(action: player.previousTrack) {
                     Image(systemName: "backward.fill").font(.system(size: 15))
                 }
                 Button(action: player.togglePlayPause) {

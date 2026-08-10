@@ -76,6 +76,12 @@ final class PlayerViewModel: ObservableObject {
             switch command.cmd {
             case "toggle": togglePlayPause()
             case "playerView": isBigPlayerOpen = command.open ?? false
+            // Transport aus der Web-Oberflaeche: IMMER echter Songwechsel. Die Seite darf
+            // nicht selbst aus playbackQueue/playbackHistory rechnen - die veralten bei
+            // jedem nativen Auto-Skip im Hintergrund und lieferten dadurch falsche Songs.
+            case "next": next()
+            case "prev": previousTrack()
+            case "seekBy": seek(byDelta: command.delta ?? 0)
             default: break
             }
             return
@@ -174,10 +180,25 @@ final class PlayerViewModel: ObservableObject {
         playCurrent()
     }
 
+    /// Verhalten fuer Sperrbildschirm/Control Center: laeuft der Song schon laenger als
+    /// 3 Sekunden, startet er neu statt zurueckzuspringen. Dort ist dieses Doppeltipp-Muster
+    /// von jeder Musik-App etabliert und wird erwartet. **Bewusst nur dort** - in der
+    /// App-Oberflaeche (Web-Player, NativePlayerBar) wollte der Nutzer genau das nicht,
+    /// dafuer gibt es previousTrack().
     func previous() {
-        // Erste 3 Sekunden: vorherigen Song. Danach: aktuellen Song neu starten -
-        // gleiches Verhalten wie in app2.js's Skip-Back-Handling.
         if player.currentTime().seconds > 3 || currentIndex == 0 {
+            player.seek(to: .zero)
+            return
+        }
+        currentIndex -= 1
+        playCurrent()
+    }
+
+    /// Ein Tipp = ein Song zurueck, ohne 3-Sekunden-Regel. Fuer die Knoepfe in der App
+    /// (grosser Web-Player und native Leiste). Am Anfang der Warteschlange bleibt nur der
+    /// Neustart des aktuellen Songs uebrig - es gibt nichts davor.
+    func previousTrack() {
+        guard currentIndex > 0 else {
             player.seek(to: .zero)
             return
         }
@@ -188,6 +209,15 @@ final class PlayerViewModel: ObservableObject {
     func seek(toSeconds seconds: Double) {
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 1))
         updateNowPlayingInfo()
+    }
+
+    /// Relativer Sprung fuer den Langdruck-Suchlauf der Web-Knoepfe. Auf 0 und Songende
+    /// begrenzt, damit ein langer Druck nicht ueber das Ende hinausschiebt.
+    func seek(byDelta delta: Double) {
+        let duration = player.currentItem?.duration.seconds ?? 0
+        let ziel = player.currentTime().seconds + delta
+        let obergrenze = (duration.isFinite && duration > 0) ? duration - 0.5 : ziel
+        seek(toSeconds: max(0, min(ziel, obergrenze)))
     }
 
     // MARK: - Setup

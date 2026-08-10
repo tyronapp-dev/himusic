@@ -1465,9 +1465,15 @@ let _bgCacheActive = false;
         savePlayerState();
     };
 
-    let isChangingSong = false; 
+    let isChangingSong = false;
     window.playNextSong = function() {
-        if (isChangingSong) return; 
+        // In der Huelle fuehrt AVPlayer die Warteschlange, nicht diese Seite. Lokales
+        // Weiterschalten wuerde aus playbackQueue rechnen, die nach jedem nativen
+        // Auto-Skip im Hintergrund veraltet ist - dadurch wurden Songs uebersprungen.
+        // Einzige Quelle der Wahrheit ist der native Player, genau wie bei cmd:'toggle'.
+        const _bridge = _nativeBridge();
+        if (_bridge) { _bridge.postMessage(JSON.stringify({ cmd: 'next' })); return; }
+        if (isChangingSong) return;
         isChangingSong = true;
         setTimeout(() => isChangingSong = false, 800);
         if (!playbackQueue || playbackQueue.length === 0) {
@@ -1480,12 +1486,22 @@ let _bgCacheActive = false;
 
     let _lastPrevTap = 0;
     window.playPrevSong = function() {
+        // In der Huelle: ein Tipp = ein Song zurueck, kein Doppeltipp. Der native Player
+        // fuehrt die Warteschlange und weiss, was wirklich vorher lief - playbackHistory
+        // hier ist nach nativen Auto-Skips veraltet und lieferte deshalb einen beliebigen
+        // alten Song. Der 3-Sekunden-Neustart bleibt bewusst nur auf dem Sperrbildschirm.
+        const _bridge = _nativeBridge();
+        if (_bridge) { _bridge.postMessage(JSON.stringify({ cmd: 'prev' })); return; }
         if (isChangingSong) return;
         const now = Date.now();
         const isDoubleTap = (now - _lastPrevTap) < 600;
         _lastPrevTap = now;
+        // Sperre auch auf dem Einzeltipp-Pfad setzen. Vorher stand sie nur im
+        // Doppeltipp-Zweig - ein doppelt registrierter Click-Listener (war bis 2026-08-10
+        // der Fall) rutschte dadurch als "Doppeltipp" durch, obwohl nur einmal getippt wurde.
+        isChangingSong = true;
+        setTimeout(() => isChangingSong = false, 400);
         if (isDoubleTap) {
-            isChangingSong = true;
             setTimeout(() => isChangingSong = false, 800);
             if (playbackHistory && playbackHistory.length > 0) {
                 const prevSong = playbackHistory.pop();
@@ -1503,14 +1519,21 @@ let _bgCacheActive = false;
         let pressTimer;
         let seekInterval;
         let isLongPress = false;
+        // Langdruck-Suchlauf: in der Huelle ueber die Bruecke, weil das lokale <audio> dort
+        // inert ist - ein currentTime-Schubs daran bewegte gar nichts.
+        const seekBy = (delta) => {
+            const b = _nativeBridge();
+            if (b) { b.postMessage(JSON.stringify({ cmd: 'seekBy', delta })); return; }
+            if (audioPlayer) audioPlayer.currentTime += delta;
+        };
         const start = (e) => {
             if (e.type === 'mousedown' && e.button !== 0) return;
             isLongPress = false;
             pressTimer = setTimeout(() => {
                 isLongPress = true;
-                if (audioPlayer) audioPlayer.currentTime += (isNext ? 10 : -10);
-                seekInterval = setInterval(() => { if (audioPlayer) audioPlayer.currentTime += (isNext ? 10 : -10); }, 300);
-            }, 400); 
+                seekBy(isNext ? 10 : -10);
+                seekInterval = setInterval(() => seekBy(isNext ? 10 : -10), 300);
+            }, 400);
         };
         const cancel = () => { clearTimeout(pressTimer); clearInterval(seekInterval); };
         btn.addEventListener('mousedown', start);
@@ -3136,8 +3159,10 @@ async function createNewPlaylistProcess() {
     let isShuffle = false; let isRepeat = false;
     document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; });
     document.getElementById('btn-shuffle')?.addEventListener('click', (e) => { isShuffle = !isShuffle; e.currentTarget.classList.toggle('ctrl-active', isShuffle); if(isShuffle) { playbackQueue = playbackQueue.sort(() => 0.5 - Math.random()); } });
-    document.getElementById('btn-next')?.addEventListener('click', window.playNextSong);
-    document.getElementById('btn-prev')?.addEventListener('click', window.playPrevSong);
+    // btn-next/btn-prev werden bereits von setupSmartSkipButton() verdrahtet (weiter oben,
+    // inkl. Langdruck-Suchlauf). Die hier zusaetzlich registrierten Listener liefen doppelt:
+    // EIN Antippen rief playPrevSong() zweimal auf, der zweite Aufruf wurde als Doppeltipp
+    // gewertet und sprang auf einen beliebigen Song aus playbackHistory. Deshalb entfernt.
 
     if (audioPlayer) {
         let _errRetry = 0; let _errTimer = null; const _ERR = { 1:'Abgebrochen', 2:'Netzwerk-Fehler', 3:'Decode-Fehler', 4:'URL nicht erreichbar' };
