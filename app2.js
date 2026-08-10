@@ -1597,17 +1597,26 @@ let _bgCacheActive = false;
             const rect = progressContainer.getBoundingClientRect();
             let clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : (e.changedTouches ? e.changedTouches[0].clientX : e.clientX);
             let percent = (clientX - rect.left) / rect.width;
-            percent = Math.max(0, Math.min(1, percent)); 
+            percent = Math.max(0, Math.min(1, percent));
             const newTime = percent * duration;
-            updateTimeUI(newTime, duration); 
+            updateTimeUI(newTime, duration);
             return newTime;
+        };
+        // Beim Loslassen: in der Huelle absolut ueber die Bruecke springen (das lokale
+        // <audio> ist dort inert - ein currentTime-Schubs daran bewegte den echten
+        // AVPlayer nicht, die Anzeige sprang deshalb kurz zur gezogenen Stelle und dann
+        // beim naechsten Sekunden-Push (_applyNativeProgress) wieder zurueck).
+        const seekTo = (seconds) => {
+            const b = _nativeBridge();
+            if (b) { b.postMessage(JSON.stringify({ cmd: 'seekTo', seconds })); return; }
+            audioPlayer.currentTime = seconds;
         };
         progressContainer.addEventListener('touchstart', (e) => { isDraggingTime = true; handleScrub(e); }, {passive: true});
         progressContainer.addEventListener('touchmove', (e) => { if(isDraggingTime) handleScrub(e); }, {passive: true});
-        progressContainer.addEventListener('touchend', (e) => { if(isDraggingTime) { isDraggingTime = false; audioPlayer.currentTime = handleScrub(e); } });
+        progressContainer.addEventListener('touchend', (e) => { if(isDraggingTime) { isDraggingTime = false; seekTo(handleScrub(e)); } });
         progressContainer.addEventListener('mousedown', (e) => { isDraggingTime = true; handleScrub(e); });
         document.addEventListener('mousemove', (e) => { if (isDraggingTime) handleScrub(e); });
-        document.addEventListener('mouseup', (e) => { if (isDraggingTime) { isDraggingTime = false; audioPlayer.currentTime = handleScrub(e); } });
+        document.addEventListener('mouseup', (e) => { if (isDraggingTime) { isDraggingTime = false; seekTo(handleScrub(e)); } });
     }
 
     const miniPlayer = document.getElementById('mini-player');
@@ -4748,6 +4757,18 @@ function _clearYtQueue() {
     _saveAndRenderYtQueue();
 }
 
+// Absichtlich getrennt von _clearYtQueue(): die entfernt nie Eintraege, die noch aktiv
+// laufen koennten (queued/processing/fallback_pending), genau richtig im Normalfall. Manche
+// bleiben aber dauerhaft auf "Cloud-Fallback laeuft" haengen, obwohl der Song laengst in der
+// DB steht - der GitHub-Actions-Pfad schreibt direkt per /internal/register, ohne den
+// youtube_queue-Status je auf "done" zu setzen (siehe _dispatchYtFallback-Kommentar). Diese
+// Funktion ist der bewusste manuelle Override dafuer - der Nutzer bestaetigt selbst, dass die
+// Songs schon da sind, bevor er sie aufruft.
+function _forceClearYtQueue() {
+    _ytQueueState = [];
+    _saveAndRenderYtQueue();
+}
+
 async function _enqueueOneLink(url, meta) {
     const item = _makeYtQueueItem(url, meta);
     _ytQueueState.push(item);
@@ -4932,6 +4953,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const btnClearYtQueue = document.getElementById('btn-clear-yt-queue');
     if (btnClearYtQueue) btnClearYtQueue.addEventListener('click', () => { _clearYtQueue(); window._showToast('Warteschlange geleert'); });
+    const btnForceClearYtQueue = document.getElementById('btn-force-clear-yt-queue');
+    if (btnForceClearYtQueue) btnForceClearYtQueue.addEventListener('click', () => {
+        if (!confirm('Wirklich ALLE Eintraege entfernen, auch noch laufende? Nur bestaetigen, wenn du selbst geprueft hast, dass die Songs schon in der Bibliothek sind.')) return;
+        _forceClearYtQueue();
+        window._showToast('Warteschlange komplett geleert');
+    });
     const btnResetYtImportHistory = document.getElementById('btn-reset-yt-import-history');
     if (btnResetYtImportHistory) btnResetYtImportHistory.addEventListener('click', () => {
         if (!confirm('Import-Historie zurücksetzen? Bereits importierte Links werden beim nächsten Einfügen nicht mehr automatisch übersprungen.')) return;

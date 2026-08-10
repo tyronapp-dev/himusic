@@ -142,6 +142,10 @@ final class PlayerViewModel: ObservableObject {
             case "next": next()
             case "prev": previousTrack()
             case "seekBy": seek(byDelta: command.delta ?? 0)
+            // Scrub-Leiste im grossen Web-Player loslassen - absolute Zielposition statt
+            // relativem Sprung. Vorher setzte die Seite das lokale <audio> direkt, das ist
+            // in der Huelle inert und bewegte den echten AVPlayer gar nicht.
+            case "seekTo": seek(toSeconds: command.seconds ?? 0)
             default: break
             }
             return

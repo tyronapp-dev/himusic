@@ -22,11 +22,13 @@ struct IncomingPayload: Codable {
 
 /// Zweite Bridge-Nachrichtenform neben IncomingPayload - siehe handleBridgeJSON().
 /// "open" nur bei cmd == "playerView" (meldet, ob der grosse Web-Player offen ist),
-/// "delta" nur bei cmd == "seekBy" (Sekunden, negativ fuer rueckwaerts).
+/// "delta" nur bei cmd == "seekBy" (relativer Sprung, Sekunden, negativ fuer rueckwaerts),
+/// "seconds" nur bei cmd == "seekTo" (absolute Zielposition, z.B. Scrub-Leiste loslassen).
 struct BridgeCommand: Codable {
     let cmd: String
     let open: Bool?
     let delta: Double?
+    let seconds: Double?
 }
 
 extension Data {
