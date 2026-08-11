@@ -249,25 +249,35 @@ window._applyNativeProgress = function(current, duration) {
     if (typeof window.updateTimeUI === 'function') window.updateTimeUI(current, duration);
 };
 
-// Meldet der Huelle, ob der grosse Player (#fullscreen-player) gerade offen ist - zum einen
-// fuer obigen Progress-Push, zum anderen damit NativePlayerBar sich ausblendet, solange der
-// Web-Vollbild-Player sichtbar ist (die native Leiste liegt AUSSERHALB der Webseite, kann von
-// deren eigenem Overlay also nie verdeckt werden - ohne diese Meldung bliebe sie sichtbar
-// darueber). MutationObserver statt eigener Hooks an jedem Oeffnen/Schliessen-Pfad (Klick,
-// Swipe, Zurueck-Pfeil) - erfasst jede Aenderung an der "open"-Klasse unabhaengig vom Weg dorthin.
+// Meldet der Huelle, ob gerade IRGENDEINE Web-Oberflaeche ueber der Mini-Leiste liegt:
+// der grosse Player (#fullscreen-player.open) oder eines der Action-Sheets
+// (.action-sheet-overlay.active - Vibe-Mix, Tag-Editor, Warteschlange, Sortieren, ...).
+//
+// Warum ueberhaupt eine Meldung noetig ist: NativePlayerBar liegt AUSSERHALB der Webseite
+// (SwiftUI-Ebene ueber dem WKWebView). Kein z-index der Seite kann sie verdecken - ein
+// Web-Overlay legt sich also NEBEN statt UEBER die Leiste, und deren Knoepfe fangen
+// Beruehrungen ab, die eigentlich dem Overlay gelten (gemeldet beim Vibe-Mix: "Mix
+// generieren" war nicht drueckbar). Die Leiste muss sich deshalb selbst zurueckziehen.
+//
+// MutationObserver statt eigener Hooks an jedem Oeffnen/Schliessen-Pfad (Klick, Swipe,
+// Zurueck-Pfeil, ESC) - erfasst jede Klassenaenderung unabhaengig vom Weg dorthin. Ein
+// gemeinsamer Beobachter auf document.body mit subtree:true statt 24 einzelner, damit
+// spaeter hinzugefuegte Overlays automatisch mit abgedeckt sind.
 (function () {
     const fsPlayer = document.getElementById('fullscreen-player');
-    if (!fsPlayer) return;
     let lastOpen = null;
     const report = () => {
         const bridge = _nativeBridge();
         if (!bridge) return;
-        const open = fsPlayer.classList.contains('open');
+        const open = !!(fsPlayer && fsPlayer.classList.contains('open'))
+            || !!document.querySelector('.action-sheet-overlay.active');
         if (open === lastOpen) return;
         lastOpen = open;
         bridge.postMessage(JSON.stringify({ cmd: 'playerView', open }));
     };
-    new MutationObserver(report).observe(fsPlayer, { attributes: true, attributeFilter: ['class'] });
+    new MutationObserver(report).observe(document.body, {
+        attributes: true, attributeFilter: ['class'], subtree: true
+    });
     report();
 })();
 
@@ -298,9 +308,15 @@ function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
         c: (coverUrl && coverUrl.startsWith('http')) ? coverUrl : null
     });
 
+    // Bis 2026-08-10 stand hier slice(0, 24) - insgesamt 25 Songs. Das war eine Grenze des
+    // ALTEN Uebergabewegs (himusicplayer://-URL, Laenge begrenzt), nicht der Bruecke: ueber
+    // postMessage geht ein beliebig langer JSON-String. Folge des alten Limits: nach 25 Songs
+    // war die native Warteschlange zu Ende, Skip tat nichts mehr und die Wiedergabe endete.
+    // In der Huelle geht deshalb die volle Warteschlange rueber, nur der URL-Weg bleibt gekappt.
+    const upcoming = bridge ? (upcomingQueue || []) : (upcomingQueue || []).slice(0, 24);
     const queue = [
         toItem(currentSong.id, currentSong.title, currentSong.artist, currentSong.fileUrl, currentSong.coverUrl),
-        ...(upcomingQueue || []).slice(0, 24).map(s => toItem(s.id, s.title, s.artist, s.file_url, s.cover_data))
+        ...upcoming.map(s => toItem(s.id, s.title, s.artist, s.file_url, s.cover_data))
     ].filter(item => !!item.u);
 
     if (queue.length === 0) return false;
@@ -2222,14 +2238,36 @@ let _bgCacheActive = false;
         if (idx >= 0) pending[idx] = entry; else pending.push(entry);
         localStorage.setItem('heatbox_pending_edits', JSON.stringify(pending));
     }
+    let _flushInFlight = false;
     async function _flushPendingEdits() {
+        if (_flushInFlight) return; // mehrere Ausloeser (online/visibility/Start) koennen zusammenfallen
         const pending = JSON.parse(localStorage.getItem('heatbox_pending_edits') || '[]');
         if (pending.length === 0) return;
+        _flushInFlight = true;
+        // Nur die WIRKLICH durchgekommenen Eintraege entfernen. Vorher wurde bei
+        // "flushed > 0" der komplette Schluessel geloescht: schlug auch nur ein Eintrag fehl
+        // (Netz weg mittendrin, 500er), war dessen Aenderung endgueltig weg - genau der
+        // gemeldete Fall "offline gespeicherte Sachen werden nicht uebernommen".
+        const stillPending = [];
         let flushed = 0;
-        for (const entry of pending) { try { await apiUpdateSong(entry.id, entry.changes); flushed++; } catch (error) {} }
-        if (flushed > 0) { localStorage.removeItem('heatbox_pending_edits'); fetchSongsFromDatabase(true); }
+        for (const entry of pending) {
+            try { await apiUpdateSong(entry.id, entry.changes); flushed++; }
+            catch (error) { stillPending.push(entry); }
+        }
+        if (stillPending.length > 0) localStorage.setItem('heatbox_pending_edits', JSON.stringify(stillPending));
+        else localStorage.removeItem('heatbox_pending_edits');
+        if (flushed > 0) fetchSongsFromDatabase(true);
+        _flushInFlight = false;
     }
+    window._flushPendingEdits = _flushPendingEdits;
     window.addEventListener('online', _flushPendingEdits);
+    // Zusaetzlich bei jeder Rueckkehr in den Vordergrund: das "online"-Ereignis feuert nicht
+    // zuverlaessig, wenn die App waehrend des Netzwechsels im Hintergrund/eingefroren war -
+    // in der Huelle der Normalfall. Ohne diesen Ausloeser blieben Eintraege bis zum naechsten
+    // App-Neustart liegen.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && navigator.onLine) _flushPendingEdits();
+    });
     setTimeout(_flushPendingEdits, 3000);
 
     function _showToast(msg, duration = 3000) {
@@ -2261,17 +2299,19 @@ let _bgCacheActive = false;
             const song = window._songIndex?.get(window.currentEditSongId) || window._songIndex?.get(parseInt(window.currentEditSongId));
             if (song) Object.assign(song, changes);
 
-            if (!navigator.onLine) {
-                _savePendingEdit(window.currentEditSongId, apiPayload);
-                editOverlay.classList.remove('active'); btnSaveTags.innerText = "Speichern"; _showToast('✈️ Offline gespeichert – wird synchronisiert wenn online');
-                return;
-            }
+            // Optimistisch speichern: Oberflaeche sofort aktualisieren und Overlay schliessen,
+            // Netzwerk laeuft danach im Hintergrund. Vorher lag der gesamte Block unten hinter
+            // "await apiUpdateSong(...)" - bei langsamer Verbindung stand der Knopf sekundenlang
+            // auf "Speichere...", obwohl die Aenderung lokal laengst feststand. Schlaegt der
+            // Request fehl, landet er als Pending-Edit und wird spaeter nachgetragen (siehe
+            // _flushPendingEdits) - der lokal gezeigte Stand ist also nie eine Luege, nur
+            // vorlaeufig. songId wird hier festgehalten, weil window.currentEditSongId sich
+            // aendern kann, waehrend der Request noch laeuft.
+            const songId = window.currentEditSongId;
+            editOverlay.classList.remove('active');
+            btnSaveTags.innerText = "Speichern";
 
-            try {
-                await apiUpdateSong(window.currentEditSongId, apiPayload);
-                editOverlay.classList.remove('active');
-
-                const songId = window.currentEditSongId;
+            {
                 const hasVibesNow = selectedVibes.length > 0;
                 // applySongPatch kennt die echte Songzeilen-Struktur (.song-cover ist ein
                 // Hintergrundbild-Div, kein <img>) - die alte, hier auskommentiert entfernte
@@ -2319,9 +2359,22 @@ let _bgCacheActive = false;
                     }
                 }
                 if (typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
-                fetchSongsFromDatabase(true); _showToast('✅ Gespeichert');
-            } catch (error) { _savePendingEdit(window.currentEditSongId, changes); _showToast('⚠️ Fehler – lokal gesichert'); }
-            btnSaveTags.innerText = "Speichern";
+            }
+
+            if (!navigator.onLine) {
+                _savePendingEdit(songId, apiPayload);
+                _showToast('✈️ Offline gespeichert – wird synchronisiert wenn online');
+                return;
+            }
+
+            // Bewusst KEIN await: der Nutzer soll nicht auf das Netz warten. Fehler landen
+            // als Pending-Edit, exakt wie im Offline-Fall.
+            // apiPayload statt changes - der frueher hier stehende catch-Zweig sicherte
+            // "changes", also die Fassung OHNE "*"-Hauptvibe-Marker: ein nach Netzwerkfehler
+            // nachgetragener Edit haette die Hauptvibe-Markierung stillschweigend geloescht.
+            apiUpdateSong(songId, apiPayload)
+                .then(() => { _showToast('✅ Gespeichert'); fetchSongsFromDatabase(true); })
+                .catch(() => { _savePendingEdit(songId, apiPayload); _showToast('⚠️ Offline gesichert – wird nachgetragen'); });
         });
     }
 

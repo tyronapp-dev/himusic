@@ -64,6 +64,13 @@ struct WebShellView: UIViewRepresentable {
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
+        // OHNE uiDelegate verschluckt WKWebView alert()/confirm()/prompt() ersatzlos, und
+        // confirm() liefert dann immer false. In der Huelle war dadurch JEDER
+        // Bestaetigungsdialog der Seite tot - betroffen u.a. "Warteschlange komplett leeren",
+        // "Import-Historie zuruecksetzen", "Alle offline gespeicherten Songs loeschen",
+        // Duplikate loeschen, Mix loeschen: der Klick lief in "if (!confirm(...)) return;"
+        // und tat sichtbar nichts. In Safari funktionierten dieselben Knoepfe.
+        webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = false
         webView.scrollView.bounces = false
         webView.isOpaque = false
@@ -76,7 +83,7 @@ struct WebShellView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         private let player: PlayerViewModel
         weak var webView: WKWebView?
 
@@ -167,6 +174,68 @@ struct WebShellView: UIViewRepresentable {
             Task { @MainActor in
                 self.player.handleBridgeJSON(json)
             }
+        }
+
+        // MARK: - WKUIDelegate: alert() / confirm() / prompt() der Seite
+
+        /// Sucht den obersten sichtbaren Controller zum Praesentieren. Ohne das landet der
+        /// Dialog ggf. auf einem bereits verdeckten Controller und erscheint nie.
+        private func topViewController() -> UIViewController? {
+            let scene = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first { $0.activationState == .foregroundActive }
+                ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+            var top = scene?.windows.first(where: { $0.isKeyWindow })?.rootViewController
+                ?? scene?.windows.first?.rootViewController
+            while let presented = top?.presentedViewController { top = presented }
+            return top
+        }
+
+        /// Jeder Zweig MUSS den completionHandler genau einmal aufrufen - sonst blockiert
+        /// WebKit die betroffene Seite dauerhaft. Deshalb auch im Fehlerfall (kein
+        /// Controller gefunden) ein definierter Aufruf statt stillem Abbruch.
+        private func present(_ alert: UIAlertController, fallback: () -> Void) {
+            guard let top = topViewController() else { fallback(); return }
+            top.present(alert, animated: true)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptAlertPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping () -> Void
+        ) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
+            present(alert, fallback: completionHandler)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Abbrechen", style: .cancel) { _ in completionHandler(false) })
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
+            present(alert, fallback: { completionHandler(false) })
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptTextInputPanelWithPrompt prompt: String,
+            defaultText: String?,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (String?) -> Void
+        ) {
+            let alert = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+            alert.addTextField { $0.text = defaultText }
+            alert.addAction(UIAlertAction(title: "Abbrechen", style: .cancel) { _ in completionHandler(nil) })
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak alert] _ in
+                completionHandler(alert?.textFields?.first?.text)
+            })
+            present(alert, fallback: { completionHandler(nil) })
         }
 
         /// Nach JEDEM abgeschlossenen Laden (Ersteinstieg, Retry nach weisser Flaeche, iOS-

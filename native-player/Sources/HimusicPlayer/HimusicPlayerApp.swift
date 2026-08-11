@@ -23,14 +23,15 @@ struct HimusicPlayerApp: App {
             // native Leiste wird stattdessen exakt in den Slot gelegt, den #mini-player in
             // style2.css immer hatte (56px Nav-Hoehe + 10px Abstand oberhalb von
             // #bottom-nav, siehe --nav-h/--mini-gap) - ueberlappt dadurch #bottom-nav nie.
-            // isBigPlayerOpen (von app2.js per MutationObserver gemeldet, siehe
-            // PlayerViewModel) blendet die Leiste aus, solange der grosse Web-Player offen
-            // ist - die liegt AUSSERHALB der Webseite, deren eigenes Vollbild-Overlay kann
-            // sie sonst nie verdecken.
+            // isWebOverlayVisible (von app2.js per MutationObserver gemeldet, siehe
+            // PlayerViewModel) blendet die Leiste aus, solange irgendeine Web-Oberflaeche
+            // darueber liegt - grosser Player ODER Action-Sheet (Vibe-Mix, Tag-Editor, ...).
+            // Die Leiste liegt AUSSERHALB der Webseite, deren Overlays koennen sie sonst
+            // nie verdecken und ihre Knoepfe fangen fremde Beruehrungen ab.
             ZStack(alignment: .bottom) {
                 WebShellView(player: player)
                     .ignoresSafeArea(.container, edges: .bottom)
-                if !player.isBigPlayerOpen {
+                if !player.isWebOverlayVisible {
                     NativePlayerBar(player: player) {
                         NotificationCenter.default.post(name: .himusicExpandFullscreenPlayer, object: nil)
                     }

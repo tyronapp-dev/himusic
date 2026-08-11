@@ -40,17 +40,21 @@ final class PlayerViewModel: ObservableObject {
         saveSnapshot()
     }
 
-    /// Von der Webseite gemeldet (MutationObserver auf #fullscreen-player in app2.js, ueber
-    /// die Bridge als {cmd:"playerView", open}). Zwei Zwecke: (1) solange der grosse Player
-    /// offen ist, pushen wir Fortschritt/Zeit jede Sekunde nach - dessen Zeitanzeige haengt
-    /// sonst am lokalen <audio>-Element, das in der Huelle inert ist und nie "timeupdate"
-    /// feuert. (2) NativePlayerBar blendet sich aus, solange der Web-Vollbild-Player offen
-    /// ist - die native Leiste liegt AUSSERHALB der Webseite, ein Web-Overlay kann sie nie
-    /// verdecken, ohne dieses Signal bliebe sie sichtbar darueber liegen.
-    @Published var isBigPlayerOpen: Bool = false
+    /// Von der Webseite gemeldet (MutationObserver in app2.js, ueber die Bridge als
+    /// {cmd:"playerView", open}). True, sobald IRGENDEINE Web-Oberflaeche ueber der
+    /// Mini-Leiste liegt: der grosse Player ODER ein Action-Sheet (Vibe-Mix, Tag-Editor,
+    /// Warteschlange, ...). Zwei Zwecke:
+    /// (1) NativePlayerBar blendet sich aus, solange etwas darueber liegt - die native
+    ///     Leiste liegt AUSSERHALB der Webseite, kein z-index der Seite kann sie verdecken.
+    ///     Ohne dieses Signal bleibt sie sichtbar liegen und fing Beruehrungen ab, die dem
+    ///     Overlay galten (gemeldet beim Vibe-Mix: "Mix generieren" nicht drueckbar).
+    /// (2) Solange etwas offen ist, pushen wir Fortschritt/Zeit jede Sekunde nach - die
+    ///     Zeitanzeige des grossen Players haengt sonst am lokalen <audio>-Element, das in
+    ///     der Huelle inert ist und nie "timeupdate" feuert.
+    @Published var isWebOverlayVisible: Bool = false
 
-    /// Nur gefeuert, waehrend isBigPlayerOpen true ist (siehe dort) - kein Grund, das jede
-    /// Sekunde in die Seite zu pushen, wenn niemand hinschaut.
+    /// Nur gefeuert, waehrend isWebOverlayVisible true ist (siehe dort) - kein Grund, das
+    /// jede Sekunde in die Seite zu pushen, wenn niemand hinschaut.
     var onProgressChanged: ((Double, Double) -> Void)?
 
     var currentItem: QueueItem? {
@@ -128,14 +132,14 @@ final class PlayerViewModel: ObservableObject {
     /// {cmd:"toggle"} fuers Play/Pause aus der Web-UI (app2.js kann den echten nativen
     /// Zustand nicht selbst kennen, deshalb eigenes Kommando statt lokalem Toggle dort),
     /// {cmd:"playerView", open} meldet, ob der grosse Web-Player offen ist (siehe
-    /// isBigPlayerOpen) - sonst dasselbe Queue-JSON wie der alte URL-Weg, nur unverpackt
+    /// isWebOverlayVisible) - sonst dasselbe Queue-JSON wie der alte URL-Weg, nur unverpackt
     /// (kein base64url, keine Laengengrenze).
     func handleBridgeJSON(_ json: String) {
         guard let data = json.data(using: .utf8) else { return }
         if let command = try? JSONDecoder().decode(BridgeCommand.self, from: data) {
             switch command.cmd {
             case "toggle": togglePlayPause()
-            case "playerView": isBigPlayerOpen = command.open ?? false
+            case "playerView": isWebOverlayVisible = command.open ?? false
             // Transport aus der Web-Oberflaeche: IMMER echter Songwechsel. Die Seite darf
             // nicht selbst aus playbackQueue/playbackHistory rechnen - die veralten bei
             // jedem nativen Auto-Skip im Hintergrund und lieferten dadurch falsche Songs.
@@ -176,9 +180,23 @@ final class PlayerViewModel: ObservableObject {
         queue = payload.queue
         currentIndex = min(max(payload.startIndex, 0), queue.count - 1)
         playCurrent()
-        // Restliche Queue im Hintergrund vorladen (Schritt 3, ADR-007) - erst das
-        // macht Wiedergabe ohne Netz im Hintergrund moeglich, nicht nur den aktuellen Song.
-        Task { await AudioFileCache.shared.ensureCachedQueue(queue) }
+        prefetchUpcoming()
+    }
+
+    /// Wieviele Songs ab der aktuellen Position vorausgeladen werden. Seit die Seite die
+    /// VOLLE Warteschlange schickt (vorher 25, siehe _tryNativePlayerHandoff), darf hier
+    /// nicht mehr blind ueber die ganze Liste gelaufen werden: bei "zufaellig abspielen"
+    /// sind das ueber 2000 Songs - die wuerden alle in die Download-Warteschlange wandern,
+    /// das 8-GB-Cap sofort sprengen und dauerhaft Daten ziehen. Ein gleitendes Fenster
+    /// reicht: es wandert bei jedem Songwechsel mit (siehe playCurrent).
+    private static let prefetchWindow = 15
+
+    private func prefetchUpcoming() {
+        guard !queue.isEmpty else { return }
+        let start = min(currentIndex, queue.count - 1)
+        let end = min(start + Self.prefetchWindow, queue.count)
+        let window = Array(queue[start..<end])
+        Task { await AudioFileCache.shared.ensureCachedQueue(window) }
     }
 
     // MARK: - Wiedergabe-Steuerung
@@ -187,6 +205,9 @@ final class PlayerViewModel: ObservableObject {
         guard let item = currentItem else { return }
         playbackToken += 1
         let token = playbackToken
+        // Vorlade-Fenster wandert mit der Wiedergabe mit - sonst waere nach den ersten
+        // 15 Songs nichts mehr vorgeladen (siehe prefetchUpcoming).
+        prefetchUpcoming()
         Task { await beginPlayback(item, token: token) }
     }
 
@@ -351,7 +372,7 @@ final class PlayerViewModel: ObservableObject {
             if self.isPlaying, Date().timeIntervalSince(self.lastSnapshotSaveAt) > 10 {
                 self.saveSnapshot()
             }
-            guard self.isBigPlayerOpen else { return }
+            guard self.isWebOverlayVisible else { return }
             let duration = self.player.currentItem?.duration.seconds ?? 0
             self.onProgressChanged?(self.player.currentTime().seconds, duration.isFinite ? duration : 0)
         }
