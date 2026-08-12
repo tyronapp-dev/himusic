@@ -100,6 +100,9 @@ struct WebShellView: UIViewRepresentable {
             self.player.onProgressChanged = { [weak self] current, duration in
                 self?.pushProgress(current: current, duration: duration)
             }
+            self.player.onQueueChanged = { [weak self] json in
+                self?.pushQueue(json)
+            }
             // Zweite Absicherung noetig: evaluateJavaScript() waehrend die App im Hintergrund
             // ist (z.B. Control-Center-Play, waehrend man in einer anderen App ist), kommt
             // beim WKWebView oft gar nicht an - der Webinhalts-Prozess kann suspendiert sein.
@@ -137,6 +140,9 @@ struct WebShellView: UIViewRepresentable {
         /// nicht zwingend zeitgleich mit "App aktiv geworden" passiert.
         @MainActor
         private func pushCurrentStateIfAny() {
+            // Warteschlange zuerst: eine frisch geladene Seite hat noch gar keinen Stand,
+            // sonst zeigt ihre Warteschlangen-Ansicht bis zum naechsten Songwechsel nichts.
+            if let queueJSON = player.encodedQueueSnapshot() { pushQueue(queueJSON) }
             guard let item = player.currentItem else { return }
             pushNowPlaying(item: item, isPlaying: player.isPlaying)
         }
@@ -164,6 +170,11 @@ struct WebShellView: UIViewRepresentable {
             webView.evaluateJavaScript(
                 "window._applyNativeProgress && window._applyNativeProgress(\(current), \(duration));"
             )
+        }
+
+        private func pushQueue(_ json: String) {
+            guard let webView else { return }
+            webView.evaluateJavaScript("window._applyNativeQueue && window._applyNativeQueue(\(json));")
         }
 
         func userContentController(

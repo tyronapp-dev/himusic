@@ -257,6 +257,22 @@ window._applyNativeProgress = function(current, duration) {
     if (typeof window.updateTimeUI === 'function') window.updateTimeUI(current, duration);
 };
 
+// Echte native Warteschlange (Ausschnitt um die aktuelle Position, siehe QueueSnapshot in
+// QueueItem.swift). In der Huelle ist DAS die Quelle der Wahrheit fuer die
+// Warteschlangen-Ansicht - playbackQueue/playbackHistory fuehrt dort niemand mehr, die
+// Ansicht zeigte deshalb Songs, die gar nicht als naechstes kamen, und einen per Swipe
+// eingereihten Song gar nicht. Wird bei jedem Songwechsel, jedem Einreihen und nach jedem
+// Seiten-Ladevorgang geschickt.
+window._nativeQueueSnapshot = null;
+window._applyNativeQueue = function(snapshot) {
+    window._nativeQueueSnapshot = snapshot;
+    // Ist die Ansicht gerade offen, sofort neu zeichnen statt bis zum naechsten Oeffnen zu warten.
+    const overlay = document.getElementById('queue-overlay');
+    if (overlay && overlay.classList.contains('active') && typeof window.renderQueueOverlay === 'function') {
+        window.renderQueueOverlay();
+    }
+};
+
 // Meldet der Huelle, ob gerade IRGENDEINE Web-Oberflaeche ueber der Mini-Leiste liegt:
 // der grosse Player (#fullscreen-player.open) oder eines der Action-Sheets
 // (.action-sheet-overlay.active - Vibe-Mix, Tag-Editor, Warteschlange, Sortieren, ...).
@@ -458,6 +474,12 @@ function _setAccentColor(color) {
     // Wahrgenommene Helligkeit (0–255). Über ~150 = helle Farbe → dunkle Schrift.
     const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
     document.documentElement.style.setProperty('--accent-text', luminance > 150 ? '#000' : '#fff');
+    // Rohkanaele fuer halbtransparente Ableitungen (rgba(var(--accent-rgb), 0.16)).
+    // --accent-soft war bis 2026-08-13 als festes Rot in style2.css hinterlegt und blieb
+    // damit rot, egal welche Farbe im Farbwaehler stand - dasselbe galt fuer die
+    // Swipe-Rueckmeldung beim Einreihen in die Warteschlange.
+    document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`);
+    document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
 }
 
 function updatePlayerBackground(color1, color2) {
@@ -492,8 +514,10 @@ const getDuration = (file) => new Promise((resolve) => {
 function addLongPressListener(element, callback) {
     let pressTimer;
     const start = (e) => {
-        if (e.type === 'click' && e.button !== 0) return; 
-        pressTimer = window.setTimeout(() => { callback(e); }, 600); 
+        if (e.type === 'click' && e.button !== 0) return;
+        // Haptische Rueckmeldung im Moment des Ausloesens - sonst ist ein Langdruck die
+        // einzige Geste ohne spuerbare Bestaetigung, man haelt im Zweifel zu lange drauf.
+        pressTimer = window.setTimeout(() => { _hapticTick(); callback(e); }, 600);
     };
     const cancel = () => { clearTimeout(pressTimer); };
     element.addEventListener('mousedown', start);
@@ -3307,6 +3331,19 @@ async function createNewPlaylistProcess() {
     }
 
     let queueSortable = null;
+
+    /// Kompaktes Bruecken-Format {id,t,a,u,c} in die Song-Form bringen, die buildQueueItem
+    /// erwartet. _nativeIndex (Position in der ECHTEN nativen Warteschlange, nicht im
+    /// uebertragenen Ausschnitt) haengt mit dran, damit ein Antippen gezielt dorthin
+    /// springen kann - playbackQueue.indexOf() liefert fuer diese Eintraege nie einen Treffer.
+    function _nativeItemToSong(item, nativeIndex) {
+        return {
+            id: item.id, title: item.t, artist: item.a,
+            file_url: item.u, cover_data: item.c || '',
+            _nativeIndex: nativeIndex
+        };
+    }
+
     function buildQueueItem(song, type) {
         const div = document.createElement('div'); div.className = 'song-item';
         const coverSrc = song.coverUrl || song.cover_data || ''; const cover = coverSrc.length > 10 ? `url('${coverSrc}')` : 'var(--accent)';
@@ -3318,6 +3355,11 @@ async function createNewPlaylistProcess() {
             div.style.opacity = '0.5';
             div.innerHTML = `<div class="song-cover" style="background:${cover};background-size:cover;"></div><div class="song-info"><div class="song-title">${_esc(song.title)}</div><div class="song-artist">${_esc(song.artist)}</div></div><div style="font-size:10px;color:var(--text-secondary);flex-shrink:0;padding-right:4px;">DAVOR</div>`;
             div.addEventListener('click', () => {
+                if (song._nativeIndex != null) {
+                    const b = _nativeBridge();
+                    if (b) { b.postMessage(JSON.stringify({ cmd: 'jumpTo', index: song._nativeIndex })); document.getElementById('queue-overlay').classList.remove('active'); }
+                    return;
+                }
                 const idx = playbackHistory.indexOf(song); if (idx === -1) return;
                 const songsAfter = playbackHistory.splice(idx + 1); if (window.currentSongData) songsAfter.push(window.currentSongData);
                 playbackQueue = [...songsAfter.reverse(), ...playbackQueue]; playbackHistory.splice(idx, 1); window.currentContextSongId = song.id || window.currentContextSongId; _skipNextHistoryPush = true; 
@@ -3329,11 +3371,26 @@ async function createNewPlaylistProcess() {
             div.addEventListener('touchstart', (e) => { qStartX = e.touches[0].clientX; }, {passive: true});
             div.addEventListener('touchend', (e) => {
                 if (!qStartX) return;
-                if (qStartX - e.changedTouches[0].clientX > 50) { const actualIdx = playbackQueue.indexOf(song); if (actualIdx > -1) playbackQueue.splice(actualIdx, 1); div.style.transition = 'all 0.3s'; div.style.transform = 'translateX(-100%)'; div.style.opacity = '0'; setTimeout(() => div.remove(), 300); savePlayerState(); }
+                if (qStartX - e.changedTouches[0].clientX > 50) {
+                    if (song._nativeIndex != null) {
+                        const b = _nativeBridge();
+                        if (b) b.postMessage(JSON.stringify({ cmd: 'removeAt', index: song._nativeIndex }));
+                    } else {
+                        const actualIdx = playbackQueue.indexOf(song); if (actualIdx > -1) playbackQueue.splice(actualIdx, 1); savePlayerState();
+                    }
+                    div.style.transition = 'all 0.3s'; div.style.transform = 'translateX(-100%)'; div.style.opacity = '0'; setTimeout(() => div.remove(), 300);
+                }
                 qStartX = 0;
             });
             div.addEventListener('click', (e) => {
                 if (e.target.closest('.drag-handle')) return;
+                // Native Warteschlange: gezielt an diese Position springen. Der lokale Weg
+                // darunter arbeitet auf playbackQueue, die hier nichts steuert.
+                if (song._nativeIndex != null) {
+                    const b = _nativeBridge();
+                    if (b) { b.postMessage(JSON.stringify({ cmd: 'jumpTo', index: song._nativeIndex })); document.getElementById('queue-overlay').classList.remove('active'); }
+                    return;
+                }
                 const idx = playbackQueue.indexOf(song); if (idx === -1) return;
                 const skipped = playbackQueue.splice(0, idx); if (window.currentSongData) { playbackHistory.push(window.currentSongData); skipped.forEach(s => playbackHistory.push(s)); }
                 playbackQueue.shift(); window.currentContextSongId = song.id || window.currentContextSongId; _skipNextHistoryPush = true; 
@@ -3343,11 +3400,59 @@ async function createNewPlaylistProcess() {
         return div;
     }
 
-    document.getElementById('btn-queue-menu')?.addEventListener('click', () => {
+    // Als benannte Funktion + auf window, damit _applyNativeQueue sie bei laufenden
+    // Aenderungen erneut aufrufen kann (Songwechsel/Einreihen bei offener Ansicht).
+    window.renderQueueOverlay = function renderQueueOverlay() {
         const qContainer = document.getElementById('queue-list'); qContainer.innerHTML = '';
         if (queueSortable) { queueSortable.destroy(); queueSortable = null; }
 
-        const historyToShow = playbackHistory.slice(-10).reverse(); 
+        // In der Huelle fuehrt der native Player die Warteschlange - dann IMMER dessen Stand
+        // zeichnen. Umsortieren per Drag entfaellt dort bewusst: die Reihenfolge liegt nativ,
+        // ein lokales Sortable wuerde nur eine Liste umbauen, die niemand abspielt (genau der
+        // Fehler, der die Ansicht ueberhaupt falsch gemacht hat). Reine Anzeige ist ehrlicher
+        // als eine Bedienung, die nichts bewirkt.
+        const snap = _nativeBridge() ? window._nativeQueueSnapshot : null;
+        if (snap && Array.isArray(snap.items)) {
+            // snap.currentIndex ist relativ zum uebertragenen Ausschnitt; baseIndex rechnet
+            // jede Zeile auf ihre echte Position in der nativen Warteschlange zurueck, damit
+            // Antippen/Wischen den richtigen Eintrag trifft.
+            const baseIndex = (snap.totalCount - snap.remainingAfter) - snap.items.length;
+            const history = snap.items.slice(0, snap.currentIndex)
+                .map((it, i) => ({ it, idx: baseIndex + i })).reverse();
+            if (history.length > 0) {
+                const histLabel = document.createElement('div');
+                histLabel.style.cssText = 'font-size:11px;font-weight:700;color:var(--text-secondary);letter-spacing:1px;text-transform:uppercase;padding:4px 4px 6px;';
+                histLabel.innerText = 'Verlauf'; qContainer.appendChild(histLabel);
+                history.forEach(({ it, idx }) => qContainer.appendChild(buildQueueItem(_nativeItemToSong(it, idx), 'history')));
+            }
+            const cur = snap.items[snap.currentIndex];
+            if (cur) {
+                const nowLabel = document.createElement('div');
+                nowLabel.style.cssText = 'font-size:11px;font-weight:700;color:var(--accent);letter-spacing:1px;text-transform:uppercase;padding:8px 4px 2px;';
+                nowLabel.innerText = 'Läuft jetzt'; qContainer.appendChild(nowLabel);
+                qContainer.appendChild(buildQueueItem(_nativeItemToSong(cur, baseIndex + snap.currentIndex), 'current'));
+            }
+            const upcoming = snap.items.slice(snap.currentIndex + 1)
+                .map((it, i) => ({ it, idx: baseIndex + snap.currentIndex + 1 + i }));
+            if (upcoming.length === 0) {
+                const emptyMsg = document.createElement('div');
+                emptyMsg.style.cssText = 'padding:20px;text-align:center;color:var(--text-secondary);font-size:13px;';
+                emptyMsg.innerText = 'Keine weiteren Lieder in der Warteschlange.'; qContainer.appendChild(emptyMsg);
+            } else {
+                const nextLabel = document.createElement('div');
+                nextLabel.style.cssText = 'font-size:11px;font-weight:700;color:var(--text-secondary);letter-spacing:1px;text-transform:uppercase;padding:8px 4px 6px;';
+                nextLabel.innerText = 'Als nächstes'; qContainer.appendChild(nextLabel);
+                upcoming.forEach(({ it, idx }) => qContainer.appendChild(buildQueueItem(_nativeItemToSong(it, idx), 'next')));
+                if (snap.remainingAfter > 0) {
+                    const moreMsg = document.createElement('div');
+                    moreMsg.style.cssText = 'padding:15px;text-align:center;font-size:12px;color:var(--text-secondary);';
+                    moreMsg.innerText = `+ ${snap.remainingAfter} weitere Lieder...`; qContainer.appendChild(moreMsg);
+                }
+            }
+            return;
+        }
+
+        const historyToShow = playbackHistory.slice(-10).reverse();
         if (historyToShow.length > 0) { const histLabel = document.createElement('div'); histLabel.style.cssText = 'font-size:11px;font-weight:700;color:var(--text-secondary);letter-spacing:1px;text-transform:uppercase;padding:4px 4px 6px;'; histLabel.innerText = 'Verlauf'; qContainer.appendChild(histLabel); historyToShow.forEach(song => qContainer.appendChild(buildQueueItem(song, 'history'))); }
 
         if (window.currentSongData) { const nowLabel = document.createElement('div'); nowLabel.style.cssText = 'font-size:11px;font-weight:700;color:var(--accent);letter-spacing:1px;text-transform:uppercase;padding:8px 4px 2px;'; nowLabel.innerText = 'Läuft jetzt'; qContainer.appendChild(nowLabel); qContainer.appendChild(buildQueueItem(window.currentSongData, 'current')); }
@@ -3360,6 +3465,10 @@ async function createNewPlaylistProcess() {
             if (playbackQueue.length > 50) { const moreMsg = document.createElement('div'); moreMsg.style.cssText = 'padding:15px;text-align:center;font-size:12px;color:var(--text-secondary);'; moreMsg.innerText = `+ ${playbackQueue.length - 50} weitere Lieder...`; qContainer.appendChild(moreMsg); }
             queueSortable = new Sortable(nextContainer, { animation: 150, handle: '.drag-handle', ghostClass: 'sortable-ghost', onEnd: function(evt) { const movedItem = playbackQueue.splice(evt.oldIndex, 1)[0]; playbackQueue.splice(evt.newIndex, 0, movedItem); savePlayerState(); } });
         }
+    };
+
+    document.getElementById('btn-queue-menu')?.addEventListener('click', () => {
+        window.renderQueueOverlay();
         document.getElementById('queue-overlay').classList.add('active');
     });
 

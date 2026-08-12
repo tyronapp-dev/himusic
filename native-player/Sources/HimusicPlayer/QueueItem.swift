@@ -20,17 +20,30 @@ struct IncomingPayload: Codable {
     let startIndex: Int
 }
 
+/// Ausschnitt der echten nativen Warteschlange fuer die Warteschlangen-Ansicht der Seite.
+/// Bewusst nur ein Fenster um die aktuelle Position statt der ganzen Liste: die kann seit
+/// dem Wegfall des 25er-Limits die komplette Bibliothek sein (2000+), und die Ansicht zeigt
+/// ohnehin nur ~50 Eintraege. "currentIndex" ist relativ zu "items", nicht zur echten Queue.
+struct QueueSnapshot: Codable {
+    let items: [QueueItem]
+    let currentIndex: Int
+    let totalCount: Int
+    let remainingAfter: Int
+}
+
 /// Zweite Bridge-Nachrichtenform neben IncomingPayload - siehe handleBridgeJSON().
 /// "open" nur bei cmd == "playerView" (meldet, ob der grosse Web-Player offen ist),
 /// "delta" nur bei cmd == "seekBy" (relativer Sprung, Sekunden, negativ fuer rueckwaerts),
 /// "seconds" nur bei cmd == "seekTo" (absolute Zielposition, z.B. Scrub-Leiste loslassen),
-/// "item" nur bei cmd == "insertNext" (Song aus dem Rechts-Swipe der Songliste).
+/// "item" nur bei cmd == "insertNext" (Song aus dem Rechts-Swipe der Songliste),
+/// "index" nur bei cmd == "jumpTo"/"removeAt" (Position in der echten nativen Warteschlange).
 struct BridgeCommand: Codable {
     let cmd: String
     let open: Bool?
     let delta: Double?
     let seconds: Double?
     let item: QueueItem?
+    let index: Int?
 }
 
 extension Data {

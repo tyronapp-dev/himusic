@@ -37,7 +37,37 @@ final class PlayerViewModel: ObservableObject {
     private func notifyNowPlayingChanged() {
         guard let item = currentItem else { return }
         onNowPlayingChanged?(item, isPlaying)
+        notifyQueueChanged()
         saveSnapshot()
+    }
+
+    /// Schickt der Seite den aktuellen Ausschnitt der nativen Warteschlange (fertiges JSON).
+    /// Noetig, weil die Warteschlangen-Ansicht bis 2026-08-13 aus playbackQueue/playbackHistory
+    /// gerendert wurde - beides fuehrt in der Huelle niemand mehr, die Anzeige stimmte deshalb
+    /// nicht mit dem ueberein, was tatsaechlich als naechstes lief.
+    var onQueueChanged: ((String) -> Void)?
+
+    private func notifyQueueChanged() {
+        guard let json = encodedQueueSnapshot() else { return }
+        onQueueChanged?(json)
+    }
+
+    /// Auch von aussen aufrufbar (WebShellView nach jedem Seiten-Ladevorgang), damit eine
+    /// frisch geladene Seite den Stand sofort bekommt statt erst beim naechsten Songwechsel.
+    func encodedQueueSnapshot() -> String? {
+        guard !queue.isEmpty else { return "null" }
+        let historyWindow = 10
+        let upcomingWindow = 50
+        let start = max(0, currentIndex - historyWindow)
+        let end = min(queue.count, currentIndex + upcomingWindow + 1)
+        let snapshot = QueueSnapshot(
+            items: Array(queue[start..<end]),
+            currentIndex: currentIndex - start,
+            totalCount: queue.count,
+            remainingAfter: queue.count - end
+        )
+        guard let data = try? JSONEncoder().encode(snapshot) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// Von der Webseite gemeldet (MutationObserver in app2.js, ueber die Bridge als
@@ -151,6 +181,8 @@ final class PlayerViewModel: ObservableObject {
             // in der Huelle inert und bewegte den echten AVPlayer gar nicht.
             case "seekTo": seek(toSeconds: command.seconds ?? 0)
             case "insertNext": if let item = command.item { insertNext(item) }
+            case "jumpTo": if let index = command.index { jumpTo(index) }
+            case "removeAt": if let index = command.index { removeAt(index) }
             case "haptic": playHapticTick()
             default: break
             }
@@ -293,8 +325,29 @@ final class PlayerViewModel: ObservableObject {
         }
         let insertAt = min(currentIndex + 1, queue.count)
         queue.insert(item, at: insertAt)
+        notifyQueueChanged() // sonst zeigt die Warteschlangen-Ansicht den Song erst nach dem naechsten Songwechsel
         saveSnapshot()
         Task { await AudioFileCache.shared.ensureCached(item: item) }
+    }
+
+    /// Antippen eines Eintrags in der Warteschlangen-Ansicht: direkt dorthin springen.
+    /// Der Rest der Warteschlange bleibt unveraendert, uebersprungene Songs stehen danach
+    /// im "Verlauf"-Teil der Ansicht (alles vor currentIndex).
+    func jumpTo(_ index: Int) {
+        guard queue.indices.contains(index) else { return }
+        currentIndex = index
+        playCurrent()
+    }
+
+    /// Eintrag per Wisch aus der Warteschlange entfernen. Der laufende Song ist bewusst
+    /// ausgenommen - ihn zu entfernen waere ein Stopp, kein Entfernen, und die Ansicht
+    /// bietet dafuer keinen erkennbaren Weg zurueck.
+    func removeAt(_ index: Int) {
+        guard queue.indices.contains(index), index != currentIndex else { return }
+        queue.remove(at: index)
+        if index < currentIndex { currentIndex -= 1 }
+        notifyQueueChanged()
+        saveSnapshot()
     }
 
     /// Kurzer Tick beim Einreihen per Swipe. iOS gibt Web-Apps keine Vibrations-API, die
