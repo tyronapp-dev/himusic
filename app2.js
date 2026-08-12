@@ -2181,17 +2181,34 @@ let _bgCacheActive = false;
     const ctxRemoveFromPlaylist = document.getElementById('ctx-remove-from-playlist');
     if(ctxRemoveFromPlaylist) { ctxRemoveFromPlaylist.addEventListener('click', async () => { songContextOverlay.classList.remove('active'); try { await apiRemoveSongFromPlaylist(window.currentOpenPlaylistId, window.currentContextSongId); const el = document.querySelector(`#playlist-details-songs-container .song-item[data-id="${window.currentContextSongId}"]`); if(el) el.remove(); window.fetchPlaylistsForPage(true); } catch (error) { alert('Fehler beim Entfernen: ' + error.message); } }); }
 
+    // Sender-Erstellung lag bis 2026-08-13 zweimal fast gleich im Code (Songliste + grosser
+    // Player). Die Kopie im grossen Player fand ihren Song nur ueber _songIndex und kehrte
+    // sonst STILL zurueck - kein Sender, keine Meldung, "es passiert nichts". Jetzt eine
+    // gemeinsame Funktion mit der im Projekt ueblichen mehrstufigen Song-Aufloesung
+    // (Index -> Index mit parseInt -> currentSongData) und einer sichtbaren Meldung, falls
+    // wirklich nichts gefunden wird.
+    // Auf window, weil der Handler des grossen Players eine Scope-Ebene hoeher liegt.
+    window._resolveSongById = function _resolveSongById(id) {
+        if (id == null) return null;
+        return (window._songIndex?.get(id))
+            || (window._songIndex?.get(parseInt(id)))
+            || ((window.currentSongData && window.currentSongData.id == id) ? window.currentSongData : null);
+    };
+
+    window.createStationForSong = function(song) {
+        if (!song || !song.title) { _showToast('⚠️ Song nicht gefunden – Sender nicht erstellt'); return; }
+        const stationSongs = _buildStationSongs(song);
+        const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data || song.coverUrl || '', songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000), pinned: false };
+        const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]');
+        savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
+        if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
+        _showToast(`Sender für "${song.title}" erstellt!`);
+    };
+
     if(ctxCreateStation) {
         ctxCreateStation.addEventListener('click', () => {
             songContextOverlay.classList.remove('active');
-            const song = (window._songIndex?.get(window.currentContextSongId));
-            if (!song) return;
-            const stationSongs = _buildStationSongs(song);
-            const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data, songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000), pinned: false };
-            const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]');
-            savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
-            if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
-            alert(`Sender für "${song.title}" wurde auf der Startseite erstellt!`);
+            window.createStationForSong(window._resolveSongById(window.currentContextSongId));
         });
     }
 
@@ -3496,12 +3513,11 @@ async function createNewPlaylistProcess() {
     document.getElementById('bp-ctx-add-playlist')?.addEventListener('click', () => { document.getElementById('big-player-context-overlay').classList.remove('active'); selectedSongs.clear(); selectedSongs.add(String(window.currentContextSongId)); window.openPlaylistSelection(); });
     document.getElementById('bp-ctx-create-station')?.addEventListener('click', () => {
         document.getElementById('big-player-context-overlay').classList.remove('active');
-        const activeId = window.currentPlayingSongId || (window.currentSongData ? window.currentSongData.id : null); if (!activeId) return;
-        const song = window._songIndex?.get(parseInt(activeId)); if (!song) return;
-        const stationSongs = _buildStationSongs(song);
-        const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data, songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000), pinned: false };
-        const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]'); savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
-        if (typeof window.renderHomeSections === 'function') window.renderHomeSections(); _showToast(`Sender für "${song.title}" erstellt!`);
+        // Nutzt dieselbe Funktion wie die Songliste (siehe createStationForSong). currentSongData
+        // ist hier ein vollwertiger Rueckfall: in der Huelle wird es von _applyNativeNowPlaying
+        // gefuellt, waehrend _songIndex je nach Ladezustand noch leer sein kann.
+        const activeId = window.currentPlayingSongId ?? (window.currentSongData ? window.currentSongData.id : null);
+        window.createStationForSong(window._resolveSongById(activeId) || window.currentSongData);
     });
 
     document.getElementById('bp-ctx-edit-tags')?.addEventListener('click', () => { document.getElementById('big-player-context-overlay').classList.remove('active'); document.getElementById('ctx-edit-tags').click(); });
