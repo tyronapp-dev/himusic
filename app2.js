@@ -127,9 +127,24 @@ function _renderVibesText(el, vibesArr, songId) {
 // gesetzte Hauptvibes verhält sich das hier exakt wie vorher. Ergebnis nach Score sortiert,
 // aber innerhalb gleicher Score-Stufe gemischt, damit trotzdem ein Mix rauskommt statt einer
 // starren Bestenliste.
+// Namen fuer den Kuenstler-Vergleich vereinheitlichen: Gross-/Kleinschreibung egal, und
+// Mehrfachnennungen ("A feat. B", "A & B", "A, B") in Einzelnamen zerlegen, damit eine
+// Zusammenarbeit auch als Treffer des Hauptkuenstlers zaehlt.
+function _artistKeys(artist) {
+    return String(artist || '')
+        .toLowerCase()
+        .split(/\s*(?:,|&|\bfeat\.?\b|\bft\.?\b|\bx\b|\bvs\.?\b|\bwith\b)\s*/)
+        .map(a => a.trim())
+        .filter(a => a.length > 1);
+}
+
 function _buildStationSongs(song) {
     const sourceVibes = song.vibes || [];
     const sourceMain = _getMainVibes(song.id);
+    // Kuenstler-Signal: traegt IMMER bei (nicht nur als Notnagel), gewichtet unter einem
+    // Vibe-Treffer. Ohne das lief ein Sender fuer einen noch nicht getaggten Song ins Leere -
+    // ohne Vibes gab es null Uebereinstimmungen und es blieben nur 5 Zufallssongs uebrig.
+    const sourceArtists = new Set(_artistKeys(song.artist));
     const scored = [];
     window.globalSongsData.forEach(s => {
         if (s.id === song.id) { scored.push({ song: s, score: Infinity }); return; }
@@ -141,12 +156,17 @@ function _buildStationSongs(song) {
             const mainHits = (sourceMain.includes(v) ? 1 : 0) + (sMain.includes(v) ? 1 : 0);
             score += 1 + mainHits;
         });
+        if (sourceArtists.size > 0 && _artistKeys(s.artist).some(a => sourceArtists.has(a))) score += 2;
         if (score > 0) scored.push({ song: s, score });
     });
     scored.sort((a, b) => b.score - a.score || Math.random() - 0.5);
+    // Kein Deckel auf die Anzahl: alles ab Schwelle kommt rein (gespeichert werden nur IDs,
+    // siehe createStationForSong - eine lange Liste kostet daher kaum Platz).
     let stationSongs = scored.filter(x => x.score >= 2).map(x => x.song);
+    // Greift nur noch, wenn wirklich nichts passt (kein Vibe, kein zweiter Song des
+    // Kuenstlers). 25 statt 5, damit ein Sender auch dann laenger als eine Minute traegt.
     if (stationSongs.length <= 1) {
-        const randomFill = [...window.globalSongsData].sort(() => 0.5 - Math.random()).slice(0, 5);
+        const randomFill = [...window.globalSongsData].sort(() => 0.5 - Math.random()).slice(0, 25);
         stationSongs = Array.from(new Set([song, ...stationSongs, ...randomFill]));
     }
     return stationSongs;
@@ -245,6 +265,7 @@ window._applyNativeNowPlaying = function(payload) {
 
     if (typeof window.updatePlayPauseIcons === 'function') window.updatePlayPauseIcons(!!payload.isPlaying);
     if (typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
+    if (typeof window._updateSourceBadge === 'function') window._updateSourceBadge();
     if (typeof window.savePlayerState === 'function') window.savePlayerState();
 };
 
@@ -305,6 +326,46 @@ window._applyNativeQueue = function(snapshot) {
     report();
 })();
 
+// Songs, die der Nutzer selbst per Swipe eingereiht hat. Sie gehoeren NICHT zur laufenden
+// Playlist/zum Sender und bekommen deshalb keine Herkunfts-Kennung - der Rest der
+// Warteschlange stammt weiterhin aus der Quelle, dort erscheint die Kennung danach wieder.
+// Wird geleert, sobald eine neue Quelle gestartet wird (siehe togglePlaylistPlayback).
+window._manuallyQueuedIds = new Set();
+
+// Herkunft des laufenden Songs aus window.currentPlayingPlaylistId ableiten, statt sie an
+// jeder Startstelle separat mitzufuehren: die Variable wird beim Start aus Playlist, Sender
+// und Mix ohnehin schon gesetzt, und ihr Praefix sagt eindeutig, um welche Art es sich handelt.
+function _describePlaybackSource() {
+    const id = window.currentPlayingPlaylistId;
+    if (id == null) return null;
+    const idStr = String(id);
+    try {
+        if (idStr.startsWith('station_')) {
+            const found = JSON.parse(localStorage.getItem('heatbox_stations') || '[]').find(s => s.id === idStr);
+            // "Sender: <Songtitel>" ist schon der gespeicherte Name - das Praefix hier weglassen.
+            return found ? { label: found.name.replace(/^Sender:\s*/i, ''), kind: 'Sender' } : { label: '', kind: 'Sender' };
+        }
+        if (idStr.startsWith('temp_')) {
+            const found = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]').find(m => m.id === idStr);
+            return found ? { label: found.name.replace(/^Vibe Mix:\s*/i, ''), kind: 'Vibe Mix' } : { label: '', kind: 'Vibe Mix' };
+        }
+        const pl = (window.globalPlaylistsData || []).find(p => String(p.id) === idStr);
+        return pl ? { label: pl.name, kind: 'Playlist' } : null;
+    } catch (e) { return null; }
+}
+
+window._updateSourceBadge = function() {
+    const el = document.getElementById('bp-source-badge');
+    if (!el) return;
+    const songId = window.currentPlayingSongId;
+    // Manuell eingereihter Song: bewusst keine Kennung, er kommt aus keiner Quelle.
+    if (songId != null && window._manuallyQueuedIds.has(songId)) { el.style.display = 'none'; return; }
+    const src = _describePlaybackSource();
+    if (!src) { el.style.display = 'none'; return; }
+    el.textContent = src.label ? `Aus ${src.kind}: ${src.label}` : `Aus ${src.kind}`;
+    el.style.display = 'inline-block';
+};
+
 // "Als Naechstes spielen" (Rechts-Swipe auf einer Songzeile). In der Huelle fuehrt der
 // native AVPlayer die Warteschlange - ein playbackQueue.unshift() hier landete seit dem
 // Umbau auf native Transportsteuerung in einer Liste, die niemand mehr abspielt, der Song
@@ -312,6 +373,7 @@ window._applyNativeQueue = function(snapshot) {
 // der Rest der Warteschlange bleibt dabei unangetastet, sodass nach dem eingereihten Song
 // die urspruengliche Reihenfolge (Playlist/Mix) normal weiterlaeuft.
 function _enqueueSongNext(song) {
+    if (song && song.id != null) window._manuallyQueuedIds.add(song.id);
     const bridge = _nativeBridge();
     if (bridge) {
         const url = song.file_url || song.fileUrl;
@@ -1008,6 +1070,9 @@ function initApp() {
         if (!queueToPlay || queueToPlay.length === 0) return alert("Diese Liste ist leer!");
 
         window.currentPlayingPlaylistId = listId;
+        // Neue Quelle = neuer Kontext: frueher manuell eingereihte Songs sind jetzt nicht mehr
+        // "Fremdkoerper" in dieser Warteschlange, ihre Ausnahme von der Kennung waere veraltet.
+        window._manuallyQueuedIds.clear();
         const isShuffle = document.getElementById('btn-shuffle')?.classList.contains('ctrl-active');
         if (isShuffle) queueToPlay = queueToPlay.sort(() => 0.5 - Math.random());
 
@@ -1542,6 +1607,7 @@ let _bgCacheActive = false;
         if(homeNpArtist) homeNpArtist.innerText = artist;
 
         if(typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
+        if(typeof window._updateSourceBadge === 'function') window._updateSourceBadge();
         savePlayerState();
     };
 
@@ -1705,7 +1771,7 @@ let _bgCacheActive = false;
     const bpContainer = document.getElementById('fullscreen-player');
 
     if (miniPlayer && fullscreenPlayer) {
-        miniPlayer.addEventListener('click', (e) => { if(e.target.closest('svg')) return; fullscreenPlayer.classList.add('open'); });
+        miniPlayer.addEventListener('click', (e) => { if(e.target.closest('svg')) return; fullscreenPlayer.classList.add('open'); window._updateSourceBadge?.(); });
         let mpStartX = 0, mpStartY = 0;
         miniPlayer.addEventListener('touchstart', (e) => { mpStartX = e.touches[0].clientX; mpStartY = e.touches[0].clientY; }, {passive: true});
         miniPlayer.addEventListener('touchend', (e) => {
@@ -2198,11 +2264,24 @@ let _bgCacheActive = false;
     window.createStationForSong = function(song) {
         if (!song || !song.title) { _showToast('⚠️ Song nicht gefunden – Sender nicht erstellt'); return; }
         const stationSongs = _buildStationSongs(song);
-        const newStation = { id: 'station_' + Date.now(), name: "Sender: " + song.title, cover_data: song.cover_data || song.coverUrl || '', songs: stationSongs, expires: Date.now() + (24 * 60 * 60 * 1000), pinned: false };
+        // songIds statt der vollen Song-Objekte - wie Vibe-Mixe es schon immer machten.
+        // Vorher landete pro Song das komplette Objekt inklusive cover_data in localStorage;
+        // eingebettete Cover sind data:-URIs von teils >100 KB, womit schon wenige Dutzend
+        // Songs den ~5-MB-Speicher sprengen konnten (QuotaExceededError beim Speichern, im
+        // Zweifel still). Mit reinen IDs kostet auch ein Sender ueber die ganze Bibliothek
+        // nur wenige Kilobyte - deshalb braucht die Songauswahl oben keinen Deckel.
+        const newStation = {
+            id: 'station_' + Date.now(),
+            name: "Sender: " + song.title,
+            cover_data: song.cover_data || song.coverUrl || '',
+            songIds: stationSongs.map(s => s.id),
+            expires: Date.now() + (24 * 60 * 60 * 1000),
+            pinned: false
+        };
         const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]');
         savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
         if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
-        _showToast(`Sender für "${song.title}" erstellt!`);
+        _showToast(`Sender erstellt – ${stationSongs.length} Lieder`);
     };
 
     if(ctxCreateStation) {
@@ -3052,8 +3131,14 @@ async function createNewPlaylistProcess() {
                     const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = station.id; const bgImage = station.cover_data && station.cover_data.length > 10 ? `url('${station.cover_data}')` : '';
                     const pinBadge = station.pinned ? '<div class="pin-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg></div>' : '';
                     card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};">${pinBadge}<button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(station.name)}</div>`;
-                    const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => window.togglePlaylistPlayback(e, station.id, station.songs));
-                    card.addEventListener('click', () => { window.currentPlayingPlaylistId = station.id; if (station.songs.length > 0) { const firstSong = station.songs[0]; window.playSong(firstSong.title, firstSong.artist, firstSong.cover_data, firstSong.file_url); playbackQueue = station.songs.slice(1); savePlayerState(); } });
+                    // _getStationLikeSongs deckt beide Formate ab: neue Sender speichern songIds,
+                    // vor dem 13.08.2026 erstellte noch volle Song-Objekte.
+                    const stationSongs = _getStationLikeSongs(station);
+                    const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => window.togglePlaylistPlayback(e, station.id, stationSongs));
+                    // Antippen oeffnet jetzt die Detailansicht (Songs ansehen) statt sofort
+                    // loszuspielen - gleiches Verhalten wie Playlists und Vibe-Mixe. Abspielen
+                    // laeuft ueber den Play-Knopf auf dem Cover, ebenfalls wie dort.
+                    card.addEventListener('click', () => window.openPlaylistDetails(station.id, station.name));
                     if (typeof addLongPressListener === 'function') { addLongPressListener(card, (e) => { e.preventDefault(); e.stopPropagation(); _openStationContextMenu('station', station.id); }); }
                     stationsContainer.appendChild(card);
                 });
@@ -3191,9 +3276,16 @@ async function createNewPlaylistProcess() {
         document.querySelectorAll('.view').forEach(v => { v.classList.remove('active'); v.classList.add('hidden'); }); viewPlaylistDetails.classList.remove('hidden'); setTimeout(() => viewPlaylistDetails.classList.add('active'), 10);
         playlistDetailsSongsContainer.innerHTML = '<div style="text-align:center; padding: 20px; color: var(--text-secondary);">Lade Songs...</div>';
         
-        let playlist = null; let validItems = []; let isTemp = playlistId.toString().startsWith('temp_');
+        // Sender ('station_') werden hier wie Vibe-Mixe ('temp_') behandelt: beide liegen in
+        // localStorage statt im Backend und haben keine Playlist-ID. Ohne den station_-Zweig
+        // landete ein angetippter Sender im Backend-Pfad unten und endete in "Playlist nicht
+        // gefunden" - deshalb liess sich ein Sender bisher nicht oeffnen.
+        const idStr = playlistId.toString();
+        const isStation = idStr.startsWith('station_');
+        let playlist = null; let validItems = []; let isTemp = idStr.startsWith('temp_') || isStation;
         if (isTemp) {
-            const mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); playlist = mixes.find(m => m.id === playlistId);
+            const list = JSON.parse(localStorage.getItem(isStation ? 'heatbox_stations' : 'heatbox_vibe_mixes') || '[]');
+            playlist = list.find(m => m.id === playlistId);
             if(playlist) { const ids = playlist.songIds || (playlist.songs || []).map(s => s.id); const songs = ids.map(id => window._songIndex?.get(id)).filter(Boolean); validItems = songs.map((song, i) => ({ id: 't_'+i, song_id: song.id, sort_order: i, songs: song })); }
         } else {
             localStorage.setItem('heatbox_last_playlist', playlistId); if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
@@ -3240,8 +3332,17 @@ async function createNewPlaylistProcess() {
                 onEnd: async function () {
                     const items = document.querySelectorAll('#playlist-details-songs-container .song-item');
                     if (isTemp) {
-                        const mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); const mixIdx = mixes.findIndex(m => m.id === playlistId);
-                        if (mixIdx > -1) { const newOrder = Array.from(items).map(item => mixes[mixIdx].songs.find(s => s.id == item.dataset.id)); mixes[mixIdx].songs = newOrder; localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(mixes)); }
+                        // Auf songIds umsortieren statt auf .songs: Vibe-Mixe hatten noch nie
+                        // ein .songs-Feld (nur songIds), die alte Zeile lief dort also auf
+                        // undefined. Neue Sender speichern ebenfalls songIds.
+                        const key = isStation ? 'heatbox_stations' : 'heatbox_vibe_mixes';
+                        const list = JSON.parse(localStorage.getItem(key) || '[]'); const idx = list.findIndex(m => m.id === playlistId);
+                        if (idx > -1) {
+                            const newIds = Array.from(items).map(item => parseInt(item.dataset.id)).filter(n => !isNaN(n));
+                            if (list[idx].songIds) list[idx].songIds = newIds;
+                            else if (Array.isArray(list[idx].songs)) list[idx].songs = newIds.map(id => window._songIndex?.get(id)).filter(Boolean);
+                            localStorage.setItem(key, JSON.stringify(list));
+                        }
                     } else {
                         const updates = Array.from(items).map((item, index) => ({ song_id: parseInt(item.dataset.id), sort_order: index }));
                         await apiReorderPlaylistSongs(playlistId, updates);

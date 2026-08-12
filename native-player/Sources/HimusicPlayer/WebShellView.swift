@@ -148,7 +148,9 @@ struct WebShellView: UIViewRepresentable {
         }
 
         @objc private func expandFullscreenPlayer() {
-            webView?.evaluateJavaScript("document.getElementById('fullscreen-player')?.classList.add('open');")
+            webView?.evaluateJavaScript(
+                "document.getElementById('fullscreen-player')?.classList.add('open'); window._updateSourceBadge && window._updateSourceBadge();"
+            )
         }
 
         private func pushNowPlaying(item: QueueItem, isPlaying: Bool) {

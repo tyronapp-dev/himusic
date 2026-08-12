@@ -976,6 +976,20 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
 
 /* Rechts-Swipe → Warteschlange: "scharf" während des Ziehens über der Schwelle (haptischer
    Moment), dann Bestätigungs-Puls beim Loslassen – wie das Swipe-Feedback in Spotify. */
+/* Herkunfts-Kennung im grossen Player ("Aus Playlist ...", "Aus Sender ..."). Nutzt die
+   im Farbwaehler gesetzte Akzentfarbe, damit sie sich als Zusatzinfo erkennbar vom
+   Songtitel absetzt statt wie ein zweiter Titel zu wirken. */
+.source-badge-row { display: flex; justify-content: center; min-height: 20px; margin-bottom: 2px; }
+.source-badge {
+    max-width: 88%;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase;
+    color: var(--accent);
+    background: rgba(var(--accent-rgb), 0.14);
+    border: 1px solid rgba(var(--accent-rgb), 0.32);
+    padding: 3px 10px; border-radius: 999px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* Rueckmeldung beim Einreihen in die Warteschlange - folgt der im Farbwaehler gesetzten
    Akzentfarbe (--accent-rgb wird von _setAccentColor gesetzt). Vorher fest rot verdrahtet,
    passte damit bei jeder anderen gewaehlten Farbe nicht zum Rest der Oberflaeche. */
