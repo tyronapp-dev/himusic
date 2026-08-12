@@ -152,10 +152,18 @@ function _buildStationSongs(song) {
     return stationSongs;
 }
 
-// Kurzer haptischer Tick (Vibration API). Funktioniert nur auf Android-Browsern – iOS Safari/
-// PWAs unterstützen navigator.vibrate() nicht (Apple bietet dafür keine Web-API). Dort greift
-// automatisch nur das visuelle Feedback (Puls-Animation), ganz ohne Fehler oder Crash.
-function _hapticTick(ms = 12) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch(e) {} }
+// Kurzer haptischer Tick. In der Huelle nativ ueber die Bruecke (UIImpactFeedbackGenerator) -
+// iOS gibt Web-Apps KEINE Vibrations-API, navigator.vibrate() existiert dort schlicht nicht,
+// weshalb dieser Tick auf dem iPhone bis 2026-08-11 wirkungslos war. Ausserhalb der Huelle
+// bleibt der Vibration-API-Weg (greift auf Android), sonst nur visuelles Feedback - in keinem
+// Fall ein Fehler oder Crash.
+function _hapticTick(ms = 12) {
+    try {
+        const bridge = _nativeBridge();
+        if (bridge) { bridge.postMessage(JSON.stringify({ cmd: 'haptic' })); return; }
+        if (navigator.vibrate) navigator.vibrate(ms);
+    } catch(e) {}
+}
 
 // iOS friert Web-Audio im Hintergrund/bei gesperrtem Bildschirm nach kurzer Zeit ein (WKWebView-
 // Limitierung, kein Bug in diesem Code) - deshalb optionaler Hand-off an eine kleine native
@@ -280,6 +288,35 @@ window._applyNativeProgress = function(current, duration) {
     });
     report();
 })();
+
+// "Als Naechstes spielen" (Rechts-Swipe auf einer Songzeile). In der Huelle fuehrt der
+// native AVPlayer die Warteschlange - ein playbackQueue.unshift() hier landete seit dem
+// Umbau auf native Transportsteuerung in einer Liste, die niemand mehr abspielt, der Song
+// tauchte also nie auf. Deshalb per Bruecke direkt HINTER den laufenden Song einfuegen:
+// der Rest der Warteschlange bleibt dabei unangetastet, sodass nach dem eingereihten Song
+// die urspruengliche Reihenfolge (Playlist/Mix) normal weiterlaeuft.
+function _enqueueSongNext(song) {
+    const bridge = _nativeBridge();
+    if (bridge) {
+        const url = song.file_url || song.fileUrl;
+        if (!url || url.startsWith('blob:')) return; // AVPlayer kann blob: nicht lesen
+        const cover = song.cover_data || song.coverUrl;
+        bridge.postMessage(JSON.stringify({
+            cmd: 'insertNext',
+            item: {
+                id: song.id ?? 0,
+                t: song.title || 'Unbekannt',
+                a: song.artist || '',
+                u: url,
+                c: (cover && cover.startsWith('http')) ? cover : null
+            }
+        }));
+        return;
+    }
+    // Ausserhalb der Huelle: playbackQueue liegt im initApp-Scope und ist von hier
+    // (Top-Level) nicht erreichbar - deshalb ueber die dort registrierte Funktion.
+    if (typeof window._localEnqueueNext === 'function') window._localEnqueueNext(song);
+}
 
 function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     const bridge = _nativeBridge();
@@ -783,6 +820,9 @@ function initApp() {
         _saveTimer = setTimeout(_doSavePlayerState, 800);
     }
     window.savePlayerState = savePlayerState; // wird auch von _applyNativeNowPlaying gebraucht, das ausserhalb dieses initApp-Scopes liegt
+    // Gegenstueck zum nativen "insertNext" fuer den Nicht-Huellen-Fall (Safari/PWA):
+    // _enqueueSongNext liegt auf Top-Level und kaeme sonst nicht an playbackQueue heran.
+    window._localEnqueueNext = function(song) { playbackQueue.unshift(song); savePlayerState(); };
     function _doSavePlayerState() {
         const state = {
             currentSong: window.currentSongData || null,
@@ -1903,11 +1943,26 @@ let _bgCacheActive = false;
 
         if (playlistSongId) songDiv.dataset.psId = playlistSongId;
 
-        let songStartX = 0; let isSwiping = false; let queueArmed = false;
-        songDiv.addEventListener('touchstart', (e) => { songStartX = e.touches[0].clientX; isSwiping = false; queueArmed = false; }, {passive: true});
+        let songStartX = 0; let songStartY = 0; let isSwiping = false; let queueArmed = false; let swipeLocked = false;
+        songDiv.addEventListener('touchstart', (e) => {
+            songStartX = e.touches[0].clientX; songStartY = e.touches[0].clientY;
+            isSwiping = false; queueArmed = false; swipeLocked = false;
+        }, {passive: true});
         songDiv.addEventListener('touchmove', (e) => {
-            if (!songStartX) return;
+            if (!songStartX || swipeLocked) return;
             const diffX = songStartX - e.touches[0].clientX;
+            const diffY = songStartY - e.touches[0].clientY;
+            // Richtungsentscheidung EINMAL pro Geste, sobald sie eindeutig ist, und danach
+            // gesperrt: bisher zaehlte allein diffX, wodurch schon leichtes seitliches
+            // Verwackeln beim vertikalen Scrollen die 60px-Schwelle erreichte und Songs
+            // ungewollt in die Warteschlange rutschten. Ueberwiegt die vertikale Bewegung,
+            // ist die Geste ein Scrollen und bleibt es - unabhaengig davon, wie weit der
+            // Finger danach noch seitlich wandert.
+            if (Math.abs(diffY) > Math.abs(diffX) && Math.abs(diffY) > 10) {
+                swipeLocked = true;
+                if (queueArmed) { queueArmed = false; songDiv.classList.remove('song-item-armed'); }
+                return;
+            }
             if (Math.abs(diffX) > 20) isSwiping = true;
             // Rechts-Swipe (diffX < 0) über der Aktions-Schwelle: genau JETZT vibrieren, wie bei
             // Spotify – nicht erst beim Loslassen. Zieht der Finger wieder zurück, wird scharf
@@ -1917,11 +1972,14 @@ let _bgCacheActive = false;
         }, {passive: true});
         songDiv.addEventListener('touchend', (e) => {
             songDiv.classList.remove('song-item-armed');
-            if (!songStartX || !isSwiping) return;
+            if (!songStartX || !isSwiping || swipeLocked) { songStartX = 0; return; }
             let diffX = songStartX - e.changedTouches[0].clientX;
-            if (Math.abs(diffX) > 60) {
+            const diffY = songStartY - e.changedTouches[0].clientY;
+            // Zweite Absicherung beim Loslassen: eine Geste, die insgesamt staerker vertikal
+            // als horizontal war, loest nie eine Swipe-Aktion aus.
+            if (Math.abs(diffX) > 60 && Math.abs(diffX) > Math.abs(diffY)) {
                 if (diffX < 0) {
-                    playbackQueue.unshift(song); savePlayerState();
+                    _enqueueSongNext(song);
                     songDiv.classList.remove('song-item-added'); void songDiv.offsetWidth; // Reflow: Animation erneut abspielbar machen
                     songDiv.classList.add('song-item-added');
                     setTimeout(() => songDiv.classList.remove('song-item-added'), 400);

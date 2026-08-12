@@ -150,6 +150,8 @@ final class PlayerViewModel: ObservableObject {
             // relativem Sprung. Vorher setzte die Seite das lokale <audio> direkt, das ist
             // in der Huelle inert und bewegte den echten AVPlayer gar nicht.
             case "seekTo": seek(toSeconds: command.seconds ?? 0)
+            case "insertNext": if let item = command.item { insertNext(item) }
+            case "haptic": playHapticTick()
             default: break
             }
             return
@@ -268,6 +270,41 @@ final class PlayerViewModel: ObservableObject {
         guard currentIndex + 1 < queue.count else { return }
         currentIndex += 1
         playCurrent()
+    }
+
+    /// "Als Naechstes spielen" aus dem Rechts-Swipe der Songliste. Bewusst EINFUEGEN statt
+    /// die Warteschlange zu ersetzen: alles dahinter bleibt in seiner Reihenfolge stehen,
+    /// sodass nach diesem Song die urspruengliche Playlist/der Mix normal weiterlaeuft.
+    /// Laeuft gerade nichts, wird der Song sofort gestartet - sonst laege er in einer
+    /// Warteschlange, die niemand abspielt.
+    func insertNext(_ item: QueueItem) {
+        guard item.fileURL != nil else { return }
+        if queue.isEmpty {
+            // Nichts in der Warteschlange: Song bereitstellen, aber NICHT losspielen -
+            // der Nutzer wollte einreihen, nicht starten. Mini-Leiste und Control Center
+            // zeigen ihn danach, ein Tipp auf Play startet ihn (gleiche Logik wie beim
+            // Wiederherstellen der letzten Sitzung).
+            queue = [item]
+            currentIndex = 0
+            playbackToken += 1
+            let token = playbackToken
+            Task { await beginPlayback(item, token: token, autoplay: false) }
+            return
+        }
+        let insertAt = min(currentIndex + 1, queue.count)
+        queue.insert(item, at: insertAt)
+        saveSnapshot()
+        Task { await AudioFileCache.shared.ensureCached(item: item) }
+    }
+
+    /// Kurzer Tick beim Einreihen per Swipe. iOS gibt Web-Apps keine Vibrations-API, die
+    /// Seite kann das also nicht selbst - sie schickt {cmd:"haptic"} und wir loesen es nativ
+    /// aus (gleiche Wirkung wie in Spotify, wo die Rueckmeldung kommt, sobald die Schwelle
+    /// ueberschritten ist, nicht erst beim Loslassen).
+    private func playHapticTick() {
+        let generator = UIImpactFeedbackGenerator(style: .medium)
+        generator.prepare()
+        generator.impactOccurred()
     }
 
     /// Verhalten fuer Sperrbildschirm/Control Center: laeuft der Song schon laenger als
