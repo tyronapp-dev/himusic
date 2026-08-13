@@ -26,6 +26,14 @@ final class PlayerViewModel: ObservableObject {
     /// der async Tasks, welcher Song am Ende wirklich laeuft - nicht der zuletzt angeforderte.
     private var playbackToken = 0
 
+    /// Position, die noch angesprungen werden soll, sobald das Item bereit ist.
+    /// Ein seek() direkt nach replaceCurrentItem() geht ins Leere: das Item laedt noch, bei
+    /// einer Netz-URL ist die Dauer zu dem Zeitpunkt "indefinite". Genau das passierte beim
+    /// Wiederherstellen der letzten Sitzung - der Player blieb danach in einem Zustand, in dem
+    /// ein spaeteres play() nichts bewirkte (Zeit lief nicht los), bis man den Song wechselte.
+    private var pendingSeekSeconds: Double?
+    private var itemStatusObservation: NSKeyValueObservation?
+
     /// Meldet der eingebetteten Webseite den echten nativen Zustand zurueck (WebShellView.
     /// Coordinator schickt das als JS an app2.js's _applyNativeNowPlaying weiter). Ohne das
     /// zeigt die Seite nach Auto-Skips im Hintergrund/gesperrtem Screen weiterhin den zuletzt
@@ -143,16 +151,14 @@ final class PlayerViewModel: ObservableObject {
         queue = snapshot.queue
         currentIndex = min(max(snapshot.currentIndex, 0), queue.count - 1)
         guard let item = currentItem else { return }
+        // Nicht direkt seeken (siehe pendingSeekSeconds) - beginPlayback holt das nach,
+        // sobald das Item wirklich bereit ist. Positionen ganz am Songende werden verworfen:
+        // wurde die App kurz vor Songende geschlossen, stuende der Player sonst beim Oeffnen
+        // am Ende und ein play() liefe sofort ins Nichts.
+        pendingSeekSeconds = snapshot.positionSeconds > 3 ? snapshot.positionSeconds : nil
         playbackToken += 1
         let token = playbackToken
-        Task { @MainActor in
-            await beginPlayback(item, token: token, autoplay: false)
-            // beginPlayback() -> notifyNowPlayingChanged() hat gerade schon einmal
-            // gespeichert, aber VOR diesem Seek - mit Position 0 statt der wirklich
-            // gespeicherten. Hier korrigiert, direkt nachdem der Sprung passiert ist.
-            seek(toSeconds: snapshot.positionSeconds)
-            saveSnapshot()
-        }
+        Task { @MainActor in await beginPlayback(item, token: token, autoplay: false) }
         Task { await AudioFileCache.shared.ensureCachedQueue(queue) }
     }
 
@@ -277,6 +283,19 @@ final class PlayerViewModel: ObservableObject {
             Task { @MainActor in self?.next() }
         }
 
+        // Sobald das Item bereit ist: offenen Positionssprung nachholen und - falls die
+        // Wiedergabe laufen soll, aber steht - nachtreten. Beides ist genau der Moment, ab
+        // dem AVPlayer solche Anweisungen ueberhaupt zuverlaessig annimmt.
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = playerItem.observe(\.status, options: [.initial, .new]) { [weak self] observed, _ in
+            guard observed.status == .readyToPlay else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.player.currentItem === observed else { return }
+                self.applyPendingSeek()
+                if self.isPlaying && self.player.rate == 0 { self.player.play() }
+            }
+        }
+
         player.replaceCurrentItem(with: playerItem)
         if autoplay {
             player.play()
@@ -287,15 +306,60 @@ final class PlayerViewModel: ObservableObject {
         notifyNowPlayingChanged()
     }
 
+    /// Holt einen vorgemerkten Positionssprung nach. Gegen die Songdauer begrenzt, damit ein
+    /// gespeicherter Stand knapp vor Schluss nicht am Ende landet (dort bewirkt play() nichts).
+    private func applyPendingSeek() {
+        guard let target = pendingSeekSeconds else { return }
+        pendingSeekSeconds = nil
+        let duration = player.currentItem?.duration.seconds ?? 0
+        guard !(duration.isFinite && duration > 0 && target >= duration - 2) else { return }
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+        updateNowPlayingInfo()
+    }
+
     func togglePlayPause() {
         if isPlaying {
             player.pause()
-        } else {
-            player.play()
+            isPlaying = false
+            updateNowPlayingInfo()
+            notifyNowPlayingChanged()
+            return
         }
-        isPlaying.toggle()
+        startPlaybackResiliently()
+    }
+
+    /// Startet die Wiedergabe und prueft kurz darauf nach, ob sie tatsaechlich laeuft.
+    ///
+    /// Hintergrund: ein blosses player.play() kann folgenlos bleiben - Item nie fertig
+    /// geladen, Ladefehler, oder der Player steht am Songende. Fuer den Nutzer sah das so
+    /// aus, dass Play nach dem Öffnen der App einfach nichts tat und erst ein Songwechsel
+    /// half. Statt nur die bekannten Ursachen einzeln abzufangen, wird hier das ERGEBNIS
+    /// geprueft: laeuft eine Sekunde spaeter immer noch nichts, wird der Song frisch
+    /// aufgesetzt und an derselben Stelle fortgesetzt. Das deckt auch Ursachen ab, die hier
+    /// nicht einzeln vorhergesehen sind.
+    private func startPlaybackResiliently() {
+        guard currentItem != nil else { return }
+        // Gar kein Item oder eines mit Ladefehler: direkt neu aufsetzen, play() waere zwecklos.
+        if player.currentItem == nil || player.currentItem?.status == .failed {
+            playCurrent()
+            return
+        }
+        applyPendingSeek()
+        player.play()
+        isPlaying = true
         updateNowPlayingInfo()
         notifyNowPlayingChanged()
+
+        let token = playbackToken
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self, token == self.playbackToken, self.isPlaying, self.player.rate == 0 else { return }
+            // An derselben Stelle weitermachen, nicht von vorn - der Neuaufbau soll nicht
+            // wie ein Zuruecksetzen wirken.
+            let resumeAt = self.player.currentTime().seconds
+            self.pendingSeekSeconds = resumeAt > 3 ? resumeAt : nil
+            self.playCurrent()
+        }
     }
 
     func next() {
@@ -418,10 +482,9 @@ final class PlayerViewModel: ObservableObject {
 
         center.playCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.player.play()
-            self.isPlaying = true
-            self.updateNowPlayingInfo()
-            self.notifyNowPlayingChanged()
+            // Gleicher Weg wie der Play-Knopf in der App - sonst haette der Sperrbildschirm
+            // dieselbe Schwaeche (play() verpufft, Wiedergabe startet nicht) ohne Absicherung.
+            self.startPlaybackResiliently()
             return .success
         }
         center.pauseCommand.addTarget { [weak self] _ in
@@ -430,6 +493,12 @@ final class PlayerViewModel: ObservableObject {
             self.isPlaying = false
             self.updateNowPlayingInfo()
             self.notifyNowPlayingChanged()
+            return .success
+        }
+        // Kopfhoerer-/Sperrbildschirm-Toggle: lief bisher nicht ueber unsere Logik und konnte
+        // dadurch play() ungeprueft absetzen.
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            self?.togglePlayPause()
             return .success
         }
         center.nextTrackCommand.addTarget { [weak self] _ in

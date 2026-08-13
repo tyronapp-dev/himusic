@@ -2292,6 +2292,9 @@ let _bgCacheActive = false;
         savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
         if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
         _showToast(`Sender erstellt – ${stationSongs.length} Lieder`);
+        // Direkt in den neuen Sender springen - man will nach dem Erstellen sehen, was drin
+        // gelandet ist, statt ihn auf der Startseite erst wiederfinden zu muessen.
+        if (typeof window.openPlaylistDetails === 'function') window.openPlaylistDetails(newStation.id, newStation.name);
     };
 
     if(ctxCreateStation) {
