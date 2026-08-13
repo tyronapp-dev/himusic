@@ -1139,45 +1139,10 @@ function initApp() {
         });
     };
 
-    // --- FREEZE-LOG (Diagnose fürs "Player schläft ein"-Problem) ---
-    // Ein laufender Timer kann eine echte iOS-Suspendierung/Prozess-Freeze nicht in Echtzeit
-    // erkennen (er würde ja selbst mit einschlafen). Stattdessen: alle 5s einen Herzschlag mit
-    // Zeitstempel+Song in localStorage schreiben (überlebt auch einen kompletten Prozess-Kill,
-    // da localStorage persistiert). Beim nächsten Sichtbarwerden bzw. App-Start den Abstand zum
-    // letzten Herzschlag prüfen - eine deutlich größere Lücke als das 5s-Intervall heißt: die
-    // Seite/der Player war für diese Zeit eingefroren. So bekommen wir konkrete Daten (wann,
-    // welcher Song, wie lange) statt zu raten.
-    const FREEZE_LOG_KEY = 'himusic_freeze_log';
-    const HEARTBEAT_KEY = 'himusic_last_heartbeat';
-    const FREEZE_GAP_THRESHOLD_SEC = 15; // deutlich über 5s Heartbeat-Intervall, gegen Fehlalarme
-    function _writeHeartbeat() {
-        if (!memAudio || memAudio.paused) return;
-        try {
-            localStorage.setItem(HEARTBEAT_KEY, JSON.stringify({
-                t: Date.now(),
-                title: window.currentSongData?.title || '',
-                artist: window.currentSongData?.artist || '',
-                isBlob: (memAudio.src || '').startsWith('blob:')
-            }));
-        } catch(e) {}
-    }
-    function _logFreezeEvent(gapSeconds, hb) {
-        try {
-            const log = JSON.parse(localStorage.getItem(FREEZE_LOG_KEY) || '[]');
-            log.unshift({ when: Date.now(), gapSeconds: Math.round(gapSeconds), title: hb?.title || 'Unbekannt', artist: hb?.artist || '', wasBlob: !!hb?.isBlob });
-            localStorage.setItem(FREEZE_LOG_KEY, JSON.stringify(log.slice(0, 30)));
-        } catch(e) {}
-        if (typeof window.renderFreezeLog === 'function') window.renderFreezeLog();
-    }
-    function _checkForFreezeSinceLastHeartbeat() {
-        try {
-            const hb = JSON.parse(localStorage.getItem(HEARTBEAT_KEY) || 'null');
-            if (!hb) return;
-            const gapSec = (Date.now() - hb.t) / 1000;
-            if (gapSec > FREEZE_GAP_THRESHOLD_SEC) _logFreezeEvent(gapSec, hb);
-        } catch(e) {}
-    }
-    _checkForFreezeSinceLastHeartbeat(); // deckt den Fall "App wurde komplett gekillt und neu gestartet" ab
+    // Freeze-Log am 13.08.2026 entfernt: es war reines Diagnose-Werkzeug fuer das
+    // "Player schlaeft im Hintergrund ein"-Problem, das die native Huelle (ADR-007) behebt -
+    // der Ton laeuft dort nativ und friert nicht mehr ein. Damit entfielen auch der
+    // 5s-Heartbeat in localStorage und die Auswertung beim Sichtbarwerden.
 
     const memAudio = document.getElementById('main-audio-player');
     if (memAudio) memAudio.addEventListener('pause', savePlayerState);
@@ -1186,7 +1151,6 @@ function initApp() {
         if (document.visibilityState === 'hidden') {
             savePlayerState();
         } else {
-            _checkForFreezeSinceLastHeartbeat();
             // iOS braucht mehrere Versuche nach dem Entsperren
             const tryResume = (attempts) => {
                 if (!audioPlayer || !window._shouldBePlaying || !audioPlayer.src) return;
@@ -1198,7 +1162,7 @@ function initApp() {
             setTimeout(() => tryResume(4), 300);
         }
     });
-    setInterval(() => { if (memAudio && !memAudio.paused && memAudio.currentTime > 0) { _doSavePlayerState(); _writeHeartbeat(); } }, 5000);
+    setInterval(() => { if (memAudio && !memAudio.paused && memAudio.currentTime > 0) { _doSavePlayerState(); } }, 5000);
 
     const navButtons = document.querySelectorAll('.nav-btn');
     const views = document.querySelectorAll('.view');
@@ -1228,7 +1192,6 @@ function initApp() {
             const targetId = e.currentTarget.getAttribute('data-target');
             window.currentOpenPlaylistId = null; 
             if (targetId === 'view-settings' && typeof window.updateAppStats === 'function') window.updateAppStats();
-            if (targetId === 'view-settings' && typeof window.renderFreezeLog === 'function') window.renderFreezeLog();
             if (targetId === 'view-settings' && typeof renderYtQueueList === 'function') renderYtQueueList();
             views.forEach(view => {
                 if (view.id === targetId) {
@@ -2251,11 +2214,14 @@ let _bgCacheActive = false;
     const ctxCreateStation = document.getElementById('ctx-create-station');
     const confirmOverlay = document.getElementById('confirm-dialog-overlay');
 
-    if(ctxAddQueue) { ctxAddQueue.addEventListener('click', () => { const song = (window._songIndex?.get(window.currentContextSongId)); if (song) { playbackQueue.unshift(song); alert(`"${song.title}" spielt als nächstes.`); } songContextOverlay.classList.remove('active'); }); }
+    // _enqueueSongNext statt playbackQueue.unshift: in der Huelle fuehrt der native Player die
+    // Warteschlange, ein unshift hier landete in einer Liste, die niemand abspielt - derselbe
+    // Fehler, der beim Rechts-Swipe schon behoben wurde, hier war er noch drin.
+    if(ctxAddQueue) { ctxAddQueue.addEventListener('click', () => { const song = window._resolveSongById(window.currentContextSongId); if (song) { _enqueueSongNext(song); _showToast(`▶ "${song.title}" spielt als nächstes`); } songContextOverlay.classList.remove('active'); }); }
     if(ctxAddPlaylist) { ctxAddPlaylist.addEventListener('click', () => { selectedSongs.clear(); window.openPlaylistSelection(); }); }
     if(ctxDelete) { ctxDelete.addEventListener('click', () => { songContextOverlay.classList.remove('active'); selectedSongs.clear(); selectedSongs.add(String(window.currentContextSongId)); if(confirmOverlay) confirmOverlay.classList.add('active'); }); }
     const ctxRemoveFromPlaylist = document.getElementById('ctx-remove-from-playlist');
-    if(ctxRemoveFromPlaylist) { ctxRemoveFromPlaylist.addEventListener('click', async () => { songContextOverlay.classList.remove('active'); try { await apiRemoveSongFromPlaylist(window.currentOpenPlaylistId, window.currentContextSongId); const el = document.querySelector(`#playlist-details-songs-container .song-item[data-id="${window.currentContextSongId}"]`); if(el) el.remove(); window.fetchPlaylistsForPage(true); } catch (error) { alert('Fehler beim Entfernen: ' + error.message); } }); }
+    if(ctxRemoveFromPlaylist) { ctxRemoveFromPlaylist.addEventListener('click', async () => { songContextOverlay.classList.remove('active'); const removedTitle = window._resolveSongById(window.currentContextSongId)?.title; try { await apiRemoveSongFromPlaylist(window.currentOpenPlaylistId, window.currentContextSongId); const el = document.querySelector(`#playlist-details-songs-container .song-item[data-id="${window.currentContextSongId}"]`); if(el) el.remove(); window.fetchPlaylistsForPage(true); _showToast(removedTitle ? `Aus Playlist entfernt: ${removedTitle}` : 'Aus Playlist entfernt'); } catch (error) { _showToast('⚠️ Entfernen fehlgeschlagen: ' + error.message); } }); }
 
     // Sender-Erstellung lag bis 2026-08-13 zweimal fast gleich im Code (Songliste + grosser
     // Player). Die Kopie im grossen Player fand ihren Song nur ueber _songIndex und kehrte
@@ -2720,7 +2686,8 @@ let _bgCacheActive = false;
                 allSongsElements.forEach(el => { if(idsToDelete.includes(el.dataset.id)) el.remove(); });
                 const confirmOverlay = document.getElementById('confirm-dialog-overlay'); if(confirmOverlay) confirmOverlay.classList.remove('active');
                 document.getElementById('sel-cancel')?.click();
-            } catch (error) { alert("Fehler beim Löschen: " + error.message); }
+                _showToast(idsToDelete.length === 1 ? '🗑️ Song gelöscht' : `🗑️ ${idsToDelete.length} Songs gelöscht`);
+            } catch (error) { _showToast('⚠️ Löschen fehlgeschlagen: ' + error.message); }
             confirmDeleteBtn.innerText = 'Löschen';
         });
     }
@@ -2951,14 +2918,18 @@ async function createNewPlaylistProcess() {
             let createdId = newPlaylist.id || newPlaylist.playlistId || (Array.isArray(newPlaylist) && newPlaylist[0]?.id) || null;
             
             // Sicherstellen, dass alte/falsche Song-IDs nicht aus Versehen hinzugefügt werden
-            if (createdId && (currentMode === 'playlist' || currentMode === 'add-to-specific-playlist') && selectedSongs.size > 0) { 
-                await addSelectedSongsToPlaylist(createdId, playlistName); 
+            if (createdId && (currentMode === 'playlist' || currentMode === 'add-to-specific-playlist') && selectedSongs.size > 0) {
+                await addSelectedSongsToPlaylist(createdId, playlistName);
             } else if (createdId && document.getElementById('song-context-overlay')?.classList.contains('active') && window.currentContextSongId) {
                 await addSelectedSongsToPlaylist(createdId, playlistName);
+            } else {
+                // Nur melden, wenn NICHT direkt Songs hinzugefuegt werden - sonst kaeme sofort
+                // danach die "X Songs hinzugefuegt"-Meldung und beide ueberschrieben sich.
+                _showToast(`✓ Playlist erstellt: ${playlistName.trim()}`);
             }
-        } 
-        catch (error) { 
-            alert('Fehler beim Erstellen:\n' + error.message); 
+        }
+        catch (error) {
+            _showToast('⚠️ Erstellen fehlgeschlagen: ' + error.message);
             console.error(error);
         }
     }
@@ -2976,8 +2947,9 @@ async function createNewPlaylistProcess() {
             localStorage.removeItem(`heatbox_playlist_${playlistId}_songs`); localStorage.removeItem(`heatbox_playlist_${playlistId}_ts`);
             try { const snap = JSON.parse(localStorage.getItem('heatbox_ps_snapshot') || '[]'); const newEntries = newIds.map(songId => ({ playlist_id: playlistId, song_id: parseInt(songId) })); localStorage.setItem('heatbox_ps_snapshot', JSON.stringify([...snap, ...newEntries])); } catch(e) { localStorage.removeItem('heatbox_ps_snapshot'); }
             _existingPlaylistIds = new Set(); window.fetchPlaylistsForPage(true);
+            _showToast(newIds.length === 1 ? `✓ Song hinzugefügt: ${playlistName}` : `✓ ${newIds.length} Songs hinzugefügt: ${playlistName}`);
             setTimeout(() => { document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active')); const plNavBtn = document.querySelector('.nav-btn[data-target="view-playlists"]'); if (plNavBtn) plNavBtn.classList.add('active'); if (typeof window.openPlaylistDetails === 'function') { window.openPlaylistDetails(playlistId, playlistName, true); } }, 300);
-        } catch (error) { alert("Fehler beim Hinzufügen: " + error.message); }
+        } catch (error) { _showToast('⚠️ Hinzufügen fehlgeschlagen: ' + error.message); }
     }
 
     const playlistActionOverlay = document.getElementById('playlist-action-sheet');
@@ -3697,53 +3669,6 @@ async function createNewPlaylistProcess() {
         if (statsEl) { const songCount = (typeof window.globalSongsData !== 'undefined') ? window.globalSongsData.length : 0; const plCount = window.globalPlaylistsData ? window.globalPlaylistsData.length : 0; statsEl.innerText = `${songCount} Songs • ${plCount} Playlists in der Cloud`; }
     };
 
-    window.renderFreezeLog = function() {
-        const listEl = document.getElementById('freeze-log-list');
-        if (!listEl) return;
-        let log = [];
-        try { log = JSON.parse(localStorage.getItem('himusic_freeze_log') || '[]'); } catch(e) {}
-        if (log.length === 0) { listEl.innerHTML = '<p style="font-size: 13px; color: var(--text-secondary); padding: 4px 0;">Noch keine Freezes erfasst.</p>'; return; }
-        listEl.innerHTML = log.map(entry => {
-            const d = new Date(entry.when);
-            const dateStr = `${d.toLocaleDateString('de-DE')} ${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
-            const gapStr = entry.gapSeconds >= 60 ? `${Math.floor(entry.gapSeconds / 60)} Min ${entry.gapSeconds % 60}s` : `${entry.gapSeconds}s`;
-            return `<div style="padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 13px;">
-                <div style="color: #fff; font-weight: 600;">${_esc(entry.title || 'Unbekannt')} ${entry.artist ? '– ' + _esc(entry.artist) : ''}</div>
-                <div style="color: var(--text-secondary); margin-top: 2px;">${dateStr} · eingefroren für ~${gapStr} · ${entry.wasBlob ? 'lokal (blob)' : 'Netzwerk'}</div>
-            </div>`;
-        }).join('');
-    };
-
-    document.getElementById('btn-copy-freeze-log')?.addEventListener('click', async () => {
-        let log = [];
-        try { log = JSON.parse(localStorage.getItem('himusic_freeze_log') || '[]'); } catch(e) {}
-        if (log.length === 0) { _showToast('Freeze-Log ist leer'); return; }
-        const lines = log.map(entry => {
-            const d = new Date(entry.when);
-            const dateStr = `${d.toLocaleDateString('de-DE')} ${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
-            return `${dateStr} | ${entry.gapSeconds}s eingefroren | ${entry.title || 'Unbekannt'}${entry.artist ? ' - ' + entry.artist : ''} | ${entry.wasBlob ? 'lokal (blob)' : 'Netzwerk'}`;
-        });
-        const text = `Himusic Freeze-Log (${log.length} Einträge)\n` + lines.join('\n');
-        try {
-            await navigator.clipboard.writeText(text);
-            _showToast('📋 Freeze-Log kopiert');
-        } catch (e) {
-            // Fallback, falls die Clipboard-API im aktuellen Kontext nicht erlaubt ist
-            // (z.B. manche eingebetteten Webviews) - klassischer execCommand-Umweg.
-            const ta = document.createElement('textarea');
-            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-            document.body.appendChild(ta); ta.select();
-            try { document.execCommand('copy'); _showToast('📋 Freeze-Log kopiert'); }
-            catch (e2) { _showToast('⚠️ Kopieren fehlgeschlagen'); }
-            document.body.removeChild(ta);
-        }
-    });
-
-    document.getElementById('btn-clear-freeze-log')?.addEventListener('click', () => {
-        localStorage.removeItem('himusic_freeze_log');
-        window.renderFreezeLog();
-        _showToast('Freeze-Log geleert');
-    });
 
     document.getElementById('btn-backup-download')?.addEventListener('click', () => {
         const backupData = { state: JSON.parse(localStorage.getItem('heatbox_state') || '{}'), mixes: JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'), stations: JSON.parse(localStorage.getItem('heatbox_stations') || '[]'), theme: localStorage.getItem('heatbox_theme_color') || '#fa233b', timestamp: new Date().toISOString() };
@@ -4780,8 +4705,7 @@ function _isYoutubeImportedUrl(fileUrl) {
 // --- WARTESCHLANGE: persistenter Status statt flüchtiger Textzeile ---
 // Jeder eingereichte Link bekommt einen Eintrag mit echtem Status (server-seitig ab jetzt via
 // PATCH /youtube-queue/:id gepflegt: pending/processing/done/failed), der in localStorage
-// überlebt und in Settings dauerhaft sichtbar bleibt - analog zum Freeze-Log weiter unten in
-// dieser Datei (renderFreezeLog/#freeze-log-list).
+// überlebt und in Settings dauerhaft sichtbar bleibt.
 const YT_QUEUE_KEY = 'himusic_yt_queue';
 const YT_ENQUEUE_CONCURRENCY = 6; // war 3 ("wie CONCURRENT im Watcher"). Der Watcher kann aber nur Eintraege
                                   // holen, die schon IN der Warteschlange stehen - stand das Einreihen selbst
@@ -4844,6 +4768,11 @@ function _saveAndRenderYtQueue() { _saveYtQueue(_ytQueueState); renderYtQueueLis
 function _cacheFreshYtSongs(fresh) {
     fresh.forEach(s => { if (window.hbLocal) window.hbLocal.downloadToLocal(s.file_url, s.title); });
     if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
+    // Kurze Rueckmeldung, sobald ein Import wirklich in der Bibliothek angekommen ist - der
+    // Import laeuft asynchron, ohne das merkt man den Abschluss sonst gar nicht.
+    if (typeof window._showToast === 'function' && fresh.length > 0) {
+        window._showToast(fresh.length === 1 ? `✓ Importiert: ${fresh[0].title}` : `✓ ${fresh.length} Songs importiert`);
+    }
 }
 
 // Bounded Retry-Poll, NUR für den Cloud-Fallback (GitHub Actions) noch nötig - der schreibt
@@ -5271,6 +5200,13 @@ function _startYtSeekPoll() {
 }
 
 function _onYtPlayerStateChange(e) {
+    // CUED heisst: Video ist geladen, spielt aber nicht. Genau hier landete die Vorschau,
+    // wenn loadVideoById() die Wiedergabe nicht selbst starten durfte (siehe
+    // _toggleYtPreview). Ein playVideo() aus dem Ereignis heraus holt das nach.
+    if (e.data === YT.PlayerState.CUED && _ytActiveRow && _ytPlayer) {
+        try { _ytPlayer.playVideo(); } catch (err) {}
+        return;
+    }
     if (!_ytActiveRow) return;
     const btn = _ytActiveRow.querySelector('.yt-preview-playbtn');
     if (e.data === YT.PlayerState.PLAYING) { if (btn) btn.innerText = '⏸'; _startYtSeekPoll(); }
@@ -5284,20 +5220,37 @@ function _stopYtPreview() {
     _stopYtSeekPoll();
 }
 
+let _ytPreviewBusy = false;
+
 async function _toggleYtPreview(row, videoId) {
-    const player = await _ensureYtPlayer();
-    if (_ytActiveRow && _ytActiveRow !== row) _resetYtRowUI(_ytActiveRow);
+    // Doppelklick-Schutz: beim allerersten Antippen dauert _ensureYtPlayer() spuerbar
+    // (YouTube-API wird erst geladen). Weitere Klicks in dieser Zeit starteten bisher
+    // parallele Durchlaeufe, die sich gegenseitig _ytActiveRow und das geladene Video
+    // ueberschrieben - ein Grund, warum mehrfaches Druecken unberechenbar wirkte.
+    if (_ytPreviewBusy) return;
+    _ytPreviewBusy = true;
+    try {
+        const player = await _ensureYtPlayer();
+        if (_ytActiveRow && _ytActiveRow !== row) _resetYtRowUI(_ytActiveRow);
 
-    const wasActive = _ytActiveRow === row;
-    const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
+        const wasActive = _ytActiveRow === row;
+        const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
 
-    if (wasActive && state === YT.PlayerState.PLAYING) { player.pauseVideo(); return; }
-    if (wasActive && state === YT.PlayerState.PAUSED) { player.playVideo(); return; }
+        if (wasActive && state === YT.PlayerState.PLAYING) { player.pauseVideo(); return; }
+        if (wasActive && state === YT.PlayerState.PAUSED) { player.playVideo(); return; }
 
-    _ytActiveRow = row;
-    const seekWrap = row.querySelector('.yt-preview-seekwrap');
-    if (seekWrap) seekWrap.style.display = 'flex';
-    player.loadVideoById(videoId);
+        _ytActiveRow = row;
+        const seekWrap = row.querySelector('.yt-preview-seekwrap');
+        if (seekWrap) seekWrap.style.display = 'flex';
+        player.loadVideoById(videoId);
+        // playVideo() zusaetzlich anstossen: loadVideoById startet nur dann von selbst, wenn
+        // der Aufruf noch als direkte Nutzergeste zaehlt. Beim ersten Antippen ist die Geste
+        // durch das Warten auf die API-Ladung verbraucht - genau deshalb musste man vorher
+        // mehrfach druecken. Der CUED-Zweig in _onYtPlayerStateChange faengt den Rest ab.
+        try { player.playVideo(); } catch (e) {}
+    } finally {
+        _ytPreviewBusy = false;
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -5384,7 +5337,9 @@ document.addEventListener('DOMContentLoaded', () => {
         resultsBox.innerHTML = '';
 
         try {
-            const res = await _apiFetch(`${API_URL}/youtube-search?q=${encodeURIComponent(q)}`);
+            // limit wird mitgeschickt; kennt der Worker den Parameter noch nicht, ignoriert er
+            // ihn einfach und liefert weiterhin seine bisherigen 10 Treffer.
+            const res = await _apiFetch(`${API_URL}/youtube-search?q=${encodeURIComponent(q)}&limit=25`);
             if (!res.ok) throw new Error(`Server: ${res.status}`);
             const data = await res.json();
             const items = data.results || [];
@@ -5394,6 +5349,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 searchStatus.style.color = '#aaa';
             } else {
                 searchStatus.style.display = 'none';
+                // YouTube-Player schon jetzt im Hintergrund aufbauen, nicht erst beim ersten
+                // Antippen: dann ist die Vorschau sofort bereit und der Play-Klick muss nicht
+                // mehr auf die API-Ladung warten (siehe _toggleYtPreview).
+                _ensureYtPlayer().catch(() => {});
             }
 
             items.forEach(item => {
@@ -5445,28 +5404,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (searchInput) searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
 });
 
-// --- NATIVER HINTERGRUND-PLAYER TOGGLE (Einstellungen) ---
-// Reiner An/Aus-Schalter für _tryNativePlayerHandoff() (oben im Datei-Kopf) - bewusst als
-// eigener DOMContentLoaded-Block statt in den grossen Init-Block oben eingehaengt, da er nur
-// auf localStorage + DOM zugreift und keine Player-internen Zustände braucht.
-document.addEventListener('DOMContentLoaded', () => {
-    const btn = document.getElementById('btn-native-player-toggle');
-    const label = document.getElementById('native-player-toggle-label');
-    if (!btn || !label) return;
-
-    function render() {
-        const on = localStorage.getItem('himusic_native_player_enabled') === '1';
-        label.textContent = on ? 'Eingeschaltet' : 'Ausgeschaltet';
-        btn.style.background  = on ? 'rgba(48,209,88,0.18)' : 'rgba(255,255,255,0.07)';
-        btn.style.borderColor = on ? '#30d158' : 'rgba(255,255,255,0.15)';
-        btn.style.color       = on ? '#30d158' : 'var(--text-secondary)';
-    }
-
-    btn.addEventListener('click', () => {
-        const on = localStorage.getItem('himusic_native_player_enabled') === '1';
-        localStorage.setItem('himusic_native_player_enabled', on ? '0' : '1');
-        render();
-    });
-
-    render();
-});
+// Der Einstellungs-Schalter "Nativer Hintergrund-Player (Beta)" wurde am 13.08.2026 entfernt.
+// Er steuerte ausschliesslich den alten Safari-Weg ueber himusicplayer:// - in der nativen
+// Huelle laeuft Wiedergabe ohnehin immer nativ, dort war er wirkungslos. Der Code-Pfad in
+// _tryNativePlayerHandoff() bleibt bewusst bestehen: er greift, wenn die Seite AUSSERHALB der
+// Huelle laeuft und himusic_native_player_enabled auf '1' steht - notfalls per Hand setzbar,
+// falls die 7-Tage-Signatur der Huelle mal ablaeuft.
