@@ -138,9 +138,17 @@ function _artistKeys(artist) {
         .filter(a => a.length > 1);
 }
 
+// Vibes, die bei der Sender-Aehnlichkeit NICHT zaehlen: sie beschreiben eher Anlass/Energie
+// als musikalische Richtung und liegen quer durch alle Genres - ohne diesen Ausschluss zogen
+// sie einen Sender in Richtung "alles, was mal laut ist" statt zum Stil des Ausgangssongs.
+// Nur fuer Sender relevant; Vibe-Mixe filtern weiterhin nach genau dem gewaehlten Vibe.
+const STATION_IGNORED_VIBES = ['HYPE', 'Carpool'];
+
 function _buildStationSongs(song) {
-    const sourceVibes = song.vibes || [];
-    const sourceMain = _getMainVibes(song.id);
+    const ignored = new Set(STATION_IGNORED_VIBES.map(v => v.toLowerCase()));
+    const isIgnored = (v) => ignored.has(String(v).toLowerCase());
+    const sourceVibes = (song.vibes || []).filter(v => !isIgnored(v));
+    const sourceMain = _getMainVibes(song.id).filter(v => !isIgnored(v));
     // Kuenstler-Signal: traegt IMMER bei (nicht nur als Notnagel), gewichtet unter einem
     // Vibe-Treffer. Ohne das lief ein Sender fuer einen noch nicht getaggten Song ins Leere -
     // ohne Vibes gab es null Uebereinstimmungen und es blieben nur 5 Zufallssongs uebrig.
@@ -152,6 +160,8 @@ function _buildStationSongs(song) {
         const sMain = _getMainVibes(s.id);
         let score = 0;
         sVibes.forEach(v => {
+            // Reicht als Ausschluss: sourceVibes ist bereits ohne die ignorierten Vibes,
+            // ein HYPE/Carpool des Zielsongs findet hier also nie eine Entsprechung.
             if (!sourceVibes.includes(v)) return;
             const mainHits = (sourceMain.includes(v) ? 1 : 0) + (sMain.includes(v) ? 1 : 0);
             score += 1 + mainHits;
@@ -3078,8 +3088,34 @@ async function createNewPlaylistProcess() {
     function _stationStorageKey(type) { return type === 'mix' ? 'heatbox_vibe_mixes' : 'heatbox_stations'; }
     function _getStationLikeList(type) { try { return JSON.parse(localStorage.getItem(_stationStorageKey(type)) || '[]'); } catch(e) { return []; } }
     function _saveStationLikeList(type, list) { localStorage.setItem(_stationStorageKey(type), JSON.stringify(list)); }
-    // Vibe-Mixe speichern nur songIds (siehe btn-create-vibe-mix), Sender die vollen Song-Objekte.
-    function _getStationLikeSongs(item) { return item.songIds ? item.songIds.map(id => window._songIndex?.get(id)).filter(Boolean) : (item.songs || []).filter(Boolean); }
+    // Wertet die gespeicherten Mix-Kriterien gegen den AKTUELLEN Song-Bestand aus. Ohne das
+    // waere ein Mix eine eingefrorene Liste: ein "Ohne Vibe"-Mix haette Songs behalten, die
+    // laengst getaggt sind. Reihenfolge folgt weiter den gespeicherten songIds (sonst wuerde
+    // sich der Mix bei jedem Oeffnen neu mischen); Songs, die neu ins Kriterium passen,
+    // haengen hinten an. Aeltere Mixe ohne criteria-Feld bleiben unveraendert.
+    function _resolveMixSongs(mix) {
+        const all = window.globalSongsData || [];
+        const c = mix.criteria;
+        if (!c || !all.length) return null;
+        let matched;
+        if (c.isNoVibe) matched = all.filter(s => { const v = _parseVibes(s.vibes); return v.length === 0; });
+        else if (c.onlyMain) matched = all.filter(s => c.selectedVibes.some(v => _getMainVibes(s.id).includes(v)));
+        else matched = all.filter(s => c.selectedVibes.every(v => _parseVibes(s.vibes).includes(v)));
+        if (c.excludedVibes && c.excludedVibes.length > 0) {
+            matched = matched.filter(s => !c.excludedVibes.some(v => _parseVibes(s.vibes).includes(v)));
+        }
+        const order = new Map((mix.songIds || []).map((id, i) => [id, i]));
+        return matched.sort((a, b) => (order.has(a.id) ? order.get(a.id) : Infinity) - (order.has(b.id) ? order.get(b.id) : Infinity));
+    }
+
+    // Vibe-Mixe speichern nur songIds (siehe btn-create-vibe-mix), Sender seit 13.08.2026 auch;
+    // aeltere Sender enthalten noch volle Song-Objekte.
+    function _getStationLikeSongs(item) {
+        const live = _resolveMixSongs(item);
+        if (live) return live;
+        return item.songIds ? item.songIds.map(id => window._songIndex?.get(id)).filter(Boolean) : (item.songs || []).filter(Boolean);
+    }
+    window._getStationLikeSongs = _getStationLikeSongs;
     function _openStationContextMenu(type, id) {
         window.currentContextStationType = type; window.currentContextStationId = id;
         const item = _getStationLikeList(type).find(x => x.id === id);
@@ -3105,6 +3141,12 @@ async function createNewPlaylistProcess() {
         if(mixContainer) {
             // Angepinnte Mixe überleben die 24h-Auto-Löschung, alle anderen fliegen wie bisher raus.
             let mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); const now = Date.now(); mixes = mixes.filter(m => m.pinned || m.expires > now); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(mixes));
+            // Leergelaufene Mixe ausblenden (z.B. "Ohne Vibe", nachdem alle Songs getaggt
+            // wurden). Bewusst nur ausblenden, nicht loeschen: nimmt man einem Song den Vibe
+            // wieder weg, ist der Mix sofort zurueck - und ein Loeschen waere endgueltig,
+            // obwohl die Liste nur gerade leer ist. Nur bei geladener Bibliothek pruefen,
+            // sonst waere direkt nach dem Start alles "leer".
+            if ((window.globalSongsData || []).length > 0) mixes = mixes.filter(m => !m.criteria || _getStationLikeSongs(m).length > 0);
             if(mixes.length === 0) { mixContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Keine aktiven Vibe Mixe.</div>'; }
             else {
                 mixContainer.innerHTML = '';
@@ -3112,7 +3154,7 @@ async function createNewPlaylistProcess() {
                     const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = mix.id; const bgImage = mix.cover_data && mix.cover_data.length > 10 ? `url('${mix.cover_data}')` : '';
                     const pinBadge = mix.pinned ? '<div class="pin-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg></div>' : '';
                     card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};">${pinBadge}<button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(mix.name)}</div>`;
-                    const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => { const ids = mix.songIds || (mix.songs || []).map(s => s.id); const songs = ids.map(id => window._songIndex?.get(id)).filter(Boolean); const shuffled = [...songs].sort(() => Math.random() - 0.5); window.togglePlaylistPlayback(e, mix.id, shuffled); });
+                    const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => { const shuffled = [..._getStationLikeSongs(mix)].sort(() => Math.random() - 0.5); window.togglePlaylistPlayback(e, mix.id, shuffled); });
                     card.addEventListener('click', () => window.openPlaylistDetails(mix.id, mix.name));
                     if (typeof addLongPressListener === 'function') { addLongPressListener(card, (e) => { e.preventDefault(); e.stopPropagation(); _openStationContextMenu('mix', mix.id); }); }
                     mixContainer.appendChild(card);
@@ -3232,7 +3274,12 @@ async function createNewPlaylistProcess() {
         if (matchedSongs.length === 0) return alert('Keine passenden Songs gefunden.');
 
         const mixName = 'Vibe Mix: ' + (isNoVibe ? 'Ohne Vibe' : selectedVibes.join(', ')) + (excludedVibes.length > 0 ? ` (ohne ${excludedVibes.join(', ')})` : ''); const shuffledIds = [...matchedSongs].sort(() => Math.random() - 0.5).map(s => s.id);
-        const newMix = { id: 'temp_' + Date.now(), name: mixName, cover_data: matchedSongs[0].cover_data || '', songIds: shuffledIds, expires: Date.now() + 86400000, pinned: false };
+        // criteria mitspeichern, damit der Mix eine LEBENDE Auswahl bleibt statt einer
+        // eingefrorenen Liste: taggt man Songs nach, wertet _resolveMixSongs() neu aus -
+        // ein "Ohne Vibe"-Mix verliert dadurch genau die Songs, die inzwischen Vibes haben,
+        // und ist irgendwann leer. songIds bleibt zusaetzlich erhalten und gibt die
+        // Reihenfolge vor, damit sich ein Mix nicht bei jedem Oeffnen neu mischt.
+        const newMix = { id: 'temp_' + Date.now(), name: mixName, cover_data: matchedSongs[0].cover_data || '', songIds: shuffledIds, criteria: { selectedVibes, excludedVibes, onlyMain: !!onlyMain, isNoVibe }, expires: Date.now() + 86400000, pinned: false };
         const mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); mixes.unshift(newMix); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(mixes));
         
         document.getElementById('vibe-mix-overlay')?.classList.remove('active'); window.renderHomeSections();
@@ -3286,7 +3333,9 @@ async function createNewPlaylistProcess() {
         if (isTemp) {
             const list = JSON.parse(localStorage.getItem(isStation ? 'heatbox_stations' : 'heatbox_vibe_mixes') || '[]');
             playlist = list.find(m => m.id === playlistId);
-            if(playlist) { const ids = playlist.songIds || (playlist.songs || []).map(s => s.id); const songs = ids.map(id => window._songIndex?.get(id)).filter(Boolean); validItems = songs.map((song, i) => ({ id: 't_'+i, song_id: song.id, sort_order: i, songs: song })); }
+            // _getStationLikeSongs wertet bei Vibe-Mixen die Kriterien live aus - inzwischen
+            // getaggte Songs sind hier also schon raus, ohne dass die Ansicht das wissen muss.
+            if(playlist) { const songs = window._getStationLikeSongs(playlist); validItems = songs.map((song, i) => ({ id: 't_'+i, song_id: song.id, sort_order: i, songs: song })); }
         } else {
             localStorage.setItem('heatbox_last_playlist', playlistId); if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
             playlist = window.globalPlaylistsData?.find(p => p.id === playlistId);
