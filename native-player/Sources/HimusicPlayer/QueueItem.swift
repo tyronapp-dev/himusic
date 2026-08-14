@@ -2,17 +2,30 @@ import Foundation
 
 /// Kompaktes Format, das die PWA per Custom-URL-Scheme uebergibt.
 /// Kurze Feldnamen (t/a/u/c) absichtlich, um die URL-Laenge klein zu halten.
+///
+/// "s" (Herkunft, z.B. "Aus Vibe Mix: LD") haengt bewusst AM EINZELNEN SONG und nicht an
+/// einer globalen "was laeuft gerade fuer eine Quelle"-Variable der Seite. Genau diese
+/// Kopie lief auseinander: die Seite setzte ihre Variable beim Start einer Quelle, der
+/// native Player sprang danach eigenstaendig weiter (Auto-Skip, Control Center, per Swipe
+/// eingereihter Song) - die Variable blieb stehen und der grosse Player behauptete eine
+/// Herkunft, die fuer den laufenden Song nie gegolten hat (sichtbar u.a. an Songs ohne
+/// jeden Vibe, die angeblich aus einem Vibe-Mix kamen). Dieselbe Fehlerklasse wie ADR-011,
+/// dieselbe Konsequenz: die Zweitkopie entfaellt, statt sie besser zu synchronisieren.
+///
+/// Optional, damit ein vor dieser Aenderung gespeicherter Snapshot weiter dekodierbar ist.
 struct QueueItem: Codable, Identifiable, Equatable {
     let id: Int
     let t: String
     let a: String
     let u: String
     let c: String?
+    let s: String?
 
     var title: String { t }
     var artist: String { a }
     var fileURL: URL? { URL(string: u) }
     var coverURL: URL? { c.flatMap { URL(string: $0) } }
+    var sourceLabel: String? { (s?.isEmpty == false) ? s : nil }
 }
 
 struct IncomingPayload: Codable {

@@ -1,7 +1,7 @@
 // Himusic Cloud - Service Worker v1.0
 // Komplett optimiert für das neue Cloudflare / Firebase Setup
 
-const CACHE_NAME  = 'himusic-app-shell-v1.42';
+const CACHE_NAME  = 'himusic-app-shell-v1.43';
 const COVER_CACHE = 'himusic-covers-v1';
 const AUDIO_CACHE = 'himusic-audio-v1';
 
@@ -186,8 +186,24 @@ self.addEventListener('fetch', (event) => {
                         caches.open(CACHE_NAME).then(c => c.put(event.request, response.clone()));
                     return response;
                 } catch(e) {
-                    // Offline + nicht gecacht → Login.html als Fallback
-                    return caches.match('./login.html');
+                    // Offline + nicht gecacht. Bisher kam hier für JEDEN Treffer login.html
+                    // zurück - auch für app2.js oder style2.css, die dadurch als HTML-Text
+                    // ausgeliefert wurden. Vor allem aber war es für einen Seitenaufruf eine
+                    // Sackgasse: der Login braucht zwingend den Server (POST /auth/login), ohne
+                    // Netz kommt man von dort nicht weiter, obwohl App-Shell, Songliste und die
+                    // Musik selbst längst lokal vorliegen.
+                    //
+                    // Für einen Seitenaufruf deshalb index.html aus dem Cache: die App prüft den
+                    // Login-Status selbst rein lokal (himusic_auth in localStorage) und schickt
+                    // nur dann zum Login, wenn wirklich keine Anmeldung vorliegt. Für alles
+                    // andere ein ehrlicher Fehler statt einer falschen Datei.
+                    if (event.request.mode === 'navigate') {
+                        return (await caches.match('./index.html'))
+                            || (await caches.match('./'))
+                            || (await caches.match('./login.html'))
+                            || new Response('Offline', { status: 503 });
+                    }
+                    return new Response('', { status: 503, statusText: 'Offline' });
                 }
             })
         );

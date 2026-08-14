@@ -273,6 +273,11 @@ window._applyNativeNowPlaying = function(payload) {
     if (homeNpTitle) homeNpTitle.innerText = payload.t || '';
     if (homeNpArtist) homeNpArtist.innerText = payload.a || '';
 
+    // Herkunft kommt MIT dem Song, statt aus einer eigenen Variable abgeleitet zu werden
+    // (siehe _updateSourceBadge). Ein aelterer nativer Stand ohne dieses Feld liefert
+    // undefined - dann bleibt der bisherige Wert stehen statt faelschlich geleert zu werden.
+    if (payload.s !== undefined) window._nativeSourceLabel = payload.s || '';
+
     if (typeof window.updatePlayPauseIcons === 'function') window.updatePlayPauseIcons(!!payload.isPlaying);
     if (typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
     if (typeof window._updateSourceBadge === 'function') window._updateSourceBadge();
@@ -284,8 +289,42 @@ window._applyNativeNowPlaying = function(payload) {
 // bei 0:00 stehen. PlayerViewModel schickt hier stattdessen den echten AVPlayer-Fortschritt
 // rein (nur waehrend der grosse Player offen ist, siehe playerViewObserver unten - kein Grund,
 // jede Sekunde zu pushen, wenn niemand hinschaut).
+// Bis wann ein gerade abgesetzter Positionssprung Vorrang vor den Sekunden-Pushes hat, und
+// wohin er sollte. Ohne das ueberschrieb der naechste Sekundentakt die gezogene Stelle noch
+// einmal mit der ALTEN Position - der Sprung sah dadurch aus, als waere er verworfen worden,
+// obwohl er gerade lief. Sobald ein Push nahe genug am Ziel ankommt, ist der Sprung sichtbar
+// angekommen und die Sperre faellt sofort (nicht erst nach Ablauf der Frist).
+window._seekTargetSeconds = null;
+window._seekGuardUntil = 0;
+
 window._applyNativeProgress = function(current, duration) {
+    // Echte Songdauer vom nativen Player merken. handleScrub() im grossen Player braucht sie,
+    // um aus der Tippposition eine Zielzeit zu rechnen - das lokale <audio> ist in der Huelle
+    // inert und liefert keine, und song.duration aus der Datenbank fehlt bei manchen Songs
+    // ganz. Ohne Dauer brach das Scrubben still ab und der Tipp blieb wirkungslos.
+    if (duration && isFinite(duration) && duration > 0) window.currentSongDuration = duration;
+
+    if (window._seekTargetSeconds !== null) {
+        const angekommen = Math.abs(current - window._seekTargetSeconds) < 1.5;
+        if (angekommen || Date.now() > window._seekGuardUntil) {
+            window._seekTargetSeconds = null;
+        } else {
+            return; // veralteter Stand von vor dem Sprung - nicht anzeigen
+        }
+    }
     if (typeof window.updateTimeUI === 'function') window.updateTimeUI(current, duration);
+};
+
+// Ein Song liess sich nicht abspielen (defekte/leere Datei, Quelle nicht erreichbar). Der
+// native Player ueberspringt ihn selbst - hier wird nur gezeigt, WARUM gerade etwas
+// uebersprungen wurde. Laeuft die App im Hintergrund, kommt dieser Aufruf gar nicht erst an
+// (eingefrorener Web-Prozess), und dann ist stilles Ueberspringen genau richtig.
+window._applyNativePlaybackFailed = function(payload) {
+    if (!payload) return;
+    const titel = payload.t || 'Song';
+    if (typeof window._showToast === 'function') {
+        window._showToast(`⚠️ „${titel}" lässt sich nicht abspielen – übersprungen`, 4000);
+    }
 };
 
 // Echte native Warteschlange (Ausschnitt um die aktuelle Position, siehe QueueSnapshot in
@@ -364,15 +403,44 @@ function _describePlaybackSource() {
     } catch (e) { return null; }
 }
 
+// Fertiger Anzeigetext der Herkunft, oder '' wenn es keine gibt. Wird in der Huelle EINMAL
+// beim Start einer Quelle ausgewertet und dann jedem Song der Warteschlange mitgegeben
+// (siehe _tryNativePlayerHandoff) - nicht bei jedem Anzeigen neu abgeleitet.
+function _sourceLabelForBadge() {
+    const src = _describePlaybackSource();
+    if (!src) return '';
+    return src.label ? `Aus ${src.kind}: ${src.label}` : `Aus ${src.kind}`;
+}
+
+// Herkunft des Songs, der WIRKLICH nativ laeuft - kommt mit ihm ueber den Rueckkanal herein
+// (_applyNativeNowPlaying). null bedeutet "noch nichts gemeldet", '' bedeutet "kommt aus
+// keiner Quelle" (z.B. per Swipe eingereiht). Der Unterschied ist wichtig: bei null faellt
+// die Anzeige auf die lokale Ableitung zurueck, bei '' bleibt sie bewusst leer.
+window._nativeSourceLabel = null;
+
 window._updateSourceBadge = function() {
     const el = document.getElementById('bp-source-badge');
     if (!el) return;
-    const songId = window.currentPlayingSongId;
-    // Manuell eingereihter Song: bewusst keine Kennung, er kommt aus keiner Quelle.
-    if (songId != null && window._manuallyQueuedIds.has(songId)) { el.style.display = 'none'; return; }
-    const src = _describePlaybackSource();
-    if (!src) { el.style.display = 'none'; return; }
-    el.textContent = src.label ? `Aus ${src.kind}: ${src.label}` : `Aus ${src.kind}`;
+
+    let text;
+    if (_nativeBridge()) {
+        // In der Huelle fuehrt der native Player die Warteschlange - was er meldet, gilt.
+        // Die lokale Ableitung wird hier bewusst NICHT als Rueckfallebene benutzt: genau das
+        // war der Fehler. Sie kannte nur den zuletzt gestarteten Kontext und behauptete
+        // danach eine Herkunft weiter, die fuer den laufenden Song nicht mehr galt - bis hin
+        // zu Songs ohne einen einzigen Vibe, die angeblich aus einem Vibe-Mix kamen.
+        if (window._nativeSourceLabel === null) { el.style.display = 'none'; return; }
+        text = window._nativeSourceLabel;
+    } else {
+        // Ausserhalb der Huelle (Safari-Rueckfallebene) fuehrt die Seite die Warteschlange
+        // selbst, dort ist die Ableitung die einzige und richtige Quelle.
+        const songId = window.currentPlayingSongId;
+        if (songId != null && window._manuallyQueuedIds.has(songId)) { el.style.display = 'none'; return; }
+        text = _sourceLabelForBadge();
+    }
+
+    if (!text) { el.style.display = 'none'; return; }
+    el.textContent = text;
     el.style.display = 'inline-block';
 };
 
@@ -396,7 +464,13 @@ function _enqueueSongNext(song) {
                 t: song.title || 'Unbekannt',
                 a: song.artist || '',
                 u: url,
-                c: (cover && cover.startsWith('http')) ? cover : null
+                c: (cover && cover.startsWith('http')) ? cover : null,
+                // Leer, nicht weggelassen: dieser Song kommt aus keiner Quelle, er wurde von
+                // Hand eingereiht. Weil die Herkunft am Song haengt, bleibt sie auch dann
+                // richtig, wenn die Seite zwischendurch neu geladen wird - die frueher dafuer
+                // gefuehrte Merkliste (_manuallyQueuedIds) war nach jedem Reload leer, und der
+                // eingereihte Song trug danach wieder das Etikett der alten Quelle.
+                s: ''
             }
         }));
         return;
@@ -425,12 +499,21 @@ function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
         return (u && !u.startsWith('blob:')) ? u : null;
     };
 
+    // Herkunft EINMAL beim Start bestimmen und jedem Song der Warteschlange mitgeben, statt
+    // sie spaeter aus window.currentPlayingPlaylistId abzuleiten. Diese Variable kennt nur den
+    // Moment des Startens - der native Player laeuft danach eigenstaendig weiter (Auto-Skip,
+    // Control Center, eingereihte Songs), waehrend sie stehenblieb und der grosse Player eine
+    // Quelle behauptete, aus der der laufende Song nie kam. Am Song haengend kann die Angabe
+    // gar nicht mehr auseinanderlaufen. Siehe QueueItem.swift.
+    const sourceLabel = _sourceLabelForBadge();
+
     const toItem = (id, title, artist, fileUrl, coverUrl) => ({
         id: id ?? 0,
         t: title || 'Unbekannt',
         a: artist || '',
         u: remoteUrl(id, fileUrl),
-        c: (coverUrl && coverUrl.startsWith('http')) ? coverUrl : null
+        c: (coverUrl && coverUrl.startsWith('http')) ? coverUrl : null,
+        s: sourceLabel
     });
 
     // Bis 2026-08-10 stand hier slice(0, 24) - insgesamt 25 Songs. Das war eine Grenze des
@@ -1710,11 +1793,17 @@ let _bgCacheActive = false;
     audioPlayer.addEventListener('seeked', syncLockscreenPosition);
 
     if (progressContainer) {
+        // Gibt null zurueck, wenn keine Dauer bekannt ist. Vorher war das 0 - und eine 0 ist
+        // von "an den Anfang springen" nicht zu unterscheiden, der Tipp landete also entweder
+        // am Songanfang oder wirkte gar nicht. In der Huelle ist audioPlayer.duration immer
+        // leer (inertes <audio>), die Dauer kommt dort ueber _applyNativeProgress herein.
         const handleScrub = (e) => {
             let duration = audioPlayer.duration || window.currentSongDuration;
-            if (!duration) return 0;
+            if (!duration || !isFinite(duration) || duration <= 0) return null;
             const rect = progressContainer.getBoundingClientRect();
+            if (!rect.width) return null;
             let clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : (e.changedTouches ? e.changedTouches[0].clientX : e.clientX);
+            if (typeof clientX !== 'number') return null;
             let percent = (clientX - rect.left) / rect.width;
             percent = Math.max(0, Math.min(1, percent));
             const newTime = percent * duration;
@@ -1726,16 +1815,34 @@ let _bgCacheActive = false;
         // AVPlayer nicht, die Anzeige sprang deshalb kurz zur gezogenen Stelle und dann
         // beim naechsten Sekunden-Push (_applyNativeProgress) wieder zurueck).
         const seekTo = (seconds) => {
+            if (seconds === null) return;
             const b = _nativeBridge();
-            if (b) { b.postMessage(JSON.stringify({ cmd: 'seekTo', seconds })); return; }
+            if (b) {
+                // Bis der Sprung nativ greift, haben die Sekunden-Pushes noch den alten Stand
+                // im Gepaeck - solange die Anzeige auf dem Ziel halten (siehe _seekGuardUntil).
+                window._seekTargetSeconds = seconds;
+                window._seekGuardUntil = Date.now() + 4000;
+                b.postMessage(JSON.stringify({ cmd: 'seekTo', seconds }));
+                return;
+            }
             audioPlayer.currentTime = seconds;
+        };
+        const endScrub = (e) => {
+            if (!isDraggingTime) return;
+            isDraggingTime = false;
+            seekTo(handleScrub(e));
         };
         progressContainer.addEventListener('touchstart', (e) => { isDraggingTime = true; handleScrub(e); }, {passive: true});
         progressContainer.addEventListener('touchmove', (e) => { if(isDraggingTime) handleScrub(e); }, {passive: true});
-        progressContainer.addEventListener('touchend', (e) => { if(isDraggingTime) { isDraggingTime = false; seekTo(handleScrub(e)); } });
+        progressContainer.addEventListener('touchend', endScrub);
+        // iOS bricht Beruehrungen von sich aus ab (Systemgeste, eingehender Anruf, Scroll-
+        // Erkennung). Ohne diesen Zweig blieb isDraggingTime dann auf true haengen: der Sprung
+        // wurde nie abgesetzt UND die naechste Beruehrung startete in einem halb gezogenen
+        // Zustand. Genau das Bild "manchmal nimmt er die Stelle einfach nicht an".
+        progressContainer.addEventListener('touchcancel', endScrub);
         progressContainer.addEventListener('mousedown', (e) => { isDraggingTime = true; handleScrub(e); });
         document.addEventListener('mousemove', (e) => { if (isDraggingTime) handleScrub(e); });
-        document.addEventListener('mouseup', (e) => { if (isDraggingTime) { isDraggingTime = false; seekTo(handleScrub(e)); } });
+        document.addEventListener('mouseup', endScrub);
     }
 
     const miniPlayer = document.getElementById('mini-player');

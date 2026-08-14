@@ -28,14 +28,73 @@ actor AudioFileCache {
     private var currentlyPlayingId: Int?
 
     private init() {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        cacheDir = caches.appendingPathComponent("AudioCache", isDirectory: true)
+        // BEWUSST "Application Support" und nicht "Caches": iOS raeumt das Caches-Verzeichnis
+        // bei Speicherdruck jederzeit selbst leer - ohne Rueckfrage, auch waehrend die App
+        // laeuft. Musik, die der Nutzer ausdruecklich offline vorhaelt, ist damit genau dann
+        // weg, wenn er sie braucht (unterwegs, kein Netz) - und weil das vom Speicherstand des
+        // Geraets abhaengt, wirkte es zufaellig: derselbe Song lief mal, mal nicht. Application
+        // Support wird von iOS nicht angetastet, dafuer muss die App selbst aufraeumen -
+        // genau das tut enforceCap() ohnehin schon.
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        cacheDir = base.appendingPathComponent("AudioCache", isDirectory: true)
         indexURL = cacheDir.appendingPathComponent("index.json")
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+
+        // Ohne dieses Flag wandern bis zu 8 GB Musik ins iCloud-Backup - Apple lehnt genau das
+        // ab (jederzeit wiederbeschaffbare Daten), und ein volles Backup faellt dem Nutzer als
+        // Erstes auf die Fuesse. Die Dateien selbst bleiben davon unberuehrt.
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        var mutableDir = cacheDir
+        try? mutableDir.setResourceValues(resourceValues)
+
         if let data = try? Data(contentsOf: indexURL),
            let decoded = try? JSONDecoder().decode([Int: Entry].self, from: data) {
             index = decoded
         }
+        migrateLegacyCachesDirectory()
+    }
+
+    /// Holt Dateien aus dem frueheren Ablageort (Caches/AudioCache) einmalig herueber, damit
+    /// eine bestehende Installation nach dem Update nicht alles neu laden muss. Was iOS dort
+    /// bereits geloescht hat, fehlt schlicht - der Index raeumt sich beim naechsten Zugriff
+    /// selbst auf (siehe localFileURL).
+    ///
+    /// Der alte Index MUSS mit uebernommen werden: ohne ihn laegen die verschobenen Dateien
+    /// zwar am neuen Ort, wuerden aber von niemandem mehr gefunden (localFileURL fragt den
+    /// Index) und auch nie wieder aufgeraeumt (enforceCap rechnet ebenfalls nur ueber den
+    /// Index) - jeder Song waere neu zu laden, und die alten Dateien blieben als tote Last
+    /// liegen.
+    private func migrateLegacyCachesDirectory() {
+        let legacy = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AudioCache", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: legacy.path) else { return }
+
+        if index.isEmpty,
+           let data = try? Data(contentsOf: legacy.appendingPathComponent("index.json")),
+           let decoded = try? JSONDecoder().decode([Int: Entry].self, from: data) {
+            index = decoded
+        }
+
+        let contents = (try? FileManager.default.contentsOfDirectory(at: legacy, includingPropertiesForKeys: nil)) ?? []
+        for source in contents where source.lastPathComponent != "index.json" {
+            let dest = cacheDir.appendingPathComponent(source.lastPathComponent)
+            guard !FileManager.default.fileExists(atPath: dest.path) else { continue }
+            try? FileManager.default.moveItem(at: source, to: dest)
+        }
+        try? FileManager.default.removeItem(at: legacy)
+        saveIndex()
+    }
+
+    /// Verwirft die lokale Kopie eines Songs. Gibt zurueck, ob ueberhaupt eine da war - der
+    /// Aufrufer (PlayerViewModel.handlePlaybackFailure) entscheidet danach, ob ein zweiter
+    /// Versuch vom Server ueberhaupt Sinn ergibt oder der Song wirklich defekt ist.
+    func discardCachedFile(forId id: Int) -> Bool {
+        guard let entry = index[id] else { return false }
+        try? FileManager.default.removeItem(at: fileURL(for: entry))
+        index.removeValue(forKey: id)
+        saveIndex()
+        return true
     }
 
     private func fileURL(for entry: Entry) -> URL {
@@ -99,11 +158,38 @@ actor AudioFileCache {
         processQueueIfNeeded()
     }
 
+    /// Kleinste Groesse, die eine echte Audiodatei plausibel haben kann. Alles darunter ist
+    /// eine Fehlerseite, eine leere Antwort oder ein abgebrochener Download.
+    private static let minimumPlausibleBytes: Int64 = 16 * 1024
+
     private func download(item: QueueItem, from remote: URL) async {
         guard let (tmpURL, response) = try? await URLSession.shared.download(from: remote),
               let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             return
         }
+
+        // Status 200 allein sagt NICHT, dass hier eine brauchbare Audiodatei ankam. Genau
+        // darauf hat sich der Cache bisher verlassen - eine HTML-Fehlerseite, eine leere
+        // Antwort oder ein unterwegs abgebrochener Download wurde als gueltiger Song abgelegt.
+        // Weil beginPlayback die lokale Datei immer der Netzadresse vorzieht, war der Song
+        // danach dauerhaft tot, auch bei bestem Empfang: der Player zeigte ihn an und spielte
+        // ihn nie. Drei billige Pruefungen fangen praktisch alle diese Faelle ab.
+        let downloadedAttrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path)
+        let downloadedBytes = (downloadedAttrs?[.size] as? Int64) ?? 0
+        let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        let looksLikeAudio = contentType.isEmpty
+            || contentType.hasPrefix("audio/")
+            || contentType.hasPrefix("application/octet-stream")
+        // Nur pruefen, wenn der Server eine Laenge genannt hat: fehlt sie (chunked), ist das
+        // kein Fehlersignal, sondern schlicht keine Information.
+        let announced = http.expectedContentLength
+        let complete = announced <= 0 || downloadedBytes >= announced
+
+        guard looksLikeAudio, downloadedBytes >= Self.minimumPlausibleBytes, complete else {
+            try? FileManager.default.removeItem(at: tmpURL)
+            return
+        }
+
         let ext = remote.pathExtension.isEmpty ? "mp3" : remote.pathExtension
         let dest = cacheDir.appendingPathComponent("\(item.id).\(ext)")
         try? FileManager.default.removeItem(at: dest)

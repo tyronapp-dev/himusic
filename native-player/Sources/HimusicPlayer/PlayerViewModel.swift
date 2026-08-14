@@ -17,7 +17,13 @@ final class PlayerViewModel: ObservableObject {
     private let player = AVPlayer()
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
+    private var failObserver: NSObjectProtocol?
     private var artworkCache: [Int: MPMediaItemArtwork] = [:]
+
+    /// Fuer welchen Song die kaputte lokale Kopie bereits verworfen und ein zweiter Versuch
+    /// vom Server unternommen wurde. Verhindert, dass sich Verwerfen und Neuladen endlos im
+    /// Kreis drehen, wenn nicht die Kopie kaputt ist, sondern die Quelle selbst.
+    private var retriedFromRemoteId: Int?
 
     /// Steigt bei jedem playCurrent()-Aufruf. beginPlayback() prueft vor jeder Mutation an
     /// "player", ob sein Token noch aktuell ist - verhindert, dass ein aelterer, an einem
@@ -94,6 +100,21 @@ final class PlayerViewModel: ObservableObject {
     /// Nur gefeuert, waehrend isWebOverlayVisible true ist (siehe dort) - kein Grund, das
     /// jede Sekunde in die Seite zu pushen, wenn niemand hinschaut.
     var onProgressChanged: ((Double, Double) -> Void)?
+
+    /// Ein Song liess sich nicht abspielen (defekte/leere Datei, Quelle nicht erreichbar).
+    /// Die Seite zeigt daraufhin einen Hinweis - aber nur, wenn sie ueberhaupt sichtbar ist.
+    /// Im Hintergrund/auf dem Homescreen kommt der Push ohnehin nicht an, und das ist genau
+    /// das gewuenschte Verhalten: dann wird still weitergesprungen, ohne Stau in der
+    /// Wiedergabe. Das Ueberspringen selbst passiert IMMER, unabhaengig von diesem Callback.
+    var onPlaybackFailed: ((QueueItem, String) -> Void)?
+
+    /// Bricht die Kette, wenn mehrere Songs hintereinander scheitern. Ohne das wuerde ein
+    /// flaechiger Ausfall (Netz weg, Serverfehler, ganze Warteschlange ungueltig) die
+    /// komplette Liste in Sekunden durchrasen und am Ende stumm stehen bleiben - fuer den
+    /// Nutzer nicht von "die App hat meine Musik verloren" zu unterscheiden. Wird bei jedem
+    /// Song zurueckgesetzt, der wirklich losspielt (siehe readyToPlay-Beobachter).
+    private var consecutiveFailures = 0
+    private static let maxConsecutiveFailures = 5
 
     var currentItem: QueueItem? {
         queue.indices.contains(currentIndex) ? queue[currentIndex] : nil
@@ -267,7 +288,13 @@ final class PlayerViewModel: ObservableObject {
         await cache.markCurrentlyPlaying(id: item.id)
         let localURL = await cache.localFileURL(forId: item.id)
         guard token == playbackToken else { return }
-        guard let url = localURL ?? item.fileURL else { return }
+        // Ohne abspielbare Adresse ist der Eintrag defekt. Frueher endete das hier in einem
+        // stillen return: die Oberflaeche zeigte weiter einen Song, der nie loslief, und ein
+        // Tipp auf Play tat nichts. Jetzt wird er wie jeder andere Fehlschlag behandelt.
+        guard let url = localURL ?? item.fileURL else {
+            handlePlaybackFailure(for: item, reason: "Keine abspielbare Datei hinterlegt")
+            return
+        }
         if localURL == nil {
             await cache.ensureCached(item: item)
             guard token == playbackToken else { return }
@@ -283,16 +310,45 @@ final class PlayerViewModel: ObservableObject {
             Task { @MainActor in self?.next() }
         }
 
+        // Abbruch MITTEN im Song (Datei bricht ab, Verbindung stirbt beim Streamen). Das ist
+        // ein eigenes Ereignis - .status bleibt dabei .readyToPlay, der Song wuerde sonst
+        // einfach fuer immer stehenbleiben, ohne dass irgendetwas davon Notiz nimmt.
+        if let failObserver { NotificationCenter.default.removeObserver(failObserver) }
+        failObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: playerItem,
+            queue: .main
+        ) { [weak self] note in
+            let reason = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription ?? "Wiedergabe abgebrochen"
+            Task { @MainActor in self?.handlePlaybackFailure(for: item, reason: reason) }
+        }
+
         // Sobald das Item bereit ist: offenen Positionssprung nachholen und - falls die
         // Wiedergabe laufen soll, aber steht - nachtreten. Beides ist genau der Moment, ab
         // dem AVPlayer solche Anweisungen ueberhaupt zuverlaessig annimmt.
+        //
+        // Der .failed-Zweig ist neu: eine beschaedigte, leere oder gar nicht erreichbare Datei
+        // landete vorher in keinem der beiden Faelle. AVPlayer meldete den Fehler, niemand
+        // hoerte zu, und der Player blieb stumm auf einem Song stehen, den die Oberflaeche
+        // weiter als "laeuft" anzeigte - exakt das gemeldete Verhalten.
         itemStatusObservation?.invalidate()
         itemStatusObservation = playerItem.observe(\.status, options: [.initial, .new]) { [weak self] observed, _ in
-            guard observed.status == .readyToPlay else { return }
             Task { @MainActor [weak self] in
                 guard let self, self.player.currentItem === observed else { return }
-                self.applyPendingSeek()
-                if self.isPlaying && self.player.rate == 0 { self.player.play() }
+                switch observed.status {
+                case .readyToPlay:
+                    // Ab hier gilt der Song als spielbar - die Fehlerkette ist unterbrochen.
+                    self.consecutiveFailures = 0
+                    self.retriedFromRemoteId = nil
+                    self.applyPendingSeek()
+                    if self.isPlaying && self.player.rate == 0 { self.player.play() }
+                case .failed:
+                    let reason = observed.error?.localizedDescription ?? "Datei nicht lesbar"
+                    self.handlePlaybackFailure(for: item, reason: reason)
+                default:
+                    break
+                }
             }
         }
 
@@ -313,8 +369,7 @@ final class PlayerViewModel: ObservableObject {
         pendingSeekSeconds = nil
         let duration = player.currentItem?.duration.seconds ?? 0
         guard !(duration.isFinite && duration > 0 && target >= duration - 2) else { return }
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
-        updateNowPlayingInfo()
+        seekExactly(to: target)
     }
 
     func togglePlayPause() {
@@ -360,6 +415,58 @@ final class PlayerViewModel: ObservableObject {
             self.pendingSeekSeconds = resumeAt > 3 ? resumeAt : nil
             self.playCurrent()
         }
+    }
+
+    // MARK: - Defekte Songs
+
+    /// Ein Song laesst sich nicht abspielen. Zwei Stufen, bewusst in dieser Reihenfolge:
+    ///
+    /// 1. Lag eine lokale Kopie vor, ist meistens SIE das Problem und nicht der Song. Der
+    ///    Datei-Cache hat bisher jede Antwort mit Status 200 als gueltige Audiodatei abgelegt -
+    ///    ein abgebrochener Download oder eine Fehlerseite landete damit dauerhaft im Cache, und
+    ///    weil beginPlayback die lokale Datei immer bevorzugt, war so ein Song danach AUCH mit
+    ///    bestem WLAN tot. Die Kopie wird deshalb verworfen und genau einmal vom Server
+    ///    nachgeladen. Das ist der Fall, den man von aussen als "mal geht der Song, mal nicht"
+    ///    wahrnimmt.
+    /// 2. Scheitert auch das, ist der Song wirklich defekt oder die Quelle nicht erreichbar:
+    ///    melden (die Seite zeigt es, falls jemand hinschaut) und weiterspringen.
+    private func handlePlaybackFailure(for item: QueueItem, reason: String) {
+        // Verspaetete Fehlermeldung zu einem Song, der laengst nicht mehr dran ist: ignorieren,
+        // sonst wirft ein alter Fehler die inzwischen laufende Wiedergabe weiter.
+        guard currentItem?.id == item.id else { return }
+
+        if retriedFromRemoteId != item.id, item.fileURL != nil {
+            retriedFromRemoteId = item.id
+            Task { @MainActor [weak self] in
+                let hadLocalCopy = await AudioFileCache.shared.discardCachedFile(forId: item.id)
+                // Waehrend des Verwerfens kann der Nutzer laengst weitergeschaltet haben.
+                guard let self, self.currentItem?.id == item.id else { return }
+                if hadLocalCopy {
+                    self.playCurrent()   // zweiter Versuch, jetzt zwangslaeufig vom Server
+                } else {
+                    self.reportAndSkip(item, reason: reason)
+                }
+            }
+            return
+        }
+        reportAndSkip(item, reason: reason)
+    }
+
+    private func reportAndSkip(_ item: QueueItem, reason: String) {
+        onPlaybackFailed?(item, reason)
+        consecutiveFailures += 1
+
+        // Reissleine (siehe consecutiveFailures): lieber sichtbar stehenbleiben als die ganze
+        // Warteschlange lautlos durchrasen und am Ende ohne Erklaerung stumm sein.
+        guard consecutiveFailures < Self.maxConsecutiveFailures, currentIndex + 1 < queue.count else {
+            player.pause()
+            isPlaying = false
+            updateNowPlayingInfo()
+            notifyNowPlayingChanged()
+            return
+        }
+        currentIndex += 1
+        playCurrent()
     }
 
     func next() {
@@ -450,9 +557,47 @@ final class PlayerViewModel: ObservableObject {
         playCurrent()
     }
 
+    /// Absoluter Positionssprung (Scrub-Leiste im grossen Player, Control Center).
+    ///
+    /// Drei Gruende, warum das vorher "teilweise nicht angenommen" wurde - alle hier behoben:
+    ///
+    /// 1. `preferredTimescale: 1` konnte nur GANZE Sekunden darstellen. Jede Zielposition
+    ///    wurde also auf die naechste Sekunde gerundet, bevor AVPlayer sie ueberhaupt sah.
+    /// 2. `seek(to:)` ohne Toleranzangabe darf zum naechstgelegenen Sync-Sample springen.
+    ///    Bei MP3 ohne exakten Index liegt das schnell mehrere Sekunden neben dem Ziel - genau
+    ///    das Bild "er geht nicht auf die Stelle, die ich gedrueckt habe". Mit .zero/.zero
+    ///    springt er exakt (minimal teurer, bei lokalen Dateien nicht spuerbar).
+    /// 3. Ist das Item noch nicht `readyToPlay` - beim Streamen mit schwachem Netz der
+    ///    Normalfall, deshalb die Abhaengigkeit vom WLAN - verpufft ein Seek folgenlos. Statt
+    ///    ihn zu verlieren, wird er wie beim Sitzungs-Wiederherstellen vorgemerkt und greift,
+    ///    sobald das Item bereit ist (siehe pendingSeekSeconds).
     func seek(toSeconds seconds: Double) {
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 1))
-        updateNowPlayingInfo()
+        let target = max(0, seconds)
+        guard let item = player.currentItem, item.status == .readyToPlay else {
+            pendingSeekSeconds = target
+            return
+        }
+        seekExactly(to: target)
+    }
+
+    private func seekExactly(to seconds: Double) {
+        player.seek(
+            to: CMTime(seconds: seconds, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.updateNowPlayingInfo()
+                // Die Seite bekommt Fortschritt sonst erst beim naechsten Sekundentakt. Bis
+                // dahin ueberschrieb genau dieser Takt die gezogene Position noch einmal mit
+                // dem alten Stand - fuer den Nutzer sah der Sprung dadurch aus, als waere er
+                // verworfen worden, obwohl er lief.
+                guard self.isWebOverlayVisible else { return }
+                let duration = self.player.currentItem?.duration.seconds ?? 0
+                self.onProgressChanged?(self.player.currentTime().seconds, duration.isFinite ? duration : 0)
+            }
+        }
     }
 
     /// Relativer Sprung fuer den Langdruck-Suchlauf der Web-Knoepfe. Auf 0 und Songende

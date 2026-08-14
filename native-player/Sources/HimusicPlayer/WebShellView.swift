@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import UIKit
+import Foundation
 
 /// Von NativePlayerBar gepostet, wenn ausserhalb der Steuerknoepfe getippt wird - oeffnet
 /// den grossen Web-Player, genau wie die ersetzte Web-Mini-Leiste es per Klick tat.
@@ -76,8 +77,8 @@ struct WebShellView: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
-        webView.load(URLRequest(url: Self.startURL))
         context.coordinator.webView = webView
+        context.coordinator.loadStartPage()
         return webView
     }
 
@@ -103,6 +104,9 @@ struct WebShellView: UIViewRepresentable {
             self.player.onQueueChanged = { [weak self] json in
                 self?.pushQueue(json)
             }
+            self.player.onPlaybackFailed = { [weak self] item, reason in
+                self?.pushPlaybackFailed(item: item, reason: reason)
+            }
             // Zweite Absicherung noetig: evaluateJavaScript() waehrend die App im Hintergrund
             // ist (z.B. Control-Center-Play, waehrend man in einer anderen App ist), kommt
             // beim WKWebView oft gar nicht an - der Webinhalts-Prozess kann suspendiert sein.
@@ -127,7 +131,14 @@ struct WebShellView: UIViewRepresentable {
         }
 
         @objc private func appDidBecomeActive() {
-            Task { @MainActor [weak self] in self?.pushCurrentStateIfAny() }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Blieb die Oberflaeche beim Start ohne Netz weiss, ist das Zurueckkommen in den
+                // Vordergrund der natuerlichste Moment fuer einen neuen Versuch - typischerweise
+                // ist inzwischen entweder Netz da oder zumindest der Cache erreichbar.
+                if !self.pageIsLoaded { self.loadStartPage(forceCache: true) }
+                self.pushCurrentStateIfAny()
+            }
         }
 
         /// Gemeinsam fuer beide Resync-Ausloeser (Vordergrund-Comeback UND jeder abgeschlossene
@@ -158,13 +169,30 @@ struct WebShellView: UIViewRepresentable {
             // [String: Any] mit "c": item.c ?? "" statt [String: Any?] - Optionals bridgen
             // nicht zuverlaessig zu NSNull fuer JSONSerialization. Leerer String ist hier
             // gleichwertig: _applyNativeNowPlaying() in app2.js behandelt beides als "kein Cover".
+            // "s" ist die Herkunft, die BEIM SONG haengt (siehe QueueItem). Die Seite leitet
+            // sie nicht mehr selbst aus einer eigenen Variable ab - die blieb bei nativen
+            // Songwechseln stehen und behauptete danach eine falsche Quelle.
             let payload: [String: Any] = [
                 "id": item.id, "t": item.title, "a": item.artist,
-                "u": item.u, "c": item.c ?? "", "isPlaying": isPlaying
+                "u": item.u, "c": item.c ?? "", "s": item.sourceLabel ?? "",
+                "isPlaying": isPlaying
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8) else { return }
             webView.evaluateJavaScript("window._applyNativeNowPlaying && window._applyNativeNowPlaying(\(json));")
+        }
+
+        /// Meldet der Seite einen Song, der sich nicht abspielen liess. Sie zeigt einen Hinweis,
+        /// wenn sie gerade sichtbar ist - laeuft die App im Hintergrund, kommt dieser Aufruf
+        /// beim eingefrorenen Web-Prozess ohnehin nicht an, und dann ist stilles Ueberspringen
+        /// genau das gewuenschte Verhalten. Das Ueberspringen selbst passiert nativ und haengt
+        /// nicht an dieser Meldung.
+        private func pushPlaybackFailed(item: QueueItem, reason: String) {
+            guard let webView else { return }
+            let payload: [String: Any] = ["id": item.id, "t": item.title, "reason": reason]
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window._applyNativePlaybackFailed && window._applyNativePlaybackFailed(\(json));")
         }
 
         private func pushProgress(current: Double, duration: Double) {
@@ -257,13 +285,53 @@ struct WebShellView: UIViewRepresentable {
         /// pushCurrentStateIfAny(). Laeuft strikt NACH diesem synchronen Code, korrigiert es
         /// zuverlaessig, statt auf eine zufaellige zeitliche Naehe zu appDidBecomeActive zu hoffen.
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            pageIsLoaded = true
+            loadAttempt = 0
             Task { @MainActor [weak self] in self?.pushCurrentStateIfAny() }
         }
 
-        /// Ohne Netz laedt die Seite nicht. Statt einer weissen Flaeche einmal
-        /// nachladen - der Service Worker der Seite bedient danach aus dem Cache.
+        // MARK: - Laden, auch ohne Netz
+
+        /// Ob die Oberflaeche gerade steht. Erst wenn sie das tut, wird nicht weiter probiert.
+        private var pageIsLoaded = false
+        private var loadAttempt = 0
+
+        /// Laedt die Oberflaeche. Ab dem zweiten Versuch ausdruecklich mit
+        /// `returnCacheDataElseLoad`: ohne Netz bricht WKWebView die Navigation sonst schon ab,
+        /// BEVOR der Service Worker der Seite ueberhaupt zum Zug kaeme - das Ergebnis war eine
+        /// weisse Flaeche, obwohl App-Shell und Songliste laengst lokal vorliegen und die Musik
+        /// selbst im nativen Datei-Cache liegt. Mit dieser Policy bedient WebKit die Seite aus
+        /// seinem eigenen Cache und uebergibt danach normal an den Service Worker.
+        @MainActor
+        func loadStartPage(forceCache: Bool = false) {
+            guard let webView else { return }
+            var request = URLRequest(url: WebShellView.startURL)
+            if forceCache || loadAttempt > 0 {
+                request.cachePolicy = .returnCacheDataElseLoad
+            }
+            loadAttempt += 1
+            webView.load(request)
+        }
+
+        /// Ohne Netz laedt die Seite nicht auf Anhieb. Statt einer weissen Flaeche mehrfach
+        /// nachfassen, mit wachsendem Abstand (2s, 4s, 8s, ...), gedeckelt bei einer halben
+        /// Minute. Vorher gab es genau EINEN Versuch nach 3 Sekunden, und der war zusaetzlich
+        /// an `webView.url == nil` geknuepft - nach einer gescheiterten Navigation steht dort
+        /// aber meist die Ziel-URL, sodass der Nachlade-Versuch in der Praxis gar nicht erst
+        /// startete und die weisse Flaeche stehenblieb.
+        private func retryLater() {
+            guard !pageIsLoaded else { return }
+            let delay = min(pow(2.0, Double(loadAttempt)), 30.0)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, !self.pageIsLoaded else { return }
+                self.loadStartPage()
+            }
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            retryLater(webView)
+            pageIsLoaded = false
+            retryLater()
         }
 
         func webView(
@@ -271,16 +339,8 @@ struct WebShellView: UIViewRepresentable {
             didFailProvisionalNavigation navigation: WKNavigation!,
             withError error: Error
         ) {
-            retryLater(webView)
-        }
-
-        private func retryLater(_ webView: WKWebView) {
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                if webView.url == nil {
-                    webView.load(URLRequest(url: WebShellView.startURL))
-                }
-            }
+            pageIsLoaded = false
+            retryLater()
         }
     }
 }
