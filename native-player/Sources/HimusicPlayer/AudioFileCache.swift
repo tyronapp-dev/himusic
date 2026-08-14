@@ -86,9 +86,20 @@ actor AudioFileCache {
         saveIndex()
     }
 
-    /// Verwirft die lokale Kopie eines Songs. Gibt zurueck, ob ueberhaupt eine da war - der
-    /// Aufrufer (PlayerViewModel.handlePlaybackFailure) entscheidet danach, ob ein zweiter
-    /// Versuch vom Server ueberhaupt Sinn ergibt oder der Song wirklich defekt ist.
+    /// Nur nachsehen, ob eine lokale Kopie existiert - ohne sie anzufassen und ohne den
+    /// Zugriffszeitstempel zu aendern (das tut localFileURL bewusst, hier waere es falsch).
+    /// Der Aufrufer entscheidet damit, ob ein zweiter Versuch ueber das Netz Sinn ergibt.
+    func hasCachedFile(forId id: Int) -> Bool {
+        guard let entry = index[id] else { return false }
+        return FileManager.default.fileExists(atPath: fileURL(for: entry).path)
+    }
+
+    /// Verwirft die lokale Kopie eines Songs. Gibt zurueck, ob ueberhaupt eine da war.
+    ///
+    /// Wird **erst** aufgerufen, wenn feststeht, dass die Kopie das Problem war - also nachdem
+    /// derselbe Song ueber die Netzadresse nachweislich lief. Frueher zu loeschen hiess, bei
+    /// jedem voruebergehenden Fehler eine intakte Offline-Kopie zu vernichten, die sich ohne
+    /// Netz nicht wiederbeschaffen liess.
     func discardCachedFile(forId id: Int) -> Bool {
         guard let entry = index[id] else { return false }
         try? FileManager.default.removeItem(at: fileURL(for: entry))
@@ -177,15 +188,23 @@ actor AudioFileCache {
         let downloadedAttrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path)
         let downloadedBytes = (downloadedAttrs?[.size] as? Int64) ?? 0
         let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
-        let looksLikeAudio = contentType.isEmpty
-            || contentType.hasPrefix("audio/")
-            || contentType.hasPrefix("application/octet-stream")
+
+        // BEWUSST eine Ausschlussliste statt einer Erlaubnisliste. Ziel ist, eine Fehlerseite
+        // als vermeintlichen Song zu erkennen - nicht, Audioformate zu validieren. Eine
+        // Erlaubnisliste ("audio/*" oder "application/octet-stream") war hier zuerst drin und
+        // ist zu eng: R2 und andere Speicher liefern dieselbe Datei je nach Konfiguration als
+        // "binary/octet-stream" oder ganz ohne Angabe aus. Damit waeren voellig intakte Songs
+        // nie im Cache gelandet und offline schlicht nicht da gewesen.
+        let istFehlerseite = contentType.hasPrefix("text/")
+            || contentType.hasPrefix("application/json")
+            || contentType.hasPrefix("application/xml")
+
         // Nur pruefen, wenn der Server eine Laenge genannt hat: fehlt sie (chunked), ist das
         // kein Fehlersignal, sondern schlicht keine Information.
         let announced = http.expectedContentLength
         let complete = announced <= 0 || downloadedBytes >= announced
 
-        guard looksLikeAudio, downloadedBytes >= Self.minimumPlausibleBytes, complete else {
+        guard !istFehlerseite, downloadedBytes >= Self.minimumPlausibleBytes, complete else {
             try? FileManager.default.removeItem(at: tmpURL)
             return
         }

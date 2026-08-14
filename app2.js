@@ -278,6 +278,18 @@ window._applyNativeNowPlaying = function(payload) {
     // undefined - dann bleibt der bisherige Wert stehen statt faelschlich geleert zu werden.
     if (payload.s !== undefined) window._nativeSourceLabel = payload.s || '';
 
+    // Dauer beim Songwechsel sofort mitziehen. Ohne das behielt currentSongDuration den Wert
+    // des VORIGEN Songs, bis der erste Fortschritts-Push kam - und der kommt nur, waehrend der
+    // grosse Player offen ist. Die Scrub-Leiste rechnet die Tippposition gegen genau diese
+    // Dauer um: war sie 0, kam gar kein Sprung zustande, war sie die des vorigen Songs, landete
+    // er an der falschen Stelle. Der native Push korrigiert gleich darauf auf die echte Dauer.
+    window.currentSongDuration = (song && song.duration) ? song.duration : 0;
+
+    // Ein noch offener Positionssprung galt dem VORIGEN Song. Bliebe die Sperre stehen, wuerde
+    // sie die Zeitanzeige des neuen Songs blockieren, bis sie von selbst ablaeuft.
+    window._seekTargetSeconds = null;
+    window._seekGuardUntil = 0;
+
     if (typeof window.updatePlayPauseIcons === 'function') window.updatePlayPauseIcons(!!payload.isPlaying);
     if (typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
     if (typeof window._updateSourceBadge === 'function') window._updateSourceBadge();
@@ -322,9 +334,44 @@ window._applyNativeProgress = function(current, duration) {
 window._applyNativePlaybackFailed = function(payload) {
     if (!payload) return;
     const titel = payload.t || 'Song';
+
+    // Mitschreiben, nicht nur kurz anzeigen. Ein Song, der im Hintergrund uebersprungen wird,
+    // erzeugt keinen sichtbaren Toast - genau der Fall, in dem man hinterher wissen will,
+    // was da eigentlich weggefallen ist. Die Liste steht in den Einstellungen.
+    try {
+        const log = JSON.parse(localStorage.getItem('himusic_skip_log') || '[]');
+        log.unshift({ id: payload.id, t: titel, r: payload.reason || '', ts: Date.now() });
+        localStorage.setItem('himusic_skip_log', JSON.stringify(log.slice(0, 50)));
+    } catch (e) {}
+    if (typeof window._renderSkipLog === 'function') window._renderSkipLog();
+
     if (typeof window._showToast === 'function') {
         window._showToast(`⚠️ „${titel}" lässt sich nicht abspielen – übersprungen`, 4000);
     }
+};
+
+// Liste der uebersprungenen Songs in den Einstellungen. Beantwortet die Frage "warum wurde
+// der Song gerade weggelassen?" auch dann noch, wenn der Toast laengst weg ist oder nie
+// erschienen ist, weil die App im Hintergrund lief.
+window._renderSkipLog = function() {
+    const el = document.getElementById('skip-log-list');
+    if (!el) return;
+    let log = [];
+    try { log = JSON.parse(localStorage.getItem('himusic_skip_log') || '[]'); } catch (e) {}
+    if (!log.length) {
+        el.innerHTML = '<p style="font-size:13px;color:var(--text-secondary);padding:8px 0;margin:0;">Nichts übersprungen. 👍</p>';
+        return;
+    }
+    el.innerHTML = log.map(e => {
+        const d = new Date(e.ts);
+        const zeit = `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}. ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        // _esc ist Pflicht: der Titel stammt aus der Bibliothek und kann bei YouTube-Importen
+        // beliebiger Fremdtext sein (siehe ADR-004).
+        return `<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.08);">
+            <div style="font-size:14px;font-weight:600;">${_esc(e.t)}</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${zeit} — ${_esc(e.r || 'Grund unbekannt')}</div>
+        </div>`;
+    }).join('');
 };
 
 // Echte native Warteschlange (Ausschnitt um die aktuelle Position, siehe QueueSnapshot in
@@ -1821,27 +1868,49 @@ let _bgCacheActive = false;
                 // Bis der Sprung nativ greift, haben die Sekunden-Pushes noch den alten Stand
                 // im Gepaeck - solange die Anzeige auf dem Ziel halten (siehe _seekGuardUntil).
                 window._seekTargetSeconds = seconds;
-                window._seekGuardUntil = Date.now() + 4000;
+                window._seekGuardUntil = Date.now() + 2500;
                 b.postMessage(JSON.stringify({ cmd: 'seekTo', seconds }));
                 return;
             }
             audioPlayer.currentTime = seconds;
         };
+        // Letzte Position aus dem Ziehen. Bei touchcancel liefert iOS keine verlaesslichen
+        // Koordinaten mehr - dann gilt die zuletzt gesehene Stelle, statt den Sprung
+        // wegzuwerfen. Der Finger war ja dort.
+        let lastScrubSeconds = null;
+
+        const trackScrub = (e) => {
+            const t = handleScrub(e);
+            if (t !== null) lastScrubSeconds = t;
+            return t;
+        };
         const endScrub = (e) => {
             if (!isDraggingTime) return;
             isDraggingTime = false;
-            seekTo(handleScrub(e));
+            const ziel = trackScrub(e);
+            seekTo(ziel !== null ? ziel : lastScrubSeconds);
+            lastScrubSeconds = null;
         };
-        progressContainer.addEventListener('touchstart', (e) => { isDraggingTime = true; handleScrub(e); }, {passive: true});
-        progressContainer.addEventListener('touchmove', (e) => { if(isDraggingTime) handleScrub(e); }, {passive: true});
-        progressContainer.addEventListener('touchend', endScrub);
+        // stopPropagation ueberall: der Grossplayer hat einen eigenen Wisch-Handler (Schliessen
+        // nach unten). Ohne das bekam er jedes Ziehen auf der Leiste mit ab. Bis eben hing dort
+        // auch der Songwechsel per Wisch - ein Ziehen auf der Leiste loeste dann Sprung UND
+        // Songwechsel aus, und der Wechsel warf den Sprung wieder weg.
+        progressContainer.addEventListener('touchstart', (e) => {
+            e.stopPropagation(); isDraggingTime = true; trackScrub(e);
+        }, {passive: true});
+        progressContainer.addEventListener('touchmove', (e) => {
+            if (!isDraggingTime) return;
+            e.stopPropagation();
+            trackScrub(e);
+        }, {passive: true});
+        progressContainer.addEventListener('touchend', (e) => { e.stopPropagation(); endScrub(e); });
         // iOS bricht Beruehrungen von sich aus ab (Systemgeste, eingehender Anruf, Scroll-
         // Erkennung). Ohne diesen Zweig blieb isDraggingTime dann auf true haengen: der Sprung
         // wurde nie abgesetzt UND die naechste Beruehrung startete in einem halb gezogenen
         // Zustand. Genau das Bild "manchmal nimmt er die Stelle einfach nicht an".
-        progressContainer.addEventListener('touchcancel', endScrub);
-        progressContainer.addEventListener('mousedown', (e) => { isDraggingTime = true; handleScrub(e); });
-        document.addEventListener('mousemove', (e) => { if (isDraggingTime) handleScrub(e); });
+        progressContainer.addEventListener('touchcancel', (e) => { e.stopPropagation(); endScrub(e); });
+        progressContainer.addEventListener('mousedown', (e) => { isDraggingTime = true; trackScrub(e); });
+        document.addEventListener('mousemove', (e) => { if (isDraggingTime) trackScrub(e); });
         document.addEventListener('mouseup', endScrub);
     }
 
@@ -1880,8 +1949,18 @@ let _bgCacheActive = false;
             if (!bpStartX || !bpStartY) return;
             let diffX = bpStartX - e.changedTouches[0].clientX;
             let diffY = bpStartY - e.changedTouches[0].clientY;
-            if (Math.abs(diffX) > Math.abs(diffY)) { if (Math.abs(diffX) > 60) { if (diffX > 0) window.playNextSong(); else window.playPrevSong(); } } 
-            else { if (diffY < -60 && bpStartY < window.innerHeight / 2) { document.getElementById('close-player')?.click(); } }
+            // Der HORIZONTALE Wisch (Song vor/zurueck) ist hier bewusst ENTFERNT. Er lag auf
+            // dem gesamten Grossplayer, also auch ueber der Zeitleiste - und die Zeitleiste
+            // ruft kein stopPropagation. Ein Ziehen auf der Leiste loeste deshalb BEIDES aus:
+            // den Positionssprung und, weil die Bewegung ueber 60px horizontal war, zusaetzlich
+            // einen Songwechsel. Der Wechsel laedt den Player neu und verwirft den Sprung
+            // dabei - genau das Bild "er springt nicht an die Stelle, die ich gedrueckt habe".
+            // Zum Song wechseln gibt es die Knoepfe darunter und den Wisch in der Songliste;
+            // die Zeitleiste braucht die Flaeche dringender. Der VERTIKALE Wisch zum Schliessen
+            // bleibt - der kollidiert mit nichts.
+            if (Math.abs(diffY) > Math.abs(diffX) && diffY < -60 && bpStartY < window.innerHeight / 2) {
+                document.getElementById('close-player')?.click();
+            }
             bpStartX = 0; bpStartY = 0;
         });
     }
@@ -3776,6 +3855,15 @@ async function createNewPlaylistProcess() {
         if (statsEl) { const songCount = (typeof window.globalSongsData !== 'undefined') ? window.globalSongsData.length : 0; const plCount = window.globalPlaylistsData ? window.globalPlaylistsData.length : 0; statsEl.innerText = `${songCount} Songs • ${plCount} Playlists in der Cloud`; }
     };
 
+
+    document.getElementById('btn-clear-skip-log')?.addEventListener('click', () => {
+        localStorage.removeItem('himusic_skip_log');
+        if (typeof window._renderSkipLog === 'function') window._renderSkipLog();
+        _showToast('Protokoll geleert');
+    });
+    // Beim Start einmal fuellen, damit die Liste nicht leer wirkt, wenn die Einstellungen
+    // geoeffnet werden, ohne dass zwischendurch etwas uebersprungen wurde.
+    if (typeof window._renderSkipLog === 'function') window._renderSkipLog();
 
     document.getElementById('btn-backup-download')?.addEventListener('click', () => {
         const backupData = { state: JSON.parse(localStorage.getItem('heatbox_state') || '{}'), mixes: JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'), stations: JSON.parse(localStorage.getItem('heatbox_stations') || '[]'), theme: localStorage.getItem('heatbox_theme_color') || '#fa233b', timestamp: new Date().toISOString() };

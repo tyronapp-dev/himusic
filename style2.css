@@ -383,7 +383,26 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     border-radius: 3px; overflow: hidden; cursor: pointer;
 }
 .clean-bar-progress { height: 100%; background: #fff; border-radius: 3px; }
-.time-bg { height: 4px; width: 100%; border-radius: 3px; }
+.time-bg {
+    height: 4px; width: 100%; border-radius: 3px;
+    /* Sichtbar bleiben es 4px - als Fingerziel ist das nichts. Apple setzt fuer
+       Beruehrungsziele 44pt an; wer die Leiste verfehlte, traf stattdessen den
+       Grossplayer dahinter. Das ::before darunter vergroessert NUR die Trefferflaeche
+       (18px nach oben und unten), nicht die Optik. Die Positionsrechnung stoert das
+       nicht: sie nutzt ausschliesslich linke Kante und Breite von .time-bg, und beide
+       bleiben unveraendert. overflow muss dafuer sichtbar sein - der Fortschrittsbalken
+       hat denselben border-radius, das Aussehen aendert sich dadurch nicht. */
+    position: relative;
+    overflow: visible;
+    /* Verhindert, dass iOS waehrend des Ziehens seine eigenen Gesten (Scrollen,
+       Zurueck-Wisch) einklinkt und die Beruehrung mitten im Ziehen abbricht. */
+    touch-action: none;
+}
+.time-bg::before {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; top: -18px; bottom: -18px;
+}
 .time-labels {
     display: flex; justify-content: space-between;
     font-size: 12px; font-weight: 500;

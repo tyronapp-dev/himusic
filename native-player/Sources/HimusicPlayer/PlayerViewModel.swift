@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import MediaPlayer
 import UIKit
+import Network
 
 /// Kompletter Player laeuft nativ ueber AVPlayer (nicht WKWebView) - genau das
 /// umgeht die dokumentierte WKWebView-Hintergrund-Audio-Bug-Klasse, die den Grund
@@ -18,7 +19,17 @@ final class PlayerViewModel: ObservableObject {
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
-    private var artworkCache: [Int: MPMediaItemArtwork] = [:]
+    /// NSCache statt Dictionary, und das ist hier kein Detail: ein Cover wird als UIImage
+    /// gehalten, ein 1200x1200-Bild belegt entpackt rund 5,5 MB. Ein Dictionary haette bei
+    /// einer Bibliothek dieser Groesse ueber die Laufzeit hunderte MB angesammelt, ohne je
+    /// etwas freizugeben - iOS haette die App irgendwann im Hintergrund beendet, mitten in der
+    /// Wiedergabe. NSCache gibt bei Speicherdruck von selbst wieder her; das Cover wird dann
+    /// beim naechsten Mal einfach neu geladen.
+    private let artworkCache: NSCache<NSNumber, MPMediaItemArtwork> = {
+        let c = NSCache<NSNumber, MPMediaItemArtwork>()
+        c.countLimit = 60
+        return c
+    }()
 
     /// Fuer welchen Song die kaputte lokale Kopie bereits verworfen und ein zweiter Versuch
     /// vom Server unternommen wurde. Verhindert, dass sich Verwerfen und Neuladen endlos im
@@ -116,6 +127,32 @@ final class PlayerViewModel: ObservableObject {
     private var consecutiveFailures = 0
     private static let maxConsecutiveFailures = 5
 
+    /// Songs, die in DIESER Warteschlange bereits gescheitert sind. Sie werden beim
+    /// Weiterspringen gleich mit uebersprungen, statt jedes Mal erneut zu haengen und einen
+    /// Hinweis zu erzeugen. Bewusst nur zur Laufzeit und pro Warteschlange - ein Song, der
+    /// heute an einer schlechten Verbindung scheiterte, soll morgen wieder versucht werden.
+    private var failedItemIds: Set<Int> = []
+
+    /// In welche Richtung zuletzt navigiert wurde: +1 vorwaerts, -1 rueckwaerts. Entscheidet,
+    /// wohin ein defekter Song uebersprungen wird. Ohne das ging es immer vorwaerts, und wer
+    /// rueckwaerts an einem defekten Song vorbeiwollte, wurde jedes Mal wieder nach vorn
+    /// geworfen.
+    private var lastNavigationStep = 1
+
+    /// Ob gerade ueberhaupt eine Verbindung besteht. Zwei Stellen brauchen das: der zweite
+    /// Abspielversuch ueber die Netzadresse waere ohne Netz reine Zeitverschwendung, und die
+    /// Fehlermeldung an die Seite soll "offline" von "Datei kaputt" unterscheiden koennen -
+    /// das ist fuer den Nutzer der entscheidende Unterschied.
+    private var hasNetwork = true
+    private let pathMonitor = NWPathMonitor()
+
+    private func startNetworkMonitoring() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in self?.hasNetwork = (path.status == .satisfied) }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "himusic.network"))
+    }
+
     var currentItem: QueueItem? {
         queue.indices.contains(currentIndex) ? queue[currentIndex] : nil
     }
@@ -124,6 +161,7 @@ final class PlayerViewModel: ObservableObject {
         configureAudioSession()
         configureRemoteCommands()
         observePlayerTime()
+        startNetworkMonitoring()
         restoreLastSession()
         // Zuverlaessigster Speicherpunkt: feuert garantiert beim Wechsel in den Hintergrund
         // (Home-Geste, App-Wechsel, bevor iOS die App ggf. beendet) - im Gegensatz zu
@@ -240,6 +278,11 @@ final class PlayerViewModel: ObservableObject {
     private func start(with payload: IncomingPayload) {
         queue = payload.queue
         currentIndex = min(max(payload.startIndex, 0), queue.count - 1)
+        // Neue Warteschlange = neuer Anlauf. Ein Song, der beim letzten Mal an einer schlechten
+        // Verbindung scheiterte, soll hier wieder eine Chance bekommen statt stumm zu bleiben.
+        failedItemIds.removeAll()
+        consecutiveFailures = 0
+        lastNavigationStep = 1
         playCurrent()
         prefetchUpcoming()
     }
@@ -262,14 +305,14 @@ final class PlayerViewModel: ObservableObject {
 
     // MARK: - Wiedergabe-Steuerung
 
-    func playCurrent() {
+    func playCurrent(ignoreLocalCopy: Bool = false) {
         guard let item = currentItem else { return }
         playbackToken += 1
         let token = playbackToken
         // Vorlade-Fenster wandert mit der Wiedergabe mit - sonst waere nach den ersten
         // 15 Songs nichts mehr vorgeladen (siehe prefetchUpcoming).
         prefetchUpcoming()
-        Task { await beginPlayback(item, token: token) }
+        Task { await beginPlayback(item, token: token, ignoreLocalCopy: ignoreLocalCopy) }
     }
 
     /// Loest zuerst gegen AudioFileCache auf. Liegt der Song schon lokal, spielt er
@@ -283,10 +326,16 @@ final class PlayerViewModel: ObservableObject {
     ///
     /// autoplay:false nur fuer restoreLastSession() - laedt Song+Cover+Control-Center-Info
     /// vor, ohne loszuspielen, damit ein App-Neustart nichts hoerbar von selbst startet.
-    private func beginPlayback(_ item: QueueItem, token: Int, autoplay: Bool = true) async {
+    /// `ignoreLocalCopy` erzwingt den Weg ueber die Netzadresse, obwohl eine lokale Kopie
+    /// vorliegt. Das ist der zweite Versuch nach einem Fehlschlag - siehe
+    /// handlePlaybackFailure. Die lokale Datei wird dabei ausdruecklich NICHT geloescht,
+    /// sondern erst, wenn dieser Versuch beweist, dass es ohne sie geht.
+    private func beginPlayback(
+        _ item: QueueItem, token: Int, autoplay: Bool = true, ignoreLocalCopy: Bool = false
+    ) async {
         let cache = AudioFileCache.shared
         await cache.markCurrentlyPlaying(id: item.id)
-        let localURL = await cache.localFileURL(forId: item.id)
+        let localURL = ignoreLocalCopy ? nil : await cache.localFileURL(forId: item.id)
         guard token == playbackToken else { return }
         // Ohne abspielbare Adresse ist der Eintrag defekt. Frueher endete das hier in einem
         // stillen return: die Oberflaeche zeigte weiter einen Song, der nie loslief, und ein
@@ -340,7 +389,16 @@ final class PlayerViewModel: ObservableObject {
                 case .readyToPlay:
                     // Ab hier gilt der Song als spielbar - die Fehlerkette ist unterbrochen.
                     self.consecutiveFailures = 0
-                    self.retriedFromRemoteId = nil
+                    self.failedItemIds.remove(item.id)
+                    // Lief dieser Song gerade als zweiter Versuch ueber die Netzadresse, ist
+                    // damit BEWIESEN, dass nur die lokale Kopie kaputt war: der Song selbst
+                    // spielt ja. Erst jetzt darf sie weg - und der Cache laedt sie beim
+                    // naechsten Vorladen sauber neu. Vorher zu loeschen hiess, intakte
+                    // Offline-Kopien auf Verdacht zu vernichten.
+                    if self.retriedFromRemoteId == item.id {
+                        self.retriedFromRemoteId = nil
+                        Task { _ = await AudioFileCache.shared.discardCachedFile(forId: item.id) }
+                    }
                     self.applyPendingSeek()
                     if self.isPlaying && self.player.rate == 0 { self.player.play() }
                 case .failed:
@@ -421,13 +479,19 @@ final class PlayerViewModel: ObservableObject {
 
     /// Ein Song laesst sich nicht abspielen. Zwei Stufen, bewusst in dieser Reihenfolge:
     ///
-    /// 1. Lag eine lokale Kopie vor, ist meistens SIE das Problem und nicht der Song. Der
-    ///    Datei-Cache hat bisher jede Antwort mit Status 200 als gueltige Audiodatei abgelegt -
-    ///    ein abgebrochener Download oder eine Fehlerseite landete damit dauerhaft im Cache, und
-    ///    weil beginPlayback die lokale Datei immer bevorzugt, war so ein Song danach AUCH mit
-    ///    bestem WLAN tot. Die Kopie wird deshalb verworfen und genau einmal vom Server
-    ///    nachgeladen. Das ist der Fall, den man von aussen als "mal geht der Song, mal nicht"
-    ///    wahrnimmt.
+    /// 1. Lag eine lokale Kopie vor, ist oft SIE das Problem und nicht der Song (abgebrochener
+    ///    Download, Fehlerseite als Audiodatei abgelegt). Dann wird derselbe Song noch einmal
+    ///    versucht, diesmal ueber die Netzadresse.
+    ///
+    ///    **Die lokale Datei wird dabei ausdruecklich NICHT geloescht.** Genau das war der
+    ///    Fehler der ersten Fassung: sie flog sofort raus, und wenn der Fehlschlag einen
+    ///    voruebergehenden Grund hatte, war die intakte Offline-Kopie unwiederbringlich weg -
+    ///    ohne Netz liess sie sich nicht neu laden. Songs, die vorher zuverlaessig liefen,
+    ///    verschwanden dadurch. Geloescht wird erst, wenn der Versuch ueber das Netz BEWEIST,
+    ///    dass es ohne die Kopie geht (siehe .readyToPlay-Zweig in beginPlayback).
+    ///
+    ///    Ohne Netz wird dieser Versuch gar nicht erst unternommen - er kann nur scheitern und
+    ///    wuerde den Song unnoetig aus der Warteschlange werfen.
     /// 2. Scheitert auch das, ist der Song wirklich defekt oder die Quelle nicht erreichbar:
     ///    melden (die Seite zeigt es, falls jemand hinschaut) und weiterspringen.
     private func handlePlaybackFailure(for item: QueueItem, reason: String) {
@@ -435,42 +499,65 @@ final class PlayerViewModel: ObservableObject {
         // sonst wirft ein alter Fehler die inzwischen laufende Wiedergabe weiter.
         guard currentItem?.id == item.id else { return }
 
-        if retriedFromRemoteId != item.id, item.fileURL != nil {
+        if retriedFromRemoteId != item.id, item.fileURL != nil, hasNetwork {
             retriedFromRemoteId = item.id
             Task { @MainActor [weak self] in
-                let hadLocalCopy = await AudioFileCache.shared.discardCachedFile(forId: item.id)
-                // Waehrend des Verwerfens kann der Nutzer laengst weitergeschaltet haben.
+                let hasLocalCopy = await AudioFileCache.shared.hasCachedFile(forId: item.id)
                 guard let self, self.currentItem?.id == item.id else { return }
-                if hadLocalCopy {
-                    self.playCurrent()   // zweiter Versuch, jetzt zwangslaeufig vom Server
+                if hasLocalCopy {
+                    self.playCurrent(ignoreLocalCopy: true)
                 } else {
                     self.reportAndSkip(item, reason: reason)
                 }
             }
             return
         }
-        reportAndSkip(item, reason: reason)
+        reportAndSkip(item, reason: hasNetwork ? reason : "\(reason) (offline)")
     }
 
     private func reportAndSkip(_ item: QueueItem, reason: String) {
         onPlaybackFailed?(item, reason)
+        failedItemIds.insert(item.id)
         consecutiveFailures += 1
+
+        // In die Richtung weiterspringen, in die der Nutzer zuletzt navigiert hat. Die erste
+        // Fassung sprang IMMER vorwaerts - wer von einem defekten Song aus zurueckwollte,
+        // landete dadurch sofort wieder vor ihm und kam nie an den Song davor. Rueckwaerts
+        // durch eine Luecke von defekten Songs zu kommen war damit unmoeglich.
+        let step = lastNavigationStep
+        var ziel = currentIndex + step
+
+        // Bereits als defekt bekannte Songs gleich mit ueberspringen, statt sie einzeln
+        // scheitern zu lassen - jeder Versuch kostet sonst Wartezeit und einen Toast.
+        while queue.indices.contains(ziel), failedItemIds.contains(queue[ziel].id) {
+            ziel += step
+        }
 
         // Reissleine (siehe consecutiveFailures): lieber sichtbar stehenbleiben als die ganze
         // Warteschlange lautlos durchrasen und am Ende ohne Erklaerung stumm sein.
-        guard consecutiveFailures < Self.maxConsecutiveFailures, currentIndex + 1 < queue.count else {
+        guard consecutiveFailures < Self.maxConsecutiveFailures, queue.indices.contains(ziel) else {
             player.pause()
             isPlaying = false
             updateNowPlayingInfo()
             notifyNowPlayingChanged()
             return
         }
-        currentIndex += 1
+        currentIndex = ziel
         playCurrent()
+    }
+
+    /// Jeder echte Songwechsel verwirft einen noch offenen Positionssprung. Sonst wandert er
+    /// auf den naechsten Song weiter: wer auf der Zeitleiste zieht, waehrend das Stueck noch
+    /// laedt, und dann weiterschaltet, landete im NAECHSTEN Song an der gezogenen Stelle
+    /// mitten im Lied. Der Sprung galt dem Song, den man vor sich hatte - nicht dem danach.
+    private func forgetPendingSeek() {
+        pendingSeekSeconds = nil
     }
 
     func next() {
         guard currentIndex + 1 < queue.count else { return }
+        lastNavigationStep = 1
+        forgetPendingSeek()
         currentIndex += 1
         playCurrent()
     }
@@ -506,6 +593,8 @@ final class PlayerViewModel: ObservableObject {
     /// im "Verlauf"-Teil der Ansicht (alles vor currentIndex).
     func jumpTo(_ index: Int) {
         guard queue.indices.contains(index) else { return }
+        lastNavigationStep = index >= currentIndex ? 1 : -1
+        forgetPendingSeek()
         currentIndex = index
         playCurrent()
     }
@@ -541,6 +630,8 @@ final class PlayerViewModel: ObservableObject {
             player.seek(to: .zero)
             return
         }
+        lastNavigationStep = -1
+        forgetPendingSeek()
         currentIndex -= 1
         playCurrent()
     }
@@ -553,6 +644,8 @@ final class PlayerViewModel: ObservableObject {
             player.seek(to: .zero)
             return
         }
+        lastNavigationStep = -1
+        forgetPendingSeek()
         currentIndex -= 1
         playCurrent()
     }
@@ -700,19 +793,38 @@ final class PlayerViewModel: ObservableObject {
         if let duration = player.currentItem?.duration.seconds, duration.isFinite, duration > 0 {
             info[MPMediaItemPropertyPlaybackDuration] = duration
         }
-        if let artwork = artworkCache[item.id] {
+        if let artwork = artworkCache.object(forKey: NSNumber(value: item.id)) {
             info[MPMediaItemPropertyArtwork] = artwork
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
+    /// Hebt die Aufloesung von iTunes-Cover-Adressen an. Die Bibliothek speichert sie als
+    /// ".../600x600bb.jpg" (siehe app2.js, wo artworkUrl100 schon einmal hochgesetzt wird) -
+    /// die Groesse steht im Pfad und laesst sich einfach austauschen. Fuer die kleine
+    /// Mini-Leiste reichten 600px; seit iOS den Sperrbildschirm gross und flaechig zeichnet,
+    /// ist das sichtbar unscharf. Andere Adressen bleiben unveraendert.
+    private func highResCoverURL(_ url: URL) -> URL {
+        let s = url.absoluteString
+        guard s.contains("mzstatic.com") else { return url }
+        for groesse in ["600x600bb", "300x300bb", "100x100bb"] where s.contains(groesse) {
+            return URL(string: s.replacingOccurrences(of: groesse, with: "1200x1200bb")) ?? url
+        }
+        return url
+    }
+
     private func loadArtworkIfNeeded(for item: QueueItem) {
-        guard artworkCache[item.id] == nil, let url = item.coverURL else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        guard artworkCache.object(forKey: NSNumber(value: item.id)) == nil,
+              let url = item.coverURL else { return }
+        let request = URLRequest(url: highResCoverURL(url))
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             guard let self, let data, let image = UIImage(data: data) else { return }
+            // boundsSize muss die ECHTE Bildgroesse sein - daran erkennt iOS, wie gross es das
+            // Cover darstellen darf. Ein zu klein gemeldetes Artwork zeichnet das System nicht
+            // hoch, es zeigt es einfach klein.
             let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
             Task { @MainActor in
-                self.artworkCache[item.id] = artwork
+                self.artworkCache.setObject(artwork, forKey: NSNumber(value: item.id))
                 if self.currentItem?.id == item.id {
                     self.updateNowPlayingInfo()
                 }
