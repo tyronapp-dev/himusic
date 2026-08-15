@@ -231,6 +231,12 @@ function _nativeBridge() {
 window._applyNativeNowPlaying = function(payload) {
     if (!payload || payload.id == null) return;
     const song = window._songIndex && window._songIndex.get ? window._songIndex.get(payload.id) : null;
+    // Diese Funktion laeuft NICHT nur beim Songwechsel, sondern auch bei jedem Play/Pause und
+    // bei jedem Resync (Vordergrund-Comeback, Seiten-Reload). Alles, was nur bei einem echten
+    // Songwechsel zurueckgesetzt werden darf - allen voran die gemessene Songdauer - haengt
+    // deshalb an diesem Vergleich. Ohne ihn haette schon ein Druck auf Pause die echte Dauer
+    // wieder durch den ungenauen Datenbankwert ersetzt.
+    const istSongwechsel = window.currentPlayingSongId !== payload.id;
     window.currentPlayingSongId = payload.id;
     window.currentContextSongId = payload.id;
     window.currentSongData = {
@@ -278,17 +284,33 @@ window._applyNativeNowPlaying = function(payload) {
     // undefined - dann bleibt der bisherige Wert stehen statt faelschlich geleert zu werden.
     if (payload.s !== undefined) window._nativeSourceLabel = payload.s || '';
 
-    // Dauer beim Songwechsel sofort mitziehen. Ohne das behielt currentSongDuration den Wert
-    // des VORIGEN Songs, bis der erste Fortschritts-Push kam - und der kommt nur, waehrend der
-    // grosse Player offen ist. Die Scrub-Leiste rechnet die Tippposition gegen genau diese
-    // Dauer um: war sie 0, kam gar kein Sprung zustande, war sie die des vorigen Songs, landete
-    // er an der falschen Stelle. Der native Push korrigiert gleich darauf auf die echte Dauer.
-    window.currentSongDuration = (song && song.duration) ? song.duration : 0;
+    // Dauer beim Songwechsel mitziehen, damit nicht die des VORIGEN Songs stehenbleibt.
+    //
+    // Das hier ist aber nur ein NOTBEHELF aus der Datenbank, bis der native Player seine
+    // echte Dauer meldet - und es ist wichtig, die beiden auseinanderzuhalten: der DB-Wert
+    // stammt aus Metadaten und ist oft gerundet oder schlicht etwas zu kurz. Die Zeitleiste
+    // rechnet die Tippposition als Anteil dieser Dauer um; ist sie zu kurz, landet JEDER
+    // Sprung ein Stueck zu frueh. Genau das passierte, als dieser Wert den nativen ueberschrieb.
+    if (istSongwechsel) {
+        window._durationIsFromNative = false;
+        window.currentSongDuration = (song && song.duration) ? song.duration : 0;
+    }
 
-    // Ein noch offener Positionssprung galt dem VORIGEN Song. Bliebe die Sperre stehen, wuerde
-    // sie die Zeitanzeige des neuen Songs blockieren, bis sie von selbst ablaeuft.
-    window._seekTargetSeconds = null;
-    window._seekGuardUntil = 0;
+    // Gemessene Dauer, sobald die Huelle sie kennt (0 = steht noch nicht fest). Sie hat immer
+    // Vorrang vor dem Datenbankwert - auch ausserhalb eines Songwechsels, denn sie trifft
+    // typischerweise genau dann ein, wenn die Datei fertig geladen ist.
+    if (payload.d && payload.d > 0) {
+        window.currentSongDuration = payload.d;
+        window._durationIsFromNative = true;
+    }
+
+    if (istSongwechsel) {
+
+        // Ein noch offener Positionssprung galt dem VORIGEN Song. Bliebe die Sperre stehen,
+        // wuerde sie die Zeitanzeige des neuen Songs blockieren, bis sie von selbst ablaeuft.
+        window._seekTargetSeconds = null;
+        window._seekGuardUntil = 0;
+    }
 
     if (typeof window.updatePlayPauseIcons === 'function') window.updatePlayPauseIcons(!!payload.isPlaying);
     if (typeof window.updateActiveHighlights === 'function') window.updateActiveHighlights();
@@ -310,11 +332,14 @@ window._seekTargetSeconds = null;
 window._seekGuardUntil = 0;
 
 window._applyNativeProgress = function(current, duration) {
-    // Echte Songdauer vom nativen Player merken. handleScrub() im grossen Player braucht sie,
-    // um aus der Tippposition eine Zielzeit zu rechnen - das lokale <audio> ist in der Huelle
-    // inert und liefert keine, und song.duration aus der Datenbank fehlt bei manchen Songs
-    // ganz. Ohne Dauer brach das Scrubben still ab und der Tipp blieb wirkungslos.
-    if (duration && isFinite(duration) && duration > 0) window.currentSongDuration = duration;
+    // Echte Songdauer vom nativen Player. Sie hat IMMER Vorrang vor dem Datenbankwert und
+    // wird ab hier nicht mehr von ihm ueberschrieben (siehe _durationIsFromNative in
+    // _applyNativeNowPlaying): der Player misst die Datei, die Datenbank hat nur, was beim
+    // Import in den Metadaten stand. Weicht das ab, springt die Zeitleiste systematisch daneben.
+    if (duration && isFinite(duration) && duration > 0) {
+        window.currentSongDuration = duration;
+        window._durationIsFromNative = true;
+    }
 
     if (window._seekTargetSeconds !== null) {
         const angekommen = Math.abs(current - window._seekTargetSeconds) < 1.5;

@@ -172,9 +172,15 @@ struct WebShellView: UIViewRepresentable {
             // "s" ist die Herkunft, die BEIM SONG haengt (siehe QueueItem). Die Seite leitet
             // sie nicht mehr selbst aus einer eigenen Variable ab - die blieb bei nativen
             // Songwechseln stehen und behauptete danach eine falsche Quelle.
+            // "d" ist die GEMESSENE Songdauer. Sie muss hier mit, nicht erst im
+            // Sekundentakt-Push: die Zeitleiste rechnet die Tippposition als Anteil der Dauer
+            // um, und bis der erste Fortschritts-Push kam, haette sie nur den ungenauen
+            // Datenbankwert - ein Sprung direkt nach dem Songwechsel landete dann daneben.
+            // 0 heisst "noch nicht bekannt" (Datei laedt noch), dann bleibt der Notbehelf.
             let payload: [String: Any] = [
                 "id": item.id, "t": item.title, "a": item.artist,
                 "u": item.u, "c": item.c ?? "", "s": item.sourceLabel ?? "",
+                "d": player.currentItemDurationSeconds,
                 "isPlaying": isPlaying
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: payload),

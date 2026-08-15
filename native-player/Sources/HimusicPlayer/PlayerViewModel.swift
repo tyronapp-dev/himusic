@@ -19,17 +19,26 @@ final class PlayerViewModel: ObservableObject {
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
-    /// NSCache statt Dictionary, und das ist hier kein Detail: ein Cover wird als UIImage
-    /// gehalten, ein 1200x1200-Bild belegt entpackt rund 5,5 MB. Ein Dictionary haette bei
-    /// einer Bibliothek dieser Groesse ueber die Laufzeit hunderte MB angesammelt, ohne je
-    /// etwas freizugeben - iOS haette die App irgendwann im Hintergrund beendet, mitten in der
-    /// Wiedergabe. NSCache gibt bei Speicherdruck von selbst wieder her; das Cover wird dann
-    /// beim naechsten Mal einfach neu geladen.
-    private let artworkCache: NSCache<NSNumber, MPMediaItemArtwork> = {
-        let c = NSCache<NSNumber, MPMediaItemArtwork>()
-        c.countLimit = 60
-        return c
-    }()
+    /// Cover des GERADE laufenden Songs, bewusst stark gehalten und bewusst nur EINS.
+    ///
+    /// Vorgeschichte, zwei Fehlversuche: erst ein Dictionary ueber alle Songs - das wuchs
+    /// unbegrenzt (ein entpacktes 1200x1200-Bild belegt rund 5,5 MB, bei dieser Bibliothek
+    /// summiert sich das auf hunderte MB, bis iOS die App im Hintergrund abschiesst). Dann
+    /// NSCache - der loest das Speicherproblem, **raeumt aber genau im falschen Moment**: er
+    /// gibt Objekte frei, sobald die App in den Hintergrund geht. Das ist exakt der Moment, in
+    /// dem der Sperrbildschirm das Cover braucht. Ergebnis war ein Cover, das mal da war und
+    /// mal nicht.
+    ///
+    /// Loesung ohne beide Nachteile: nur das aktuelle Cover halten. Es wird ohnehin nur eins
+    /// gleichzeitig angezeigt, ein Songwechsel laedt das naechste. Speicherbedarf bleibt bei
+    /// rund 5 MB statt hunderten, und weggeraeumt wird es von niemandem.
+    private var currentArtwork: MPMediaItemArtwork?
+    private var currentArtworkItemId: Int?
+    private var artworkLoadingForId: Int?
+    /// Song, fuer den das Cover nachweislich nicht zu holen war (Adresse tot, kein Netz).
+    /// Ohne diese Merkung wuerde der Sekundentakt aus updateNowPlayingInfo() es endlos neu
+    /// versuchen - ohne Netz waere das ein Netzabruf pro Sekunde, dauerhaft.
+    private var artworkFailedForId: Int?
 
     /// Fuer welchen Song die kaputte lokale Kopie bereits verworfen und ein zweiter Versuch
     /// vom Server unternommen wurde. Verhindert, dass sich Verwerfen und Neuladen endlos im
@@ -148,13 +157,32 @@ final class PlayerViewModel: ObservableObject {
 
     private func startNetworkMonitoring() {
         pathMonitor.pathUpdateHandler = { [weak self] path in
-            Task { @MainActor in self?.hasNetwork = (path.status == .satisfied) }
+            Task { @MainActor in
+                guard let self else { return }
+                let hatteNetz = self.hasNetwork
+                self.hasNetwork = (path.status == .satisfied)
+                // Verbindung kommt zurueck: ein Cover, das vorher mangels Netz nicht zu holen
+                // war, jetzt nachholen statt bis zum naechsten Songwechsel ohne dazustehen.
+                if !hatteNetz, self.hasNetwork {
+                    self.artworkFailedForId = nil
+                    if let item = self.currentItem { self.loadArtworkIfNeeded(for: item) }
+                }
+            }
         }
         pathMonitor.start(queue: DispatchQueue(label: "himusic.network"))
     }
 
     var currentItem: QueueItem? {
         queue.indices.contains(currentIndex) ? queue[currentIndex] : nil
+    }
+
+    /// Gemessene Dauer des laufenden Stuecks, 0 solange sie nicht feststeht (Datei laedt noch,
+    /// bei einer Netzadresse ist sie bis dahin "indefinite"). Die Seite braucht sie fuer die
+    /// Zeitleiste und darf sich nicht auf den Datenbankwert verlassen - der stammt aus
+    /// Metadaten und weicht ab.
+    var currentItemDurationSeconds: Double {
+        guard let d = player.currentItem?.duration.seconds, d.isFinite, d > 0 else { return 0 }
+        return d
     }
 
     init() {
@@ -401,6 +429,10 @@ final class PlayerViewModel: ObservableObject {
                     }
                     self.applyPendingSeek()
                     if self.isPlaying && self.player.rate == 0 { self.player.play() }
+                    // Jetzt - und erst jetzt - steht die gemessene Songdauer fest. Der Seite
+                    // Bescheid geben, damit ihre Zeitleiste sofort mit dem richtigen Wert
+                    // rechnet statt bis zum naechsten Sekundentakt mit dem Datenbankwert.
+                    self.notifyNowPlayingChanged()
                 case .failed:
                     let reason = observed.error?.localizedDescription ?? "Datei nicht lesbar"
                     self.handlePlaybackFailure(for: item, reason: reason)
@@ -416,6 +448,9 @@ final class PlayerViewModel: ObservableObject {
             isPlaying = true
         }
         updateNowPlayingInfo()
+        // Jeder Songstart ist ein frischer Anlauf fuers Cover - eine Merkung aus einem
+        // frueheren Versuch (z.B. damals kein Netz) soll ihn nicht blockieren.
+        artworkFailedForId = nil
         loadArtworkIfNeeded(for: item)
         notifyNowPlayingChanged()
     }
@@ -793,8 +828,14 @@ final class PlayerViewModel: ObservableObject {
         if let duration = player.currentItem?.duration.seconds, duration.isFinite, duration > 0 {
             info[MPMediaItemPropertyPlaybackDuration] = duration
         }
-        if let artwork = artworkCache.object(forKey: NSNumber(value: item.id)) {
+        if let artwork = currentArtwork, currentArtworkItemId == item.id {
             info[MPMediaItemPropertyArtwork] = artwork
+        } else {
+            // Kein Cover zur Hand: nachladen anstossen statt das Feld einfach wegzulassen.
+            // Diese Methode laeuft jede Sekunde; ohne den Anstoss blieb der Sperrbildschirm
+            // dauerhaft ohne Cover, sobald es einmal fehlte - genau das passierte, als der
+            // Speicher-Cache es im Hintergrund weggeraeumt hatte.
+            loadArtworkIfNeeded(for: item)
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
@@ -804,7 +845,7 @@ final class PlayerViewModel: ObservableObject {
     /// die Groesse steht im Pfad und laesst sich einfach austauschen. Fuer die kleine
     /// Mini-Leiste reichten 600px; seit iOS den Sperrbildschirm gross und flaechig zeichnet,
     /// ist das sichtbar unscharf. Andere Adressen bleiben unveraendert.
-    private func highResCoverURL(_ url: URL) -> URL {
+    private static func highResCoverURL(_ url: URL) -> URL {
         let s = url.absoluteString
         guard s.contains("mzstatic.com") else { return url }
         for groesse in ["600x600bb", "300x300bb", "100x100bb"] where s.contains(groesse) {
@@ -814,21 +855,47 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func loadArtworkIfNeeded(for item: QueueItem) {
-        guard artworkCache.object(forKey: NSNumber(value: item.id)) == nil,
+        guard currentArtworkItemId != item.id || currentArtwork == nil else { return }
+        // updateNowPlayingInfo() laeuft im Sekundentakt und stoesst das Laden an, solange kein
+        // Cover da ist. Ohne diesen Riegel waere das ein Netzabruf pro Sekunde.
+        guard artworkLoadingForId != item.id, artworkFailedForId != item.id,
               let url = item.coverURL else { return }
-        let request = URLRequest(url: highResCoverURL(url))
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
-            guard let self, let data, let image = UIImage(data: data) else { return }
-            // boundsSize muss die ECHTE Bildgroesse sein - daran erkennt iOS, wie gross es das
-            // Cover darstellen darf. Ein zu klein gemeldetes Artwork zeichnet das System nicht
-            // hoch, es zeigt es einfach klein.
-            let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-            Task { @MainActor in
-                self.artworkCache.setObject(artwork, forKey: NSNumber(value: item.id))
-                if self.currentItem?.id == item.id {
-                    self.updateNowPlayingInfo()
+        artworkLoadingForId = item.id
+
+        Task { [weak self] in
+            let image = await Self.ladeBild(von: Self.highResCoverURL(url), rueckfallAuf: url)
+            await MainActor.run {
+                guard let self else { return }
+                self.artworkLoadingForId = nil
+                guard let image, self.currentItem?.id == item.id else {
+                    // Nur merken, wenn es wirklich dieser Song war, der nicht geladen werden
+                    // konnte - nicht, wenn inzwischen ein anderer laeuft.
+                    if image == nil, self.currentItem?.id == item.id { self.artworkFailedForId = item.id }
+                    return
                 }
+                // boundsSize muss die ECHTE Bildgroesse sein - daran erkennt iOS, wie gross es
+                // das Cover darstellen darf. Ein zu klein gemeldetes Artwork zeichnet das
+                // System nicht hoch, es zeigt es einfach klein.
+                self.currentArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                self.currentArtworkItemId = item.id
+                self.updateNowPlayingInfo()
             }
-        }.resume()
+        }
+    }
+
+    /// Laedt das Cover in hoher Aufloesung und faellt auf die Originaladresse zurueck, wenn es
+    /// die nicht gibt. Der Rueckfall ist nicht optional: die hochskalierte Adresse ist geraten
+    /// (Groesse im Pfad ausgetauscht), und wenn der Bildserver genau diese Groesse nicht
+    /// vorhaelt, gaebe es sonst GAR KEIN Cover statt eines etwas kleineren.
+    private static func ladeBild(von hoch: URL, rueckfallAuf original: URL) async -> UIImage? {
+        if let (data, response) = try? await URLSession.shared.data(from: hoch),
+           (response as? HTTPURLResponse)?.statusCode == 200,
+           let image = UIImage(data: data) {
+            return image
+        }
+        guard hoch != original,
+              let (data, response) = try? await URLSession.shared.data(from: original),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return UIImage(data: data)
     }
 }
