@@ -429,9 +429,18 @@ final class PlayerViewModel: ObservableObject {
                     }
                     self.applyPendingSeek()
                     if self.isPlaying && self.player.rate == 0 { self.player.play() }
-                    // Jetzt - und erst jetzt - steht die gemessene Songdauer fest. Der Seite
-                    // Bescheid geben, damit ihre Zeitleiste sofort mit dem richtigen Wert
-                    // rechnet statt bis zum naechsten Sekundentakt mit dem Datenbankwert.
+                    // Jetzt - und erst jetzt - steht die gemessene Songdauer fest. Zwei
+                    // Empfaenger brauchen sie:
+                    //
+                    // (1) Der SPERRBILDSCHIRM. updateNowPlayingInfo() setzt die Dauer nur, wenn
+                    //     sie bekannt ist - beim ersten Song nach dem Start war sie das noch
+                    //     nicht, und danach lief nichts mehr, was die Info erneuert haette:
+                    //     der Sekundentakt-Beobachter feuert nur waehrend laufender Wiedergabe.
+                    //     Ergebnis war eine Fortschrittsleiste ohne Zeitangaben links und
+                    //     rechts, die sich erst beim naechsten Songwechsel von selbst heilte.
+                    // (2) Die SEITE, damit ihre Zeitleiste sofort mit dem gemessenen Wert
+                    //     rechnet statt bis zum naechsten Sekundentakt mit dem Datenbankwert.
+                    self.updateNowPlayingInfo()
                     self.notifyNowPlayingChanged()
                 case .failed:
                     let reason = observed.error?.localizedDescription ?? "Datei nicht lesbar"
@@ -700,12 +709,27 @@ final class PlayerViewModel: ObservableObject {
     ///    ihn zu verlieren, wird er wie beim Sitzungs-Wiederherstellen vorgemerkt und greift,
     ///    sobald das Item bereit ist (siehe pendingSeekSeconds).
     func seek(toSeconds seconds: Double) {
-        let target = max(0, seconds)
         guard let item = player.currentItem, item.status == .readyToPlay else {
-            pendingSeekSeconds = target
+            pendingSeekSeconds = max(0, seconds)
             return
         }
-        seekExactly(to: target)
+
+        // GEGEN DAS SONGENDE BEGRENZEN. Ohne diese Grenze hatte ein Sprung hinter das
+        // Dateiende eine drastische Nebenwirkung: AVPlayer landet am Ende, feuert
+        // AVPlayerItemDidPlayToEndTime, und der daran haengende Beobachter schaltet zum
+        // NAECHSTEN SONG. Fuer den Nutzer sah ein Tipp auf die Zeitleiste dadurch aus wie ein
+        // Weiterschalten - und zwar unberechenbar mal so, mal so.
+        //
+        // Dass die Seite ueberhaupt eine zu grosse Zahl schicken kann, liegt an der Songdauer,
+        // gegen die sie die Tippposition umrechnet: bis der Player seine gemessene Dauer
+        // gemeldet hat, gilt der Wert aus der Datenbank, und der stammt aus Import-Metadaten.
+        // Ist er LAENGER als die Datei, liegt das Sprungziel hinter deren Ende. Der Seite ist
+        // das inzwischen ausgetrieben (gemessene Dauer hat Vorrang), aber die Grenze gehoert
+        // trotzdem hierher: der Player darf sich nicht darauf verlassen, dass der Aufrufer
+        // richtig rechnet. seek(byDelta:) macht das laengst so - nur der absolute Sprung nicht.
+        let duration = item.duration.seconds
+        let obergrenze = (duration.isFinite && duration > 0) ? duration - 0.5 : seconds
+        seekExactly(to: max(0, min(seconds, obergrenze)))
     }
 
     private func seekExactly(to seconds: Double) {
@@ -888,6 +912,15 @@ final class PlayerViewModel: ObservableObject {
     /// (Groesse im Pfad ausgetauscht), und wenn der Bildserver genau diese Groesse nicht
     /// vorhaelt, gaebe es sonst GAR KEIN Cover statt eines etwas kleineren.
     private static func ladeBild(von hoch: URL, rueckfallAuf original: URL) async -> UIImage? {
+        // Selbst hochgeladene Cover kommen als data:-URI herein (im Tag-Editor per
+        // FileReader.readAsDataURL erzeugt). URLSession kann dieses Schema NICHT laden - ein
+        // dataTask darauf scheitert schlicht, und genau deshalb blieb der Sperrbildschirm bei
+        // eigenen Bildern leer, obwohl die App sie anzeigte. Data(contentsOf:) dekodiert sie
+        // direkt, ohne Netzzugriff.
+        if original.scheme == "data" {
+            guard let data = try? Data(contentsOf: original) else { return nil }
+            return UIImage(data: data)
+        }
         if let (data, response) = try? await URLSession.shared.data(from: hoch),
            (response as? HTTPURLResponse)?.statusCode == 200,
            let image = UIImage(data: data) {

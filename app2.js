@@ -87,6 +87,48 @@ function _extractMainVibes(v) {
 // frei wählbar) und landen an vielen Stellen per innerHTML im DOM. Ohne Escaping wäre ein
 // Videotitel wie `<img src=x onerror=...>` gespeicherter XSS, der bei jedem Rendern der Liste
 // ausgeführt wird. IMMER durch diese Funktion schicken, bevor Songdaten in innerHTML landen.
+// Selbst hochgeladene Cover auf ein vernuenftiges Mass bringen, BEVOR sie als data:-URI in
+// der Datenbank landen. Ein Foto direkt aus der iPhone-Mediathek ist mehrere Megabyte gross;
+// eingebettet als Text wird daraus noch etwa ein Drittel mehr. Das hat drei Folgen, die alle
+// real aufgetreten sind: die Songliste wird beim Rendern spuerbar traeger, der lokale
+// Songlisten-Schnappschuss sprengt das Speicherlimit von localStorage (und faellt dann auf
+// die abgespeckte Fassung ohne Cover zurueck), und auf dem Sperrbildschirm blieb das Bild
+// ganz weg, weil solche Cover die Groessengrenze der Bruecke rissen.
+//
+// 1000px lange Kante als JPEG mit Qualitaet 0,85 landet typischerweise bei 100-200 KB - fuer
+// ein Albumcover mehr als genug, auch auf einem grossen Sperrbildschirm. Schlaegt das
+// Verkleinern fehl (exotisches Format, kaputte Datei), wird das Original genommen statt gar
+// nichts: lieber ein zu grosses Cover als keins.
+function _coverAufMassBringen(file, maxKante = 1000, qualitaet = 0.85) {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onerror = () => resolve('');
+        reader.onload = (ev) => {
+            const original = ev.target.result;
+            const img = new Image();
+            img.onerror = () => resolve(original);
+            img.onload = () => {
+                try {
+                    const faktor = Math.min(1, maxKante / Math.max(img.width, img.height));
+                    // Schon klein genug: nicht neu kodieren, das koennte nur schlechter werden.
+                    if (faktor >= 1 && original.length <= 250 * 1024) return resolve(original);
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.round(img.width * faktor);
+                    canvas.height = Math.round(img.height * faktor);
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    const klein = canvas.toDataURL('image/jpeg', qualitaet);
+                    resolve(klein.length < original.length ? klein : original);
+                } catch (err) {
+                    resolve(original);
+                }
+            };
+            img.src = original;
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
 function _esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -536,7 +578,10 @@ function _enqueueSongNext(song) {
                 t: song.title || 'Unbekannt',
                 a: song.artist || '',
                 u: url,
-                c: (cover && cover.startsWith('http')) ? cover : null,
+                // Wie in _tryNativePlayerHandoff: ueber die Bruecke duerfen auch selbst
+                // hochgeladene Cover (data:-URI) mit, sonst fehlt bei genau diesen Songs
+                // das Bild auf dem Sperrbildschirm.
+                c: (cover && (cover.startsWith('http') || cover.startsWith('data:image/'))) ? cover : null,
                 // Leer, nicht weggelassen: dieser Song kommt aus keiner Quelle, er wurde von
                 // Hand eingereiht. Weil die Herkunft am Song haengt, bleibt sie auch dann
                 // richtig, wenn die Seite zwischendurch neu geladen wird - die frueher dafuer
@@ -579,12 +624,34 @@ function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     // gar nicht mehr auseinanderlaufen. Siehe QueueItem.swift.
     const sourceLabel = _sourceLabelForBadge();
 
+    // Cover: ueber die BRUECKE duerfen auch selbst hochgeladene Bilder mit, die als
+    // data:-URI in cover_data liegen (FileReader.readAsDataURL im Tag-Editor). Bisher fielen
+    // die hier auf null - deshalb blieb der Sperrbildschirm bei genau diesen Songs ohne
+    // Cover, obwohl in der App eins zu sehen war. Die alte Beschraenkung auf http(s) stammt
+    // vom URL-Weg (himusicplayer://), wo ein eingebettetes Bild die Adresslaenge sprengen
+    // wuerde; ueber postMessage gibt es diese Grenze nicht. Deshalb unterscheidet _coverFor
+    // nach Weg statt pauschal zu kappen.
+    //
+    // Das Groessenlimit ist dabei kein Schoenheitsdetail, sondern Pflicht: hier geht die
+    // KOMPLETTE Warteschlange rueber (bei "zufaellig abspielen" ueber 2000 Songs), und ein
+    // eingebettetes Handyfoto ist schnell 4 MB gross. Ohne Deckel entstuende im schlimmsten
+    // Fall ein JSON-String von hunderten MB - die App waere beim Starten einer grossen Liste
+    // schlicht weg. 250 KB reichen fuer ein sauberes Cover; alles darueber wird ausgelassen
+    // (der Song laeuft normal, nur ohne Bild auf dem Sperrbildschirm).
+    const COVER_DATA_MAX = 250 * 1024;
+    const _coverFor = (coverUrl) => {
+        if (!coverUrl) return null;
+        if (coverUrl.startsWith('http')) return coverUrl;
+        if (bridge && coverUrl.startsWith('data:image/') && coverUrl.length <= COVER_DATA_MAX) return coverUrl;
+        return null;
+    };
+
     const toItem = (id, title, artist, fileUrl, coverUrl) => ({
         id: id ?? 0,
         t: title || 'Unbekannt',
         a: artist || '',
         u: remoteUrl(id, fileUrl),
-        c: (coverUrl && coverUrl.startsWith('http')) ? coverUrl : null,
+        c: _coverFor(coverUrl),
         s: sourceLabel
     });
 
@@ -2551,11 +2618,10 @@ let _bgCacheActive = false;
 
     if (editCoverBtn) editCoverBtn.addEventListener('click', () => editCoverUpload.click());
     if (editCoverUpload) {
-        editCoverUpload.addEventListener('change', (e) => {
+        editCoverUpload.addEventListener('change', async (e) => {
             const file = e.target.files[0]; if (!file) return;
-            const reader = new FileReader();
-            reader.onload = function(event) { currentEditCoverData = event.target.result; editCoverPreview.src = currentEditCoverData; };
-            reader.readAsDataURL(file);
+            currentEditCoverData = await _coverAufMassBringen(file);
+            editCoverPreview.src = currentEditCoverData;
         });
     }
 
@@ -3239,8 +3305,12 @@ async function createNewPlaylistProcess() {
     });
 
     document.getElementById('edit-playlist-cover-btn')?.addEventListener('click', () => document.getElementById('edit-playlist-cover-upload').click());
-    document.getElementById('edit-playlist-cover-upload')?.addEventListener('change', (e) => {
-        const file = e.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = function(event) { currentEditPlaylistCoverData = event.target.result; document.getElementById('edit-playlist-cover-preview').src = currentEditPlaylistCoverData; }; reader.readAsDataURL(file);
+    document.getElementById('edit-playlist-cover-upload')?.addEventListener('change', async (e) => {
+        // Gleiche Verkleinerung wie beim Song-Cover - Playlist-Bilder landen ebenso als
+        // data:-URI in der Datenbank und im Songlisten-Schnappschuss.
+        const file = e.target.files[0]; if (!file) return;
+        currentEditPlaylistCoverData = await _coverAufMassBringen(file);
+        document.getElementById('edit-playlist-cover-preview').src = currentEditPlaylistCoverData;
     });
 
     document.getElementById('btn-save-playlist')?.addEventListener('click', async () => {
