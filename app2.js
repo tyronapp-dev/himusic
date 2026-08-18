@@ -5323,20 +5323,38 @@ async function _dispatchYtFallbackOnly(item) {
 // laufenden Runner welchen Song fertigstellt, ist von aussen nicht erkennbar. Die ANZAHL
 // stimmt, und darauf kommt es an. Vorher meldeten alle wartenden Eintraege gleichzeitig
 // "fertig", sobald irgendein Song ankam, weil jede Schleife dieselbe Bedingung sah.
+// "starting" waehrend des ersten (await-behafteten) Abgleichs, danach die echte Interval-ID -
+// beides gilt als "laeuft schon" fuer die Wiedereintritts-Sperre oben.
 let _ytFallbackWatchId = null;
-function _watchForFallbackResults() {
+async function _watchForFallbackResults() {
     if (_ytFallbackWatchId) return;
+    _ytFallbackWatchId = 'starting';
     let elapsed = 0;
-    const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
-    _ytFallbackWatchId = setInterval(async () => {
-        elapsed += 15;
+
+    // Bewusst per frischem /songs-Abruf statt window.globalSongsData: dieselbe Funktion wird
+    // auch beim Seitenladen wieder aufgerufen, um verwaiste fallback_pending-Eintraege
+    // uebernommen aus einer VORHERIGEN Sitzung weiter zu beobachten (siehe Aufruf unten am
+    // Dateiende). In dem Moment ist globalSongsData oft noch leer/veraltet, weil die
+    // Bibliothek gerade erst laedt - ein leeres knownIds haette dann JEDEN laengst
+    // importierten YouTube-Song als "gerade neu fertig" gezaehlt und wahllos Eintraege als
+    // erledigt markiert, unabhaengig davon, ob sie das wirklich sind.
+    async function fetchKnownIds() {
+        try {
+            const res = await _apiFetch(`${API_URL}/songs`);
+            if (res.ok) return new Set((await res.json()).map(s => s.id));
+        } catch (e) {}
+        return new Set((window.globalSongsData || []).map(s => s.id));
+    }
+    const knownIds = await fetchKnownIds();
+
+    async function tick() {
         const waiting = _ytQueueState.filter(i => i.clientState === 'fallback_pending');
         if (waiting.length === 0 || elapsed > 600) {
             clearInterval(_ytFallbackWatchId); _ytFallbackWatchId = null;
             // Nach zehn Minuten ohne Ergebnis: als fehlgeschlagen markieren, damit die
             // Eintraege nicht ewig auf "laeuft" stehen bleiben (und per Wiederholen-Knopf
             // erneut versucht werden koennen).
-            if (elapsed > 600) {
+            if (elapsed > 600 && waiting.length > 0) {
                 waiting.forEach(i => { i.clientState = 'fallback_failed'; i.errorMessage = 'Nicht angekommen'; i.updatedAt = Date.now(); });
                 _saveAndRenderYtQueue();
             }
@@ -5353,7 +5371,14 @@ function _watchForFallbackResults() {
             waiting.slice(0, fresh.length).forEach(i => { i.clientState = 'fallback_done'; i.updatedAt = Date.now(); });
             _saveAndRenderYtQueue();
         } catch (e) {}
-    }, 15000);
+    }
+
+    // Sofort einmal pruefen statt erst nach 15s zu warten - deckt genau den Fall ab, in dem der
+    // Song laengst fertig in der Bibliothek liegt (z.B. Import lief serverseitig zu Ende,
+    // waehrend die App geschlossen war) und nur die Anzeige noch "laeuft" sagt.
+    await tick();
+    if (_ytFallbackWatchId === null) return; // tick() hat oben schon aufgeraeumt (nichts mehr wartend)
+    _ytFallbackWatchId = setInterval(() => { elapsed += 15; tick(); }, 15000);
 }
 
 async function _dispatchYtFallback(item) {
@@ -5467,6 +5492,11 @@ async function _enqueueYoutubeLinks(urls, meta) {
 
 renderYtQueueList();
 if (_ytQueueState.some(item => item.clientState === 'queued' || item.clientState === 'processing')) _ensureYtPollLoop();
+// Verwaiste Cloud-Fallback-Eintraege aus einer vorherigen Sitzung: der Beobachter dafuer lief
+// als reines In-Memory-setInterval und stirbt beim Schliessen/Neuladen der App mit. Ohne diesen
+// Aufruf blieb ein Eintrag fuer immer auf "Cloud-Fallback laeuft" stehen, selbst wenn der Song
+// laengst importiert war - siehe _watchForFallbackResults() fuer den Sofort-Check beim Start.
+if (_ytQueueState.some(item => item.clientState === 'fallback_pending')) _watchForFallbackResults();
 
 // ── YouTube-Vorschau-Player (Play/Pause/Spulen) für die Suchergebnisse ──────────
 // Nutzt die offizielle YouTube-IFrame-Player-API in einem unsichtbaren 1x1-Player: kein eigener

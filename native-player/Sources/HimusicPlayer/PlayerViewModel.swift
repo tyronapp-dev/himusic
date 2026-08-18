@@ -455,6 +455,14 @@ final class PlayerViewModel: ObservableObject {
             }
         }
 
+        // Ein noch laufender Sprung galt dem ALTEN Item - dessen Completion-Handler feuert nach
+        // replaceCurrentItem() oft gar nicht mehr (AVPlayer verwirft ihn stillschweigend statt
+        // ihn mit finished=false aufzurufen). Ohne dieses Zuruecksetzen blieb der Zaehler dann
+        // dauerhaft > 0 haengen: der erste Songwechsel nach einem Sprung reichte, um den
+        // Sekundentakt fuer den Rest der Sitzung fuer IMMER stumm zu schalten (siehe Guard in
+        // observePlayerTime) - exakt das gemeldete Bild "Skip springt zurueck, aber nur ab dem
+        // zweiten Song".
+        seeksInFlight = 0
         player.replaceCurrentItem(with: playerItem)
         if autoplay {
             player.play()
