@@ -57,6 +57,10 @@ final class PlayerViewModel: ObservableObject {
     /// einer Netz-URL ist die Dauer zu dem Zeitpunkt "indefinite". Genau das passierte beim
     /// Wiederherstellen der letzten Sitzung - der Player blieb danach in einem Zustand, in dem
     /// ein spaeteres play() nichts bewirkte (Zeit lief nicht los), bis man den Song wechselte.
+    /// Anzahl gerade laufender Positionsspruenge. Solange > 0, meldet der Sekundentakt keinen
+    /// Fortschritt an die Seite - siehe observePlayerTime().
+    private var seeksInFlight = 0
+
     private var pendingSeekSeconds: Double?
     private var itemStatusObservation: NSKeyValueObservation?
 
@@ -733,6 +737,10 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func seekExactly(to seconds: Double) {
+        // Zaehler statt Bool: zieht man schnell mehrfach, ueberlappen sich die Spruenge.
+        // Ein frueh zurueckkommender Completion-Handler darf die Sperre dann nicht aufheben,
+        // waehrend ein spaeterer Sprung noch laeuft - sonst entsteht genau die Luecke wieder.
+        seeksInFlight += 1
         player.seek(
             to: CMTime(seconds: seconds, preferredTimescale: 600),
             toleranceBefore: .zero,
@@ -740,6 +748,7 @@ final class PlayerViewModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.seeksInFlight = max(0, self.seeksInFlight - 1)
                 self.updateNowPlayingInfo()
                 // Die Seite bekommt Fortschritt sonst erst beim naechsten Sekundentakt. Bis
                 // dahin ueberschrieb genau dieser Takt die gezogene Position noch einmal mit
@@ -829,6 +838,13 @@ final class PlayerViewModel: ObservableObject {
                 self.saveSnapshot()
             }
             guard self.isWebOverlayVisible else { return }
+            // WAEHREND EINES LAUFENDEN SPRUNGS NICHTS MELDEN. player.currentTime() liefert bis
+            // zum Abschluss des Sprungs weiterhin die ALTE Stelle. Dieser Takt hat sie
+            // ungefiltert an die Seite geschickt und damit die gerade gezogene Position wieder
+            // ueberschrieben - fuer den Nutzer sprang die Leiste sichtbar ein Stueck zurueck,
+            // bevor der Sprung durch war. Der Completion-Handler in seekExactly() meldet die
+            // Zielstelle ohnehin, sobald sie wirklich erreicht ist.
+            guard self.seeksInFlight == 0 else { return }
             let duration = self.player.currentItem?.duration.seconds ?? 0
             self.onProgressChanged?(self.player.currentTime().seconds, duration.isFinite ? duration : 0)
         }

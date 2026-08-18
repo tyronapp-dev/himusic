@@ -5065,27 +5065,9 @@ function _cacheFreshYtSongs(fresh) {
     }
 }
 
-// Bounded Retry-Poll, NUR für den Cloud-Fallback (GitHub Actions) noch nötig - der schreibt
-// direkt per /internal/register in die DB, ohne den youtube_queue-Status zu berühren, es gibt
-// also keinen anderen Weg zu erkennen, wann er fertig ist.
-async function _pollForFreshYtSongs(knownIds) {
-    // Der GitHub-Actions-Fallback probiert bis zu 8 Versuche nacheinander durch (jeder auf einem
-    // frischen Runner/IP), gemessen ~60-70s pro Versuch - im schlechtesten Fall also fast 9
-    // Minuten, bis der letzte Versuch durch ist. Frueher stand hier 15x8s (2 Minuten) - das gab
-    // regelmaessig faelschlich "Nicht angekommen" aus, waehrend der Import im Hintergrund noch
-    // laenger korrekt weiterlief (live an echten GitHub-Actions-Runs verifiziert, 2026-07-19).
-    for (let attempt = 0; attempt < 40; attempt++) {
-        await new Promise(r => setTimeout(r, 15000));
-        try {
-            const res = await _apiFetch(`${API_URL}/songs`);
-            if (!res.ok) continue;
-            const songs = await res.json();
-            const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
-            if (fresh.length > 0) return fresh;
-        } catch (e) {}
-    }
-    return null;
-}
+// _pollForFreshYtSongs wurde am 18.08.2026 entfernt und durch _watchForFallbackResults()
+// ersetzt: ein gemeinsamer Beobachter fuer alle laufenden Fallbacks statt einer blockierenden
+// 10-Minuten-Schleife pro Eintrag, die das Ausloesen der uebrigen Eintraege aufhielt.
 
 function _parseYoutubeLinksFromTextarea(raw) {
     const lines = (raw || '').split('\n').map(l => l.trim()).filter(Boolean);
@@ -5303,33 +5285,82 @@ async function _pollYtQueueTick() {
     _pruneTerminalYtItems();
 }
 
-async function _dispatchYtFallback(item) {
+// NUR ausloesen, nicht auf das Ergebnis warten.
+//
+// Vorher steckte beides in einer Funktion: der POST (Sekundenbruchteile) und danach
+// _pollForFreshYtSongs, das bis zu 40x15s = 10 MINUTEN blockiert. Weil
+// _dispatchYtFallbackBatch mit sechs Bahnen laeuft und jede Bahn auf ihren Eintrag wartete,
+// wurde ab dem siebten Song ueberhaupt erst nach bis zu zehn Minuten ausgeloest - und gar
+// nicht mehr, sobald die App vorher geschlossen wurde. Genau das Bild: einer laedt, der Rest
+// bleibt liegen.
+//
+// Der Import laeuft nach dem POST serverseitig weiter (GitHub Actions), die App muss dafuer
+// nicht offen bleiben. Warten ist also reine Anzeigesache und gehoert nicht in den Ausloeser.
+async function _dispatchYtFallbackOnly(item) {
     item.clientState = 'fallback_pending';
     item.errorMessage = null;
     item.updatedAt = Date.now();
-    _saveAndRenderYtQueue();
     try {
         const res = await _apiFetch(`${API_URL}/dispatch-import`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ youtube_url: item.url }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
-        const fresh = await _pollForFreshYtSongs(knownIds);
-        if (fresh && fresh.length > 0) {
-            _cacheFreshYtSongs(fresh);
-            item.clientState = 'fallback_done';
-            _rememberImportedYtUrl(item.url);
-        } else {
-            item.clientState = 'fallback_failed';
-            item.errorMessage = 'Nicht angekommen';
-        }
+        _rememberImportedYtUrl(item.url);
+        return true;
     } catch (e) {
         item.clientState = 'fallback_failed';
         item.errorMessage = e.message;
+        return false;
+    } finally {
+        item.updatedAt = Date.now();
     }
-    item.updatedAt = Date.now();
+}
+
+// Ein einziger Beobachter fuer ALLE laufenden Cloud-Fallbacks statt einer 10-Minuten-Schleife
+// pro Eintrag. Hakt pro neu aufgetauchtem Import-Song einen wartenden Eintrag ab (aeltester
+// zuerst). Die Zuordnung Song->Eintrag ist dabei bewusst unscharf - welcher der parallel
+// laufenden Runner welchen Song fertigstellt, ist von aussen nicht erkennbar. Die ANZAHL
+// stimmt, und darauf kommt es an. Vorher meldeten alle wartenden Eintraege gleichzeitig
+// "fertig", sobald irgendein Song ankam, weil jede Schleife dieselbe Bedingung sah.
+let _ytFallbackWatchId = null;
+function _watchForFallbackResults() {
+    if (_ytFallbackWatchId) return;
+    let elapsed = 0;
+    const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
+    _ytFallbackWatchId = setInterval(async () => {
+        elapsed += 15;
+        const waiting = _ytQueueState.filter(i => i.clientState === 'fallback_pending');
+        if (waiting.length === 0 || elapsed > 600) {
+            clearInterval(_ytFallbackWatchId); _ytFallbackWatchId = null;
+            // Nach zehn Minuten ohne Ergebnis: als fehlgeschlagen markieren, damit die
+            // Eintraege nicht ewig auf "laeuft" stehen bleiben (und per Wiederholen-Knopf
+            // erneut versucht werden koennen).
+            if (elapsed > 600) {
+                waiting.forEach(i => { i.clientState = 'fallback_failed'; i.errorMessage = 'Nicht angekommen'; i.updatedAt = Date.now(); });
+                _saveAndRenderYtQueue();
+            }
+            return;
+        }
+        try {
+            const res = await _apiFetch(`${API_URL}/songs`);
+            if (!res.ok) return;
+            const songs = await res.json();
+            const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
+            if (fresh.length === 0) return;
+            fresh.forEach(s => knownIds.add(s.id));
+            _cacheFreshYtSongs(fresh);
+            waiting.slice(0, fresh.length).forEach(i => { i.clientState = 'fallback_done'; i.updatedAt = Date.now(); });
+            _saveAndRenderYtQueue();
+        } catch (e) {}
+    }, 15000);
+}
+
+async function _dispatchYtFallback(item) {
     _saveAndRenderYtQueue();
+    await _dispatchYtFallbackOnly(item);
+    _saveAndRenderYtQueue();
+    _watchForFallbackResults();
 }
 
 // Feuert _dispatchYtFallback für viele Einträge auf einmal, gedrosselt über dieselben Bahnen
@@ -5337,16 +5368,23 @@ async function _dispatchYtFallback(item) {
 // gleichzeitig auf den GitHub-Actions-Fallback umstellen (bis zu 500 parallele 8-Job-Workflows
 // plus 500 gleichzeitige 2-Minuten-Poller gegen den Worker).
 async function _dispatchYtFallbackBatch(items) {
+    if (!items || items.length === 0) return;
     let idx = 0;
+    // Bahnen loesen jetzt nur noch aus (ein POST je Eintrag) - ein Stapel ist damit in
+    // Sekunden komplett angestossen statt ueber viele Minuten verteilt. Ab hier laeuft alles
+    // serverseitig weiter, auch wenn die App gleich danach geschlossen wird.
     async function lane() {
         while (idx < items.length) {
             const item = items[idx++];
-            await _dispatchYtFallback(item);
+            await _dispatchYtFallbackOnly(item);
+            _saveAndRenderYtQueue();
             await new Promise(r => setTimeout(r, 200));
         }
     }
     const lanes = Array.from({ length: Math.min(YT_ENQUEUE_CONCURRENCY, items.length) }, () => lane());
     await Promise.all(lanes);
+    _saveAndRenderYtQueue();
+    _watchForFallbackResults();
 }
 
 function _retryYtQueueItem(localId) {
