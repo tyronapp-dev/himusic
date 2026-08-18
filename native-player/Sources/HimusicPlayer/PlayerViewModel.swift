@@ -381,7 +381,22 @@ final class PlayerViewModel: ObservableObject {
             guard token == playbackToken else { return }
         }
 
-        let playerItem = AVPlayerItem(url: url)
+        // AVPlayerItem(url:) baut das Asset OHNE praezise Dauer-/Zeitangaben auf - AVFoundation
+        // schaetzt die Dauer dann nur grob aus Bitrate/Container-Kopfdaten statt sie zu messen,
+        // und erlaubt nur ungefaehres statt sample-genaues Seeking. Bei VBR-MP3 (genau das
+        // Format, das die YouTube-Import-Pipeline erzeugt) weicht diese Schaetzung spuerbar vom
+        // echten Dateiende ab. Die Folge traf GENAU die beiden Schutzmechanismen weiter unten,
+        // deren Kommentare faelschlich behaupten, das Problem sei damit geloest: die
+        // Obergrenze in seek(toSeconds:) rechnet gegen diese (zu lange) geschaetzte Dauer,
+        // sodass ein Sprung "vor" ihr trotzdem hinter dem echten Dateiende landet - AVPlayer
+        // erreicht sofort das wirkliche Ende, AVPlayerItemDidPlayToEndTime feuert, next()
+        // schaltet weiter. Fuer den Nutzer sah das aus wie "Vorwaerts-Skip wechselt ab einem
+        // bestimmten Punkt einfach den Song". Und toleranceBefore/After: .zero in seekExactly()
+        // seekt zwar exakt relativ zur INTERNEN Zeitbasis des Assets - aber ohne praezise
+        // Initialisierung ist genau diese Zeitbasis selbst nur approximativ, macht "exaktes"
+        // Seeking dadurch zunichte (das gemeldete "Rueckwaerts-Skip landet ungenau").
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        let playerItem = AVPlayerItem(asset: asset)
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
