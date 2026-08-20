@@ -597,6 +597,31 @@ function _enqueueSongNext(song) {
     if (typeof window._localEnqueueNext === 'function') window._localEnqueueNext(song);
 }
 
+// Der native AVPlayer liest NIE aus IndexedDB (kann er technisch nicht) - er hat einen
+// EIGENEN Datei-Cache (AudioFileCache.swift), den nur der Hintergrund-Vorlader in der Huelle
+// selbst fuellt (Warteschlangen-Fenster um die aktuelle Position). Der "offline ✓"-Haken in
+// der Songliste kommt aber ausschliesslich aus dem WEB-Cache (hbLocal/IndexedDB, siehe
+// downloadToLocal) - beide Caches liefen bisher komplett unabhaengig. Ergebnis: ein als
+// offline markierter Song, den die Huelle nie selbst vorgeladen hat, stand zwar im
+// Web-Cache, spielte nativ trotzdem ueber Netz weiter (und damit gar nicht offline). Diese
+// Funktion zieht die Huelle nach, wo immer der Web-Cache einen Song ablegt - siehe Aufruf in
+// startBackgroundCacheQueue().
+function _nativeEnsureCached(fileUrl) {
+    const bridge = _nativeBridge();
+    if (!bridge || !fileUrl || fileUrl.startsWith('blob:')) return;
+    const song = (window.globalSongsData || []).find(s => s.file_url === fileUrl);
+    if (!song) return;
+    const cover = song.cover_data || song.coverUrl;
+    bridge.postMessage(JSON.stringify({
+        cmd: 'ensureCached',
+        item: {
+            id: song.id ?? 0, t: song.title || 'Unbekannt', a: song.artist || '',
+            u: fileUrl, c: (cover && (cover.startsWith('http') || cover.startsWith('data:image/'))) ? cover : null,
+            s: ''
+        }
+    }));
+}
+
 function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     const bridge = _nativeBridge();
     // In der Huelle immer nativ. Ausserhalb (normales Safari) nur, wenn der Nutzer den
@@ -1613,6 +1638,7 @@ let _bgCacheActive = false;
             const url = _bgCacheQueue.shift();
             
             await downloadToLocal(url, '').catch(() => {});
+            _nativeEnsureCached(url);
             window._refreshOfflineLabel?.();
 
             _bgActiveCount--;
@@ -3355,7 +3381,7 @@ async function createNewPlaylistProcess() {
         if (!c || !all.length) return null;
         let matched;
         if (c.isNoVibe) matched = all.filter(s => { const v = _parseVibes(s.vibes); return v.length === 0; });
-        else if (c.onlyMain) matched = all.filter(s => c.selectedVibes.some(v => _getMainVibes(s.id).includes(v)));
+        else if (c.onlyMain) matched = all.filter(s => c.selectedVibes.every(v => _getMainVibes(s.id).includes(v)));
         else matched = all.filter(s => c.selectedVibes.every(v => _parseVibes(s.vibes).includes(v)));
         if (c.excludedVibes && c.excludedVibes.length > 0) {
             matched = matched.filter(s => !c.excludedVibes.some(v => _parseVibes(s.vibes).includes(v)));
@@ -3520,11 +3546,12 @@ async function createNewPlaylistProcess() {
         const onlyMain = document.getElementById('mix-only-main-toggle')?.checked;
         let matchedSongs;
         if (isNoVibe) { matchedSongs = window.globalSongsData.filter(s => !s.vibes || s.vibes.length === 0); }
-        // Hauptvibe-Filter nutzt ODER statt UND: verlangt man bei mehreren gewählten Vibes, dass
-        // JEDER davon beim selben Song als Hauptvibe markiert ist, bleibt fast nie ein Treffer übrig
-        // (ein Song hat selten 2+ gleichrangige Hauptstimmungen). "Mindestens einer davon ist
-        // Hauptvibe" ist die sinnvollere Lesart.
-        else if (onlyMain) { matchedSongs = window.globalSongsData.filter(song => selectedVibes.some(v => _getMainVibes(song.id).includes(v))); }
+        // UND wie beim normalen Vibe-Filter darunter: der Text im Overlay verspricht "Lieder
+        // müssen ALLE gewählten Vibes enthalten", unabhängig vom "Nur Hauptvibes"-Schalter -
+        // vorher nutzte genau dieser Zweig ODER, wodurch bei zwei gewählten Vibes auch Songs
+        // auftauchten (und liefen), die nur EINEN davon als Hauptvibe hatten. Das galt seit
+        // dem 13.08. auch für die Live-Neubewertung in _resolveMixSongs weiter unten.
+        else if (onlyMain) { matchedSongs = window.globalSongsData.filter(song => selectedVibes.every(v => _getMainVibes(song.id).includes(v))); }
         else { matchedSongs = window.globalSongsData.filter(song => selectedVibes.every(v => song.vibes && song.vibes.includes(v))); }
         if (excludedVibes.length > 0) { matchedSongs = matchedSongs.filter(song => !excludedVibes.some(v => song.vibes && song.vibes.includes(v))); }
         if (matchedSongs.length === 0) return alert('Keine passenden Songs gefunden.');
@@ -3547,7 +3574,18 @@ async function createNewPlaylistProcess() {
         document.getElementById('station-context-overlay')?.classList.remove('active');
         const item = _getStationLikeList(window.currentContextStationType).find(x => x.id === window.currentContextStationId); if (!item) return;
         const songs = _getStationLikeSongs(item); if (songs.length === 0) return;
-        playbackQueue.unshift(...songs); savePlayerState();
+        // In der Huelle fuehrt der native Player die Warteschlange - playbackQueue.unshift()
+        // hier liest dort niemand, die Songs erschienen in der Ansicht nie und spielten auch
+        // nie (dieselbe Fehlerklasse, die _enqueueSongNext oben schon fuer den Einzel-Song-
+        // Swipe behoben hat, hier nur nie auf den Mehr-Song-Fall uebertragen). insertNext()
+        // fuegt IMMER direkt hinter den laufenden Song ein - in umgekehrter Reihenfolge
+        // aufgerufen ergibt das wieder die gewuenschte Endreihenfolge. Gedeckelt auf 50, damit
+        // ein grosser Sender/Mix nicht hunderte Bruecken-Nachrichten auf einmal abfeuert.
+        if (_nativeBridge()) {
+            songs.slice(0, 50).reverse().forEach(s => _enqueueSongNext(s));
+        } else {
+            playbackQueue.unshift(...songs); savePlayerState();
+        }
         _showToast(`"${item.name}" spielt als nächstes.`);
     });
     document.getElementById('ctx-st-pin')?.addEventListener('click', () => {
@@ -3830,10 +3868,9 @@ async function createNewPlaylistProcess() {
         if (queueSortable) { queueSortable.destroy(); queueSortable = null; }
 
         // In der Huelle fuehrt der native Player die Warteschlange - dann IMMER dessen Stand
-        // zeichnen. Umsortieren per Drag entfaellt dort bewusst: die Reihenfolge liegt nativ,
-        // ein lokales Sortable wuerde nur eine Liste umbauen, die niemand abspielt (genau der
-        // Fehler, der die Ansicht ueberhaupt falsch gemacht hat). Reine Anzeige ist ehrlicher
-        // als eine Bedienung, die nichts bewirkt.
+        // zeichnen. Umsortieren per Drag geht auch hier, aber NICHT wie im lokalen Pfad
+        // unten (playbackQueue.splice) - das wuerde wieder nur eine Liste umbauen, die
+        // niemand abspielt. Stattdessen ueber die Bruecke (cmd:'moveItem'), siehe unten.
         const snap = _nativeBridge() ? window._nativeQueueSnapshot : null;
         if (snap && Array.isArray(snap.items)) {
             // snap.currentIndex ist relativ zum uebertragenen Ausschnitt; baseIndex rechnet
@@ -3865,12 +3902,27 @@ async function createNewPlaylistProcess() {
                 const nextLabel = document.createElement('div');
                 nextLabel.style.cssText = 'font-size:11px;font-weight:700;color:var(--text-secondary);letter-spacing:1px;text-transform:uppercase;padding:8px 4px 6px;';
                 nextLabel.innerText = 'Als nächstes'; qContainer.appendChild(nextLabel);
-                upcoming.forEach(({ it, idx }) => qContainer.appendChild(buildQueueItem(_nativeItemToSong(it, idx), 'next')));
+                const nextContainer = document.createElement('div'); nextContainer.id = 'queue-next-container';
+                upcoming.forEach(({ it, idx }) => nextContainer.appendChild(buildQueueItem(_nativeItemToSong(it, idx), 'next')));
+                qContainer.appendChild(nextContainer);
                 if (snap.remainingAfter > 0) {
                     const moreMsg = document.createElement('div');
                     moreMsg.style.cssText = 'padding:15px;text-align:center;font-size:12px;color:var(--text-secondary);';
                     moreMsg.innerText = `+ ${snap.remainingAfter} weitere Lieder...`; qContainer.appendChild(moreMsg);
                 }
+                // "to" zaehlt wie Array.splice() im schon verkuerzten Array (siehe moveItem()
+                // in PlayerViewModel.swift) - upcoming[oldIndex]/[newIndex] liefern dafuer die
+                // echten nativen Positionen aus DIESEM (noch ungezogenen) Schnappschuss.
+                queueSortable = new Sortable(nextContainer, {
+                    animation: 150, handle: '.drag-handle', ghostClass: 'sortable-ghost',
+                    onEnd: function(evt) {
+                        const from = upcoming[evt.oldIndex] ? upcoming[evt.oldIndex].idx : null;
+                        const to = upcoming[evt.newIndex] ? upcoming[evt.newIndex].idx : null;
+                        if (from == null || to == null) return;
+                        const b = _nativeBridge();
+                        if (b) b.postMessage(JSON.stringify({ cmd: 'moveItem', index: from, toIndex: to }));
+                    }
+                });
             }
             return;
         }
@@ -4414,6 +4466,10 @@ async function createNewPlaylistProcess() {
                 if (!localUrls.has(song.file_url)) {
                     await window.hbLocal.downloadToLocal(song.file_url, song.title);
                 }
+                // Gleicher Grund wie in startBackgroundCacheQueue: der native AVPlayer liest
+                // nicht aus IndexedDB. Ohne diesen Zug lag ein per "Jetzt herunterladen"
+                // geholter Song zwar im Web-Cache, aber nicht im nativen Datei-Cache.
+                if (typeof _nativeEnsureCached === 'function') _nativeEnsureCached(song.file_url);
                 done++;
                 const pct = Math.round(done / total * 100);
                 if (progBar)  progBar.style.width  = pct + '%';

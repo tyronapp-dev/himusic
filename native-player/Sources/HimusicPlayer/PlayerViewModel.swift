@@ -280,6 +280,12 @@ final class PlayerViewModel: ObservableObject {
             case "insertNext": if let item = command.item { insertNext(item) }
             case "jumpTo": if let index = command.index { jumpTo(index) }
             case "removeAt": if let index = command.index { removeAt(index) }
+            case "moveItem": if let index = command.index, let toIndex = command.toIndex { moveItem(from: index, to: toIndex) }
+            // Zieht den nativen Datei-Cache mit dem Web-Offline-Cache nach (siehe
+            // _nativeEnsureCached in app2.js) - ohne das fuellte nur der Vorlader um die
+            // aktuelle Warteschlangenposition (prefetchUpcoming) den nativen Cache, und ein im
+            // Web als "offline" markierter Song spielte nativ trotzdem ueber Netz weiter.
+            case "ensureCached": if let item = command.item { Task { await AudioFileCache.shared.ensureCached(item: item) } }
             case "haptic": playHapticTick()
             default: break
             }
@@ -677,6 +683,21 @@ final class PlayerViewModel: ObservableObject {
         guard queue.indices.contains(index), index != currentIndex else { return }
         queue.remove(at: index)
         if index < currentIndex { currentIndex -= 1 }
+        notifyQueueChanged()
+        saveSnapshot()
+    }
+
+    /// Umsortieren per Drag in der Warteschlangen-Ansicht - nur der "Als naechstes"-Teil ist
+    /// dort ueberhaupt anfassbar (laufender Song und Verlauf haben keinen Ziehgriff, siehe
+    /// app2.js), daher reicht die einfache Absicherung "from muss danach liegen". "to" ist
+    /// wie bei Array.splice() gemeint: die Zielposition im SCHON VERKUERZTEN Array nach dem
+    /// Entfernen - dieselbe Arithmetik wie im lokalen (Nicht-Huellen-)Sortable-Pfad der Seite,
+    /// damit dieselbe Geste dort wie hier zum gleichen Endergebnis fuehrt.
+    func moveItem(from: Int, to: Int) {
+        guard queue.indices.contains(from), from > currentIndex else { return }
+        let item = queue.remove(at: from)
+        let clampedTo = min(max(to, currentIndex + 1), queue.count)
+        queue.insert(item, at: clampedTo)
         notifyQueueChanged()
         saveSnapshot()
     }

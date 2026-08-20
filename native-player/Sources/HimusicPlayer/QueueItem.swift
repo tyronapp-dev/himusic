@@ -49,7 +49,9 @@ struct QueueSnapshot: Codable {
 /// "delta" nur bei cmd == "seekBy" (relativer Sprung, Sekunden, negativ fuer rueckwaerts),
 /// "seconds" nur bei cmd == "seekTo" (absolute Zielposition, z.B. Scrub-Leiste loslassen),
 /// "item" nur bei cmd == "insertNext" (Song aus dem Rechts-Swipe der Songliste),
-/// "index" nur bei cmd == "jumpTo"/"removeAt" (Position in der echten nativen Warteschlange).
+/// "index" nur bei cmd == "jumpTo"/"removeAt"/"moveItem" (Position in der echten nativen
+/// Warteschlange - bei "moveItem" die Startposition), "toIndex" nur bei cmd == "moveItem"
+/// (Zielposition, Array.splice()-Arithmetik - siehe moveItem() in PlayerViewModel.swift).
 struct BridgeCommand: Codable {
     let cmd: String
     let open: Bool?
@@ -57,6 +59,7 @@ struct BridgeCommand: Codable {
     let seconds: Double?
     let item: QueueItem?
     let index: Int?
+    let toIndex: Int?
 }
 
 extension Data {
