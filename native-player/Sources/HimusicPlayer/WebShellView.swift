@@ -218,8 +218,40 @@ struct WebShellView: UIViewRepresentable {
             didReceive message: WKScriptMessage
         ) {
             guard let json = message.body as? String else { return }
+            // Abgefangen statt an PlayerViewModel weitergereicht, weil dafuer die WKWebView-
+            // Referenz noetig ist, die nur die Coordinator hier haelt (siehe clearCacheAndReload).
+            if let data = json.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               obj["cmd"] as? String == "clearCacheAndReload" {
+                Task { @MainActor [weak self] in self?.clearCacheAndReload() }
+                return
+            }
             Task { @MainActor in
                 self.player.handleBridgeJSON(json)
+            }
+        }
+
+        /// Behebt "App zeigt trotz frisch ausgeliefertem Code den alten Stand" (siehe Session
+        /// vom 21.08.2026): die App-eigene WKWebsiteDataStore-Partition kann am alten Service-
+        /// Worker/Cache haengenbleiben, ein normaler App-Neustart laedt die WKWebView-Instanz
+        /// nicht zwingend neu vom Server. Bisher war "App loeschen und neu installieren" der
+        /// einzige Ausweg. Loescht GEZIELT nur Service-Worker-Registrierung + Disk-/Memory-
+        /// Cache - NICHT localStorage/IndexedDB, damit Login und lokale Bibliothek erhalten
+        /// bleiben (siehe btn-clear-native-cache in app2.js).
+        @MainActor
+        private func clearCacheAndReload() {
+            let types: Set<String> = [
+                WKWebsiteDataTypeServiceWorkerRegistrations,
+                WKWebsiteDataTypeDiskCache,
+                WKWebsiteDataTypeMemoryCache
+            ]
+            WKWebsiteDataStore.default().removeData(ofTypes: types, modifiedSince: .distantPast) { [weak self] in
+                guard let self, let webView = self.webView else { return }
+                self.pageIsLoaded = false
+                self.loadAttempt = 0
+                var request = URLRequest(url: WebShellView.startURL)
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                webView.load(request)
             }
         }
 

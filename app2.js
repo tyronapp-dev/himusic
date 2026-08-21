@@ -4097,6 +4097,24 @@ async function createNewPlaylistProcess() {
     // der rote Punkt verschwindet also nicht automatisch, das ist gewollt). Jeder Song wird nur
     // EIN Mal von dieser Aktion angefasst (persistiert in _NOVIBE_SPOTIFY_CHECKED_KEY), damit
     // wiederholtes Antippen des Buttons nicht dieselben ergebnislosen Songs erneut abfragt.
+    // Nur in der nativen Huelle sichtbar/sinnvoll: die App-eigene WKWebView-Speicherpartition
+    // kann trotz frisch ausgeliefertem Code am alten Service-Worker/Cache-Stand haengenbleiben -
+    // ein normaler App-Neustart reicht dafuer nachweislich NICHT (siehe Session vom 21.08.2026:
+    // Safari zeigte denselben veralteten Stand, erst "Websitedaten loeschen" in den iOS-
+    // Einstellungen half). Fuer die Huelle gab es dafuer bisher nur "App loeschen und neu
+    // installieren" - kostet Neu-Login. cmd:'clearCacheAndReload' (siehe WebShellView.swift)
+    // loescht gezielt nur Service-Worker-Registrierung + Disk-/Memory-Cache, NICHT localStorage/
+    // IndexedDB - Login und lokale Bibliothek bleiben erhalten.
+    if (window.__himusicNativeShell) {
+        const clearCacheRow = document.getElementById('btn-clear-native-cache');
+        if (clearCacheRow) clearCacheRow.style.display = 'flex';
+        clearCacheRow?.addEventListener('click', () => {
+            if (!confirm('App-Cache leeren und neu laden? Login und lokale Bibliothek bleiben erhalten.')) return;
+            const bridge = _nativeBridge();
+            if (bridge) bridge.postMessage(JSON.stringify({ cmd: 'clearCacheAndReload' }));
+        });
+    }
+
     const _NOVIBE_SPOTIFY_CHECKED_KEY = 'himusic_novibe_spotify_checked';
     function _loadNoVibeChecked() {
         try { return new Set(JSON.parse(localStorage.getItem(_NOVIBE_SPOTIFY_CHECKED_KEY) || '[]')); }
