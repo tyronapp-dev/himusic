@@ -1,7 +1,7 @@
 // Himusic Cloud - Service Worker v1.0
 // Komplett optimiert für das neue Cloudflare / Firebase Setup
 
-const CACHE_NAME  = 'himusic-app-shell-v1.49';
+const CACHE_NAME  = 'himusic-app-shell-v1.50';
 const COVER_CACHE = 'himusic-covers-v1';
 const AUDIO_CACHE = 'himusic-audio-v1';
 
@@ -107,9 +107,17 @@ self.addEventListener('fetch', (event) => {
                     if (rangeHeader) {
                         const buf   = await cached.clone().arrayBuffer();
                         const total = buf.byteLength;
-                        const m     = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-                        const start = parseInt(m[1], 10);
-                        const end   = m[2] ? parseInt(m[2], 10) : total - 1;
+                        const m     = rangeHeader.match(/bytes=(\d+)-(\d*)/) || rangeHeader.match(/bytes=-(\d+)/);
+                        if (!m) return cached;
+                        let start, end;
+                        if (rangeHeader.startsWith('bytes=-')) {
+                            // Suffix-Range "bytes=-N": letzte N Bytes
+                            start = Math.max(0, total - parseInt(m[1], 10));
+                            end   = total - 1;
+                        } else {
+                            start = Math.min(parseInt(m[1], 10), total - 1);
+                            end   = m[2] ? Math.min(parseInt(m[2], 10), total - 1) : total - 1;
+                        }
                         return new Response(buf.slice(start, end + 1), {
                             status: 206, statusText: 'Partial Content',
                             headers: {

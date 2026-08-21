@@ -2237,10 +2237,19 @@ let _bgCacheActive = false;
 
     function loadSongsSnapshot() { try { const raw = localStorage.getItem(SONGS_CACHE_KEY); return raw ? JSON.parse(raw) : null; } catch(e) { return null; } }
 
+    let _fetchSongsSeq = 0;
     async function fetchSongsFromDatabase(silent = false) {
         if (!songsContainer) return;
+        // Bei mehreren gleichzeitig fertigen YouTube-Imports feuert _cacheFreshYtSongs mehrfach
+        // hintereinander GET /songs ab. Ohne Sequenz-Schutz konnte eine spaeter gestartete, aber
+        // schneller zurueckkommende Antwort von einer AELTEREN, langsameren Antwort ueberschrieben
+        // werden, sobald die zuletzt eintraf - der frisch importierte Song verschwand dann wieder
+        // aus globalSongsData, obwohl er laengst in der Cloud lag. Nur die zuletzt GESTARTETE
+        // Anfrage darf noch schreiben.
+        const mySeq = ++_fetchSongsSeq;
         try {
             const all = await apiGetAllSongs();
+            if (mySeq !== _fetchSongsSeq) return;
             if (all) {
                 // Hauptvibe-Cache aus den ROHEN Server-Daten wiederherstellen, BEVOR
                 // _parseVibes() den Marker gleich darunter entfernt - siehe MAIN_VIBE_MARKER.
@@ -2256,6 +2265,7 @@ let _bgCacheActive = false;
                 startBackgroundCacheQueue(all);
             }
         } catch (error) {
+            if (mySeq !== _fetchSongsSeq) return;
             const snapshot = loadSongsSnapshot();
             if (snapshot && snapshot.length > 0) {
                 window.globalSongsData = snapshot;
@@ -2353,7 +2363,7 @@ let _bgCacheActive = false;
                 } else {
                     const titleDiv = songDiv.querySelector('.song-title');
                     const vibesText = song.vibes && song.vibes.length > 0 ? _parseVibes(song.vibes).join(' • ') : 'Keine Vibes';
-                    if (!titleDiv.dataset.originalTitle) { titleDiv.dataset.originalTitle = titleDiv.innerText; titleDiv.innerHTML = `${titleDiv.dataset.originalTitle} <span style="color: var(--accent); font-size: 11px; margin-left: 8px; font-weight: 500; border: 1px solid var(--accent); padding: 1px 6px; border-radius: 10px;">${vibesText}</span>`; } 
+                    if (!titleDiv.dataset.originalTitle) { titleDiv.dataset.originalTitle = titleDiv.innerText; titleDiv.innerHTML = `${_esc(titleDiv.dataset.originalTitle)} <span style="color: var(--accent); font-size: 11px; margin-left: 8px; font-weight: 500; border: 1px solid var(--accent); padding: 1px 6px; border-radius: 10px;">${_esc(vibesText)}</span>`; }
                     else { titleDiv.innerText = titleDiv.dataset.originalTitle; delete titleDiv.dataset.originalTitle; }
                 }
             }
@@ -2376,7 +2386,12 @@ let _bgCacheActive = false;
                 const selCount = document.getElementById('sel-count'); const count = _countAvailableSelectedSongs(); if(selCount) selCount.innerText = `${count} ausgewählt`;
             } else if (currentMode === 'normal') {
                 window.currentPlayingPlaylistId = window.currentOpenPlaylistId || null;
-                window.playSong(song.title, song.artist, song.cover_data, song.file_url);
+                // playbackQueue MUSS stehen, BEVOR playSong() laeuft: der native Hand-off (siehe
+                // _tryNativePlayerHandoff in playSong) liest playbackQueue synchron beim Aufruf, um
+                // der Huelle die kommenden Songs mitzugeben. Stand hier vorher danach, bekam die
+                // Huelle noch die WARTESCHLANGE DES VORHERIGEN KONTEXTS uebergeben (z.B. eine
+                // gemischte Liste von einem frueher gespielten Vibe Mix) - "weiter" spielte dadurch
+                // einen scheinbar zufaelligen Song statt des naechsten in dieser Liste.
                 if (window.currentOpenPlaylistId && window.currentPlaylistSongs) {
                     const songIndex = window.currentPlaylistSongs.findIndex(s => s.id === song.id);
                     if (songIndex > -1) { playbackQueue = window.currentPlaylistSongs.slice(songIndex + 1); }
@@ -2393,6 +2408,7 @@ let _bgCacheActive = false;
                     }
                     if (isShuffle) playbackQueue = playbackQueue.sort(() => 0.5 - Math.random());
                 }
+                window.playSong(song.title, song.artist, song.cover_data, song.file_url);
                 savePlayerState();
             }
         });
@@ -3504,7 +3520,7 @@ async function createNewPlaylistProcess() {
     document.getElementById('btn-home-random')?.addEventListener('click', () => {
         if(window.globalSongsData.length === 0) return alert("Noch keine Songs geladen!");
         const shuffled = [...window.globalSongsData].sort(() => 0.5 - Math.random()); const first = shuffled[0];
-        window.playSong(first.title, first.artist, first.cover_data, first.file_url); playbackQueue = shuffled.slice(1); savePlayerState();
+        playbackQueue = shuffled.slice(1); window.playSong(first.title, first.artist, first.cover_data, first.file_url); savePlayerState();
     });
 
     document.getElementById('btn-home-vibemix')?.addEventListener('click', () => {
@@ -3698,12 +3714,12 @@ async function createNewPlaylistProcess() {
 
     document.getElementById('btn-pld-play')?.addEventListener('click', () => {
         if(window.currentPlaylistSongs.length === 0) return; window.currentPlayingPlaylistId = window.currentOpenPlaylistId; 
-        const first = window.currentPlaylistSongs[0]; window.playSong(first.title, first.artist, first.cover_data, first.file_url); playbackQueue = window.currentPlaylistSongs.slice(1); savePlayerState();
+        const first = window.currentPlaylistSongs[0]; playbackQueue = window.currentPlaylistSongs.slice(1); window.playSong(first.title, first.artist, first.cover_data, first.file_url); savePlayerState();
     });
 
     document.getElementById('btn-pld-shuffle')?.addEventListener('click', () => {
         if(window.currentPlaylistSongs.length === 0) return; window.currentPlayingPlaylistId = window.currentOpenPlaylistId; 
-        const shuffled = [...window.currentPlaylistSongs].sort(() => 0.5 - Math.random()); const first = shuffled[0]; window.playSong(first.title, first.artist, first.cover_data, first.file_url); playbackQueue = shuffled.slice(1); savePlayerState();
+        const shuffled = [...window.currentPlaylistSongs].sort(() => 0.5 - Math.random()); const first = shuffled[0]; playbackQueue = shuffled.slice(1); window.playSong(first.title, first.artist, first.cover_data, first.file_url); savePlayerState();
     });
 
     document.getElementById('btn-pld-search')?.addEventListener('click', () => {
@@ -5780,7 +5796,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <div style="font-size:12px; color:#aaa; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${_esc(item.channelTitle)}${item.duration ? ' · ' + _esc(item.duration) : ''}</div>
                     </div>
                     <button class="yt-preview-playbtn" title="Anhören" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:rgba(255,255,255,0.15); color:#fff; font-size:14px; cursor:pointer;">▶</button>
-                    <button class="yt-download-btn" title="Herunterladen" style="flex-shrink:0; padding:8px 14px; border-radius:8px; border:none; background:#fa233b; color:#fff; font-size:16px; cursor:pointer;">⬇</button>
+                    <button class="yt-download-btn" title="Herunterladen" style="flex-shrink:0; width:36px; height:36px; border-radius:50%; border:none; background:rgba(255,255,255,0.15); color:#fff; font-size:14px; cursor:pointer;">⬇</button>
                   </div>
                   <div class="yt-preview-seekwrap" style="display:none; align-items:center; gap:8px; padding:0 4px;">
                     <input type="range" class="yt-preview-seek" min="0" max="100" value="0" step="1" style="flex:1; accent-color:#fa233b;">
