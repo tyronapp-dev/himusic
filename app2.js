@@ -2750,7 +2750,15 @@ let _bgCacheActive = false;
         let toast = document.getElementById('hb-toast');
         if (!toast) {
             toast = document.createElement('div'); toast.id = 'hb-toast';
-            toast.style.cssText = 'position:fixed;bottom:calc(80px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);background:rgba(40,40,40,0.95);color:#fff;padding:10px 18px;border-radius:20px;font-size:14px;font-weight:500;z-index:9999;backdrop-filter:blur(10px);transition:opacity 0.3s;pointer-events:none;white-space:nowrap;';
+            // In der nativen Huelle liegt NativePlayerBar (ADR-011) als EIGENE native Ebene
+            // ausserhalb des WKWebView, direkt oberhalb von #bottom-nav - sie rendert immer
+            // UEBER dem gesamten Webinhalt, ein CSS z-index im Web kann das nicht durchdringen
+            // (siehe HimusicPlayerApp.swift, ZStack). Bei bottom:80px lag der Toast genau in
+            // ihrer Hoehe (~66-126px vom unteren Rand) und wurde unsichtbar, sobald die Leiste
+            // nach dem Schliessen eines Overlays zurueckkam - betraf jede Bestaetigung, nicht
+            // nur Vibe Mix. window.__himusicNativeShell wird frueh von WebShellView injiziert.
+            const bottomOffset = window.__himusicNativeShell ? '150px' : '80px';
+            toast.style.cssText = `position:fixed;bottom:calc(${bottomOffset} + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);background:rgba(40,40,40,0.95);color:#fff;padding:10px 18px;border-radius:20px;font-size:14px;font-weight:500;z-index:9999;backdrop-filter:blur(10px);transition:opacity 0.3s;pointer-events:none;white-space:nowrap;`;
             document.body.appendChild(toast);
         }
         toast.innerText = msg; toast.style.opacity = '1';
