@@ -137,8 +137,17 @@ final class PlayerViewModel: ObservableObject {
     /// komplette Liste in Sekunden durchrasen und am Ende stumm stehen bleiben - fuer den
     /// Nutzer nicht von "die App hat meine Musik verloren" zu unterscheiden. Wird bei jedem
     /// Song zurueckgesetzt, der wirklich losspielt (siehe readyToPlay-Beobachter).
+    ///
+    /// ZWEI Schwellen, weil die alte einzelne (5) das falsche Problem loeste: bei "zufaellig
+    /// abspielen" ueber die ganze Bibliothek liegen einzelne tote Importe verstreut - fuenf
+    /// davon zufaellig hintereinander stoppten die Wiedergabe komplett, obwohl direkt danach
+    /// wieder gute Songs kaemen. Bei bestehender Verbindung wird deshalb weit laenger
+    /// weitergesprungen (der Nutzer sieht die uebersprungenen in den Einstellungen und kann sie
+    /// mit "Bibliothek pruefen" gezielt entfernen). Ohne Netz bleibt es bei 5: dann kann
+    /// naemlich WIRKLICH nichts spielen, und weiterrasen waere nur sinnlos.
     private var consecutiveFailures = 0
-    private static let maxConsecutiveFailures = 5
+    private static let maxConsecutiveFailuresOffline = 5
+    private static let maxConsecutiveFailuresOnline = 25
 
     /// Songs, die in DIESER Warteschlange bereits gescheitert sind. Sie werden beim
     /// Weiterspringen gleich mit uebersprungen, statt jedes Mal erneut zu haengen und einen
@@ -611,8 +620,11 @@ final class PlayerViewModel: ObservableObject {
         }
 
         // Reissleine (siehe consecutiveFailures): lieber sichtbar stehenbleiben als die ganze
-        // Warteschlange lautlos durchrasen und am Ende ohne Erklaerung stumm sein.
-        guard consecutiveFailures < Self.maxConsecutiveFailures, queue.indices.contains(ziel) else {
+        // Warteschlange lautlos durchrasen und am Ende ohne Erklaerung stumm sein. Bei Netz
+        // toleranter (verstreute tote Importe sollen die Wiedergabe nicht kippen), ohne Netz
+        // frueh (dann spielt ohnehin nichts).
+        let reissleine = hasNetwork ? Self.maxConsecutiveFailuresOnline : Self.maxConsecutiveFailuresOffline
+        guard consecutiveFailures < reissleine, queue.indices.contains(ziel) else {
             player.pause()
             isPlaying = false
             updateNowPlayingInfo()

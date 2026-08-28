@@ -74,20 +74,21 @@ function run(cmd, args, timeoutMs = 300000) {
 // verifiziert), alle vier ohne Turnstile-Captcha (also automatisierbar). Reihenfolge wird pro
 // Aufruf gemischt. Community-Betreiber koennen jederzeit abschalten/ueberlastet sein - deshalb
 // bleibt yt-dlp als Sicherheitsnetz bestehen, wenn der ganze Pool scheitert (siehe processOne).
+// 2026-08-28 neu geprueft (echter Tunnel-Download, nicht nur "status: tunnel"):
+// kittycat.boo verlangt jetzt JWT, rue-cobalt.xenon.zone ist offline, liubquanti.click liefert
+// nur noch 0 Bytes. Der oeffentliche Pool ist stark geschrumpft - deshalb COBALT_ONLY_TESTING
+// unten wieder aus.
 const COBALT_INSTANCES = [
-    'https://api.cobalt.liubquanti.click',
-    'https://cobaltapi.kittycat.boo',
-    'https://rue-cobalt.xenon.zone',
-    'https://cobaltapi.cjs.nz',
+    'https://cobaltapi.cjs.nz',   // 2026-08-28: 8,5-MB-Download OK
+    'https://co.otomir23.me',     // 2026-08-28: Download OK, content-type audio/mpeg
 ];
 const YOUTUBE_URL_RE = /^https:\/\/(www\.|m\.)?(youtube\.com\/watch\?v=|youtu\.be\/)/i;
 const COBALT_MAX_BYTES = 60 * 1024 * 1024; // Sicherheitsnetz gegen eine fehlerhafte/kompromittierte Instanz
 
-// Testphase (Nutzerwunsch 2026-07-26): yt-dlp-Fallback bewusst deaktiviert, damit die ECHTE
-// Erfolgsquote des Cobalt-Pools sichtbar wird, statt von yt-dlp automatisch verdeckt zu werden.
-// Scheitert der Cobalt-Pool, landet der Eintrag bewusst auf "failed" (manuell nachzuholen)
-// statt automatisch auf yt-dlp+Cookies umzuschwenken. Zum Reaktivieren einfach auf false setzen.
-const COBALT_ONLY_TESTING = true;
+// 2026-07-26 fuer eine Messphase auf true. 2026-08-28 zurueck auf false: Messphase vorbei UND
+// der oeffentliche Cobalt-Pool ist auf 2 funktionierende Instanzen geschrumpft. Mit true landete
+// jeder Eintrag, den der Pool nicht schaffte, auf "failed" statt auf yt-dlp auszuweichen.
+const COBALT_ONLY_TESTING = false;
 
 function shuffled(arr) {
     const a = arr.slice();

@@ -242,6 +242,19 @@
                     </div>
                 </div>
 
+                <div class="settings-section" style="margin-top: 30px;">
+                    <h3 class="section-title">Bibliothek prüfen</h3>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin: -8px 0 10px;">Testet jeden Song, ob seine Datei wirklich abrufbar ist. Findet tote Einträge (Import unvollständig, Datei fehlt), die beim Abspielen übersprungen werden. Danach kannst du sie gezielt entfernen.</p>
+                    <div class="settings-list">
+                        <div class="settings-row" id="btn-check-library" style="cursor: pointer;">
+                            <div class="settings-row-info"><h4>Jetzt prüfen</h4><p>Alle Songs auf abrufbare Datei testen</p></div>
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+                        </div>
+                        <div id="library-check-status" style="font-size:13px;color:var(--text-secondary);padding:6px 0;display:none;"></div>
+                        <div id="library-check-results" style="padding:4px 0;"></div>
+                    </div>
+                </div>
+
                 <div class="settings-section">
                     <h3 class="section-title">System & Auto</h3>
                     <div class="settings-list">

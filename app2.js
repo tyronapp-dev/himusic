@@ -65,6 +65,23 @@ function _rawVibesArray(v) {
     return [];
 }
 
+// Echtes Mischen (Fisher-Yates). Ersetzt ueberall das fruehere .sort(() => 0.5 - Math.random()):
+// Array.sort mit Zufalls-Vergleichsfunktion erzeugt KEINE Gleichverteilung - Elemente bleiben
+// statistisch nah an ihrer Ausgangsposition. Bei "zufaellig abspielen" ueber die ganze
+// Bibliothek (Server liefert sie in Einfuege-Reihenfolge, aeltestes zuerst) hiess das: die
+// zuerst getaggten/aeltesten Songs landen weiter vorne und werden dauernd gespielt, der
+// ungetaggte Rest kaum. Nachgemessen: ~2x Ueberrepraesentation der vorderen Songs.
+// Fisher-Yates zieht jede Reihenfolge exakt gleich wahrscheinlich. Mischt in place UND gibt
+// das Array zurueck (wie .sort()), damit die bestehenden Aufrufstellen 1:1 umstellbar sind.
+function _shuffle(arr) {
+    if (!Array.isArray(arr)) return arr;
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+    }
+    return arr;
+}
+
 // Hauptvibe-Markierung reist als Prefix "*" direkt im vibes-Feld mit (siehe
 // _getMainVibes/btnSaveTags) - kein eigenes Backend-Feld noetig, das Feld wird ohnehin
 // schon per PUT /songs/:id gespeichert und ueberlebt damit Reinstall/Geraetewechsel.
@@ -158,7 +175,9 @@ function _renderVibesText(el, vibesArr, songId) {
     const vibes = _parseVibes(vibesArr);
     if (vibes.length === 0) { el.innerText = 'Aktueller Titel'; return; }
     const mainVibes = songId != null ? _getMainVibes(songId) : [];
-    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b style="color:var(--accent)">${_esc(v)}</b>` : _esc(v)).join(' • ');
+    // Hauptvibes bleiben fett in der Akzentfarbe (staerkste Hervorhebung); die uebrigen tragen
+    // ihre feste Vibe-Farbe (siehe _vibeColor) - dieselbe Farbe wie in den Auswahl-Pillen.
+    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b style="color:var(--accent)">${_esc(v)}</b>` : `<span style="color:${_vibeColor(v)}">${_esc(v)}</span>`).join(' • ');
 }
 
 // Sender-Songliste für einen Ausgangssong: gewichtete Ähnlichkeit statt reinem Overlap-Zähler.
@@ -218,7 +237,7 @@ function _buildStationSongs(song) {
     // Greift nur noch, wenn wirklich nichts passt (kein Vibe, kein zweiter Song des
     // Kuenstlers). 25 statt 5, damit ein Sender auch dann laenger als eine Minute traegt.
     if (stationSongs.length <= 1) {
-        const randomFill = [...window.globalSongsData].sort(() => 0.5 - Math.random()).slice(0, 25);
+        const randomFill = _shuffle([...window.globalSongsData]).slice(0, 25);
         stationSongs = Array.from(new Set([song, ...stationSongs, ...randomFill]));
     }
     return stationSongs;
@@ -412,8 +431,20 @@ window._applyNativePlaybackFailed = function(payload) {
     } catch (e) {}
     if (typeof window._renderSkipLog === 'function') window._renderSkipLog();
 
+    // Toast bei einer SERIE toter Songs zusammenfassen statt 25 einzelne 4s-Toasts zu stapeln
+    // (die native Reissleine springt bei Netz jetzt weiter, siehe PlayerViewModel). Der erste
+    // Fehlschlag zeigt den Titel, kurz danach folgende nur noch einen Zaehler.
     if (typeof window._showToast === 'function') {
-        window._showToast(`⚠️ „${titel}" lässt sich nicht abspielen – übersprungen`, 4000);
+        const now = Date.now();
+        const burst = (now - (window._lastSkipToastAt || 0)) < 6000;
+        window._lastSkipToastAt = now;
+        if (!burst) {
+            window._skipBurstCount = 0;
+            window._showToast(`⚠️ „${titel}" lässt sich nicht abspielen – übersprungen`, 4000);
+        } else {
+            window._skipBurstCount = (window._skipBurstCount || 1) + 1;
+            window._showToast(`⚠️ ${window._skipBurstCount} Songs übersprungen (nicht abspielbar) – Liste in Einstellungen`, 4000);
+        }
     }
 };
 
@@ -1014,6 +1045,37 @@ async function fetchCoverFromiTunes(title, artist) {
 
 const AVAILABLE_VIBES = ["Afro", "Ghana", "RnB", "Old School", "Deepdream", "LD", "Calm", "SAD", "Gym", "HYPE", "Carpool", "Amapiano", "Hard rap", "Dancehall", "Rap", "Summer", "Latenight", "Dance", "Christ", "Soul", "Exotic", "N-rei", "ODS", "G-Nrei","POP","OGG"];
 
+// Feste, wiedererkennbare Farbe pro Vibe - nur die Schrift, an jeder Auswahl-Stelle
+// (Tag-Editor, Filter, Vibe-Mix-Ersteller) und in der Vibes-Zeile des grossen Players.
+// Zweck: beim Vibe-Mix-Erstellen nicht mehr die ganze Liste absuchen muessen, sondern den
+// gesuchten Vibe an seiner Farbe finden. Der GOLDENE WINKEL (137.508 Grad) verteilt die 26
+// Namen maximal gleichmaessig ueber den Farbkreis und legt in der Liste benachbarte Vibes
+// weit auseinander - keine Handpflege noetig, deterministisch und stabil (dieselbe Farbe bei
+// jedem Laden). Feste Helligkeit 70% haelt jede Farbe auf dem dunklen Pillen-Grund lesbar.
+function _vibeColor(name) {
+    const i = AVAILABLE_VIBES.indexOf(name);
+    if (i < 0) return 'var(--text-secondary)';
+    return `hsl(${Math.round((i * 137.508) % 360)}, 70%, 70%)`;
+}
+
+// Erzeugt einmal einen <style>-Block mit einer Regel je Vibe. Bewusst NICHT in den 3
+// Render-Stellen inline gesetzt: so bleiben aktive (.active) und ausgeschlossene (.excluded)
+// Pillen unveraendert (die :not() schuetzen sie) und die Klick-Handler brauchen keine
+// Aenderung. data-vibe ist ein fester Konstanten-Wert (AVAILABLE_VIBES), kein Nutzer-Input -
+// die beiden Sonderzeichen, die einen Attribut-Selektor sprengen koennten, werden trotzdem
+// maskiert.
+function _injectVibeColorStyles() {
+    if (document.getElementById('vibe-color-rules')) return;
+    const css = AVAILABLE_VIBES.map(v =>
+        `.vibe-pill[data-vibe="${v.replace(/["\\]/g, '\\$&')}"]:not(.active):not(.excluded){color:${_vibeColor(v)};font-weight:600}`
+    ).join('\n');
+    const style = document.createElement('style');
+    style.id = 'vibe-color-rules';
+    style.textContent = css;
+    (document.head || document.documentElement).appendChild(style);
+}
+_injectVibeColorStyles();
+
 function addClearButton(inputElement) {
     if (!inputElement || inputElement.dataset.hasClearBtn) return;
     inputElement.dataset.hasClearBtn = 'true';
@@ -1331,7 +1393,7 @@ function initApp() {
         // "Fremdkoerper" in dieser Warteschlange, ihre Ausnahme von der Kennung waere veraltet.
         window._manuallyQueuedIds.clear();
         const isShuffle = document.getElementById('btn-shuffle')?.classList.contains('ctrl-active');
-        if (isShuffle) queueToPlay = queueToPlay.sort(() => 0.5 - Math.random());
+        if (isShuffle) queueToPlay = _shuffle(queueToPlay);
 
         const first = queueToPlay[0];
         playbackQueue = queueToPlay.slice(1);
@@ -1844,7 +1906,7 @@ let _bgCacheActive = false;
         isChangingSong = true;
         setTimeout(() => isChangingSong = false, 800);
         if (!playbackQueue || playbackQueue.length === 0) {
-            if (window.globalSongsData && window.globalSongsData.length > 0) { playbackQueue = [...window.globalSongsData].sort(() => 0.5 - Math.random()); } else return;
+            if (window.globalSongsData && window.globalSongsData.length > 0) { playbackQueue = _shuffle([...window.globalSongsData]); } else return;
         }
         const nextSong = playbackQueue.shift();
         window.currentContextSongId = nextSong.id || window.currentContextSongId;
@@ -2406,7 +2468,7 @@ let _bgCacheActive = false;
                     } else if (window.globalSongsData && window.globalSongsData.length > 0) {
                         playbackQueue = window.globalSongsData.filter(s => s.id !== song.id);
                     }
-                    if (isShuffle) playbackQueue = playbackQueue.sort(() => 0.5 - Math.random());
+                    if (isShuffle) playbackQueue = _shuffle(playbackQueue);
                 }
                 window.playSong(song.title, song.artist, song.cover_data, song.file_url);
                 savePlayerState();
@@ -3371,7 +3433,7 @@ async function createNewPlaylistProcess() {
 
     document.getElementById('ctx-pl-add-queue')?.addEventListener('click', async () => {
         document.getElementById('playlist-context-overlay')?.classList.remove('active'); const playlist = window.globalPlaylistsData.find(p => p.id === window.currentContextPlaylistId);
-        try { const songs = await apiGetPlaylistSongs(window.currentContextPlaylistId); if(!songs || songs.length === 0) { alert("Playlist ist leer oder konnte nicht geladen werden."); return; } let songsInPl = songs.filter(s => s !== null); songsInPl = songsInPl.sort(() => 0.5 - Math.random()); playbackQueue.push(...songsInPl); alert(`${songsInPl.length} Songs aus "${playlist.name}" gemischt zur Warteschlange hinzugefügt!`); } 
+        try { const songs = await apiGetPlaylistSongs(window.currentContextPlaylistId); if(!songs || songs.length === 0) { alert("Playlist ist leer oder konnte nicht geladen werden."); return; } let songsInPl = songs.filter(s => s !== null); songsInPl = _shuffle(songsInPl); playbackQueue.push(...songsInPl); alert(`${songsInPl.length} Songs aus "${playlist.name}" gemischt zur Warteschlange hinzugefügt!`); } 
         catch (error) { alert("Fehler beim Laden: " + error.message); }
     });
 
@@ -3460,7 +3522,7 @@ async function createNewPlaylistProcess() {
                     const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = mix.id; const bgImage = mix.cover_data && mix.cover_data.length > 10 ? `url('${mix.cover_data}')` : '';
                     const pinBadge = mix.pinned ? '<div class="pin-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg></div>' : '';
                     card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};">${pinBadge}<button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(mix.name)}</div>`;
-                    const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => { const shuffled = [..._getStationLikeSongs(mix)].sort(() => Math.random() - 0.5); window.togglePlaylistPlayback(e, mix.id, shuffled); });
+                    const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => { const shuffled = _shuffle([..._getStationLikeSongs(mix)]); window.togglePlaylistPlayback(e, mix.id, shuffled); });
                     card.addEventListener('click', () => window.openPlaylistDetails(mix.id, mix.name));
                     if (typeof addLongPressListener === 'function') { addLongPressListener(card, (e) => { e.preventDefault(); e.stopPropagation(); _openStationContextMenu('mix', mix.id); }); }
                     mixContainer.appendChild(card);
@@ -3527,7 +3589,7 @@ async function createNewPlaylistProcess() {
 
     document.getElementById('btn-home-random')?.addEventListener('click', () => {
         if(window.globalSongsData.length === 0) return alert("Noch keine Songs geladen!");
-        const shuffled = [...window.globalSongsData].sort(() => 0.5 - Math.random()); const first = shuffled[0];
+        const shuffled = _shuffle([...window.globalSongsData]); const first = shuffled[0];
         playbackQueue = shuffled.slice(1); window.playSong(first.title, first.artist, first.cover_data, first.file_url); savePlayerState();
     });
 
@@ -3580,7 +3642,7 @@ async function createNewPlaylistProcess() {
         if (excludedVibes.length > 0) { matchedSongs = matchedSongs.filter(song => !excludedVibes.some(v => song.vibes && song.vibes.includes(v))); }
         if (matchedSongs.length === 0) return alert('Keine passenden Songs gefunden.');
 
-        const mixName = 'Vibe Mix: ' + (isNoVibe ? 'Ohne Vibe' : selectedVibes.join(', ')) + (excludedVibes.length > 0 ? ` (ohne ${excludedVibes.join(', ')})` : ''); const shuffledIds = [...matchedSongs].sort(() => Math.random() - 0.5).map(s => s.id);
+        const mixName = 'Vibe Mix: ' + (isNoVibe ? 'Ohne Vibe' : selectedVibes.join(', ')) + (excludedVibes.length > 0 ? ` (ohne ${excludedVibes.join(', ')})` : ''); const shuffledIds = _shuffle([...matchedSongs]).map(s => s.id);
         // criteria mitspeichern, damit der Mix eine LEBENDE Auswahl bleibt statt einer
         // eingefrorenen Liste: taggt man Songs nach, wertet _resolveMixSongs() neu aus -
         // ein "Ohne Vibe"-Mix verliert dadurch genau die Songs, die inzwischen Vibes haben,
@@ -3727,7 +3789,7 @@ async function createNewPlaylistProcess() {
 
     document.getElementById('btn-pld-shuffle')?.addEventListener('click', () => {
         if(window.currentPlaylistSongs.length === 0) return; window.currentPlayingPlaylistId = window.currentOpenPlaylistId; 
-        const shuffled = [...window.currentPlaylistSongs].sort(() => 0.5 - Math.random()); const first = shuffled[0]; playbackQueue = shuffled.slice(1); window.playSong(first.title, first.artist, first.cover_data, first.file_url); savePlayerState();
+        const shuffled = _shuffle([...window.currentPlaylistSongs]); const first = shuffled[0]; playbackQueue = shuffled.slice(1); window.playSong(first.title, first.artist, first.cover_data, first.file_url); savePlayerState();
     });
 
     document.getElementById('btn-pld-search')?.addEventListener('click', () => {
@@ -3797,7 +3859,7 @@ async function createNewPlaylistProcess() {
         if (audioPlayer) audioPlayer.loop = isRepeat;
     }
     document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; localStorage.setItem('himusic_repeat', isRepeat ? '1' : '0'); });
-    document.getElementById('btn-shuffle')?.addEventListener('click', (e) => { isShuffle = !isShuffle; e.currentTarget.classList.toggle('ctrl-active', isShuffle); if(isShuffle) { playbackQueue = playbackQueue.sort(() => 0.5 - Math.random()); } localStorage.setItem('himusic_shuffle', isShuffle ? '1' : '0'); });
+    document.getElementById('btn-shuffle')?.addEventListener('click', (e) => { isShuffle = !isShuffle; e.currentTarget.classList.toggle('ctrl-active', isShuffle); if(isShuffle) { playbackQueue = _shuffle(playbackQueue); } localStorage.setItem('himusic_shuffle', isShuffle ? '1' : '0'); });
     // btn-next/btn-prev werden bereits von setupSmartSkipButton() verdrahtet (weiter oben,
     // inkl. Langdruck-Suchlauf). Die hier zusaetzlich registrierten Listener liefen doppelt:
     // EIN Antippen rief playPrevSong() zweimal auf, der zweite Aufruf wurde als Doppeltipp
@@ -4032,6 +4094,113 @@ async function createNewPlaylistProcess() {
         if (typeof window._renderSkipLog === 'function') window._renderSkipLog();
         _showToast('Protokoll geleert');
     });
+
+    // --- BIBLIOTHEK PRUEFEN --------------------------------------------------------------
+    // Beantwortet "warum lassen sich so viele Songs nicht abspielen?" mit Daten: jeder Song
+    // wird gegen seine file_url getestet (HEAD, notfalls winziges GET).
+    //
+    // WICHTIG (Security-Review 2026-08-28): "loeschbar tot" ist AUSSCHLIESSLICH 404/410. Der
+    // Parallel-Burst gegen den eigenen Worker provoziert selbst 429/503/Timeouts, und
+    // apiDeleteSong loescht ENDGUELTIG (R2 + DB, kein Undo) - ein transienter Fehler darf nie
+    // zur Loeschung eines guten Songs fuehren. 401/403/429/5xx/Timeout landen daher als
+    // "unklar" (nur angezeigt, NICHT loeschbar). Unklare werden danach seriell einmal
+    // nachgeprueft; sind es zu viele, ist die Pruefung insgesamt unzuverlaessig und es wird
+    // gar nichts zum Loeschen angeboten. Bewusst NICHT ueber _apiFetch: ein 401 mitten im
+    // Scan wuerde dort die ganze App ausloggen.
+    let _libCheckRunning = false;
+    async function _checkLibrary() {
+        if (_libCheckRunning) return;
+        const statusEl = document.getElementById('library-check-status');
+        const resultsEl = document.getElementById('library-check-results');
+        // Nur Dateien auf der eigenen API-Domain testen - der X-Api-Key darf nie an einen
+        // fremden Host gehen (gleiche Regel wie _apiFetch vs. rohes fetch bei iTunes/Spotify).
+        let _apiOrigin = ''; try { _apiOrigin = new URL(API_URL).origin; } catch (e) {}
+        const songs = (window.globalSongsData || []).filter(s => {
+            if (!s || !s.file_url || String(s.file_url).startsWith('blob:')) return false;
+            try { return new URL(s.file_url, location.href).origin === _apiOrigin; } catch (e) { return false; }
+        });
+        if (resultsEl) resultsEl.innerHTML = '';
+        if (songs.length === 0) { if (statusEl) { statusEl.style.display = 'block'; statusEl.innerText = 'Keine prüfbaren Songs (keine Dateien auf der API-Domain).'; } return; }
+        _libCheckRunning = true;
+        if (statusEl) { statusEl.style.display = 'block'; statusEl.innerText = `Prüfe 0/${songs.length} …`; }
+
+        const rawApi = (u, opts) => fetch(u, { ...opts, headers: { ...((opts && opts.headers) || {}), 'X-Api-Key': API_KEY } });
+        const probeStatus = async (song) => {
+            const test = async (method) => { try { return (await rawApi(song.file_url, { method })).status; } catch (e) { return 0; } };
+            let status = await test('HEAD');
+            if (status === 0 || status === 405 || status === 501) status = await test('GET');
+            return status;
+        };
+        const classify = (st) => (st === 200 || st === 206) ? 'ok' : (st === 404 || st === 410) ? 'dead' : 'unsure';
+
+        const dead = [];      // 404/410 - Datei wirklich weg, loeschbar
+        let unsure = [];      // alles andere non-OK - transient/unklar, NICHT loeschbar
+        let done = 0, idx = 0;
+        async function lane() {
+            while (idx < songs.length) {
+                const s = songs[idx++];
+                const cls = classify(await probeStatus(s));
+                if (cls === 'dead') dead.push({ id: s.id, title: s.title || '(ohne Titel)' });
+                else if (cls === 'unsure') unsure.push(s);
+                done++;
+                if (statusEl && (done % 5 === 0 || done === songs.length)) statusEl.innerText = `Prüfe ${done}/${songs.length} — ${dead.length} tot`;
+            }
+        }
+        await Promise.all(Array.from({ length: Math.min(6, songs.length) }, () => lane()));
+
+        // Zweite Runde SERIELL fuer alles Unklare - so faellt heraus, was nur wegen des
+        // Bursts kurz gezickt hat. Nur was jetzt sauber 404/410 liefert, gilt als wirklich tot.
+        for (const s of unsure.slice()) {
+            if (statusEl) statusEl.innerText = `Prüfe unklare Fälle einzeln … (${dead.length} tot)`;
+            await new Promise(r => setTimeout(r, 150));
+            const cls = classify(await probeStatus(s));
+            if (cls === 'dead') { dead.push({ id: s.id, title: s.title || '(ohne Titel)' }); unsure = unsure.filter(x => x !== s); }
+            else if (cls === 'ok') unsure = unsure.filter(x => x !== s);
+        }
+        _libCheckRunning = false;
+        if (!resultsEl) return;
+
+        // Zu viele unklare Antworten = systemisches Problem (Rate-Limit/Auth/Netz), keine
+        // verstreuten toten Dateien. Dann NICHTS zum Loeschen anbieten.
+        if (unsure.length > 150) {
+            if (statusEl) statusEl.innerText = `${songs.length} geprüft — Ergebnis unzuverlässig (${unsure.length} unklare Antworten, evtl. Rate-Limit). Bitte später erneut.`;
+            resultsEl.innerHTML = '';
+            return;
+        }
+
+        if (statusEl) statusEl.innerText = `Fertig: ${songs.length} geprüft · ${dead.length} tot (404)` + (unsure.length ? ` · ${unsure.length} unklar (übersprungen)` : '');
+        if (dead.length === 0) {
+            resultsEl.innerHTML = `<p style="font-size:13px;color:#32d74b;padding:8px 0;margin:0;">Keine toten Dateien.${unsure.length ? ` (${unsure.length} nicht eindeutig prüfbar – nicht gelöscht.)` : ' 👍'}</p>`;
+            return;
+        }
+
+        resultsEl.innerHTML =
+            `<div style="font-size:13px;color:var(--text-secondary);margin:8px 0;">Nur Dateien mit HTTP 404. „Entfernen" löscht den Song endgültig (Datei + Eintrag).</div>` +
+            dead.map(d => `<div class="lib-dead-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.08);">
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(d.title)}</div>
+                    <div style="font-size:12px;color:var(--text-secondary);">Datei fehlt (404)</div>
+                </div>
+                <button class="lib-del-one" data-id="${_esc(String(d.id))}" style="background:none;border:1px solid rgba(255,80,80,0.5);color:#ff6b6b;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;flex-shrink:0;">Entfernen</button>
+            </div>`).join('') +
+            `<button id="lib-del-all" style="margin-top:12px;width:100%;background:#fa233b;color:#fff;border:none;border-radius:12px;padding:12px;font-size:14px;font-weight:600;cursor:pointer;">Alle ${dead.length} entfernen</button>`;
+
+        resultsEl.querySelectorAll('.lib-del-one').forEach(btn => btn.addEventListener('click', async () => {
+            if (!confirm('Diesen Song endgültig löschen?')) return;
+            btn.disabled = true; btn.innerText = '…';
+            try { await apiDeleteSong(btn.dataset.id); btn.closest('.lib-dead-row').remove(); }
+            catch (e) { btn.disabled = false; btn.innerText = 'Fehler'; }
+        }));
+        document.getElementById('lib-del-all')?.addEventListener('click', async (e) => {
+            if (!confirm(`${dead.length} Songs mit fehlender Datei (404) endgültig löschen?`)) return;
+            e.target.disabled = true; e.target.innerText = 'Läuft…';
+            let ok = 0;
+            for (const d of dead) { try { await apiDeleteSong(d.id); ok++; } catch (err) {} }
+            e.target.innerText = `${ok} von ${dead.length} entfernt`;
+            if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
+        });
+    }
+    document.getElementById('btn-check-library')?.addEventListener('click', _checkLibrary);
     // Beim Start einmal fuellen, damit die Liste nicht leer wirkt, wenn die Einstellungen
     // geoeffnet werden, ohne dass zwischendurch etwas uebersprungen wurde.
     if (typeof window._renderSkipLog === 'function') window._renderSkipLog();
@@ -5401,9 +5570,17 @@ async function _dispatchYtFallbackOnly(item) {
     try {
         const res = await _apiFetch(`${API_URL}/dispatch-import`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ youtube_url: item.url }),
+            body: JSON.stringify({ youtube_url: item.url, queue_id: item.queueItemId || undefined }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // Der Worker gibt die youtube_queue-Zeilen-ID zurueck (legt sie neu an, falls wir noch
+        // keine hatten). Ab jetzt kann die GitHub-Action ihr Ergebnis GENAU diesem Eintrag
+        // zuordnen (POST /internal/queue-status setzt die Zeile auf done/failed), statt dass der
+        // Client nur nach Anzahl neuer Songs raten muss - das war die Ursache dafuer, dass bei
+        // 3 gleichzeitigen Downloads regelmaessig einer auf "Cloud-Fallback laeuft" haengenblieb.
+        const data = await res.json().catch(() => ({}));
+        const returnedId = data && (data.queue_id || data.job_id);
+        if (returnedId && !item.queueItemId) item.queueItemId = returnedId;
         _rememberImportedYtUrl(item.url);
         return true;
     } catch (e) {
@@ -5458,6 +5635,29 @@ async function _watchForFallbackResults() {
             }
             return;
         }
+        // IDENTITAETSBASIERT zuerst: seit die GitHub-Action ihr Ergebnis pro youtube_queue-Zeile
+        // zurueckmeldet (status 'done'/'failed', siehe /internal/queue-status im Worker), lassen
+        // sich Eintraege mit bekannter queueItemId EXAKT aufloesen - kein Raten nach Anzahl mehr.
+        // Der Zaehl-Weg darunter bleibt als Netz fuer Eintraege ohne ID (z.B. Dispatch aus einer
+        // aelteren App-Version, oder Worker-Route noch nicht deployt).
+        try {
+            const qr = await _apiFetch(`${API_URL}/youtube-queue`);
+            if (qr.ok) {
+                const rows = new Map((await qr.json()).map(r => [r.id, r]));
+                let changed = false;
+                for (const it of waiting) {
+                    if (!it.queueItemId) continue;
+                    const row = rows.get(it.queueItemId);
+                    if (!row) continue;
+                    if (row.status === 'done') { it.clientState = 'fallback_done'; it.updatedAt = Date.now(); changed = true; }
+                    else if (row.status === 'failed') { it.clientState = 'fallback_failed'; it.errorMessage = row.error_message || 'Import fehlgeschlagen'; it.updatedAt = Date.now(); changed = true; }
+                }
+                if (changed) { _saveAndRenderYtQueue(); _handleNewlyDoneYtItems(); }
+            }
+        } catch (e) {}
+
+        const waitingNow = _ytQueueState.filter(i => i.clientState === 'fallback_pending');
+        if (waitingNow.length === 0) return;
         try {
             const res = await _apiFetch(`${API_URL}/songs`);
             if (!res.ok) return;
@@ -5466,7 +5666,7 @@ async function _watchForFallbackResults() {
             if (fresh.length === 0) return;
             fresh.forEach(s => knownIds.add(s.id));
             _cacheFreshYtSongs(fresh);
-            waiting.slice(0, fresh.length).forEach(i => { i.clientState = 'fallback_done'; i.updatedAt = Date.now(); });
+            waitingNow.slice(0, fresh.length).forEach(i => { i.clientState = 'fallback_done'; i.updatedAt = Date.now(); });
             _saveAndRenderYtQueue();
         } catch (e) {}
     }

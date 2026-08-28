@@ -58,6 +58,33 @@ def gh_notice(message: str) -> None:
     print(f"::notice::{escaped}", flush=True)
 
 
+# Rueckmeldung an die youtube_queue-Zeile mit dieser job_id (= Zeilen-ID, seit der Worker sie
+# als job_id an GitHub durchreicht). Damit sieht der Client den Ausgang GENAU dieses Imports
+# ('done'/'failed') statt nur nach Anzahl neuer Songs zu raten - das war die Ursache dafuer,
+# dass bei mehreren gleichzeitigen Downloads regelmaessig einer auf "Cloud-Fallback laeuft"
+# haengenblieb. Best effort: schlaegt der Aufruf fehl, ist der Song bei Erfolg trotzdem
+# registriert, und der Client hat weiter seinen zaehl-basierten Abgleich als Netz. Genau EINMAL
+# gesendet (erste Meldung gewinnt - ein spaeterer Fehler soll ein bereits gemeldetes 'done'
+# nicht ueberschreiben).
+_QUEUE_REPORT = {"url": None, "key": None, "job_id": None, "sent": False}
+
+
+def report_queue_status(status: str, error_message: str = "") -> None:
+    cfg = _QUEUE_REPORT
+    if cfg["sent"] or not (cfg["url"] and cfg["key"] and cfg["job_id"]):
+        return
+    cfg["sent"] = True
+    try:
+        requests.post(
+            cfg["url"].rstrip("/") + "/internal/queue-status",
+            json={"job_id": cfg["job_id"], "status": status, "error_message": (error_message or "")[:500]},
+            headers={"Authorization": f"Bearer {cfg['key']}", "Content-Type": "application/json"},
+            timeout=15,
+        )
+    except requests.RequestException:
+        pass
+
+
 def _diagnose_environment() -> None:
     """Prüft VOR dem eigentlichen Download, ob die beiden Abwehrschichten (PO-Token-Server,
     curl_cffi für --impersonate) wirklich einsatzbereit sind. Als Annotation abrufbar – so lässt
@@ -94,11 +121,15 @@ def _diagnose_environment() -> None:
 # zufällig gemischt, damit nicht immer dieselbe Instanz die Last trägt. Community-Betreiber können
 # jederzeit abschalten oder überlastet sein – deshalb mehrere statt einer einzigen, und deshalb
 # bleibt yt-dlp+Cookies als Sicherheitsnetz bestehen, falls der gesamte Pool ausfällt.
+#
+# 2026-08-28 neu geprüft (echter Audio-Download über den Tunnel, nicht nur "status: tunnel"):
+# kittycat.boo verlangt jetzt JWT-Auth, rue-cobalt.xenon.zone ist offline (530),
+# liubquanti.click liefert nur noch einen leeren Tunnel (0 Bytes). Der öffentliche Cobalt-Pool
+# ist stark geschrumpft – genau deshalb ist COBALT_ONLY_TESTING unten wieder aus, yt-dlp+Cookies
+# fängt jetzt ab, was der Pool nicht mehr schafft.
 COBALT_INSTANCES = [
-    "https://api.cobalt.liubquanti.click",
-    "https://cobaltapi.kittycat.boo",
-    "https://rue-cobalt.xenon.zone",
-    "https://cobaltapi.cjs.nz",
+    "https://cobaltapi.cjs.nz",   # 2026-08-28: 8,5-MB-Download OK
+    "https://co.otomir23.me",     # 2026-08-28: Download OK, content-type audio/mpeg
 ]
 
 _YOUTUBE_URL_RE = re.compile(r"^https://(www\.|m\.)?(youtube\.com/watch\?v=|youtu\.be/)", re.IGNORECASE)
@@ -108,11 +139,12 @@ _YOUTUBE_URL_RE = re.compile(r"^https://(www\.|m\.)?(youtube\.com/watch\?v=|yout
 # so viel.
 _COBALT_MAX_BYTES = 60 * 1024 * 1024  # 60 MB
 
-# Testphase (Nutzerwunsch 2026-07-26): yt-dlp-Fallback bewusst deaktiviert, damit die ECHTE
-# Erfolgsquote des Cobalt-Pools sichtbar wird, statt von yt-dlp automatisch verdeckt zu werden.
-# Scheitert der Cobalt-Pool, bricht der Job hart ab (kein stiller Umstieg auf yt-dlp+Cookies) -
-# der Nutzer holt den Import dann manuell nach. Zum Reaktivieren einfach auf False setzen.
-COBALT_ONLY_TESTING = True
+# 2026-07-26 fuer eine Messphase auf True gesetzt (echte Cobalt-Erfolgsquote sichtbar machen).
+# 2026-08-28 zurueck auf False: die Messphase ist vorbei UND der oeffentliche Cobalt-Pool ist
+# auf 2 funktionierende Instanzen geschrumpft (siehe COBALT_INSTANCES). Mit True brach jeder
+# Job, den der Pool nicht schaffte, hart ab (sys.exit 1) - der Song kam nie an, obwohl "Download"
+# gedrueckt war. Mit False faellt er wie urspruenglich vorgesehen auf yt-dlp+Cookies zurueck.
+COBALT_ONLY_TESTING = False
 
 
 def _is_safe_tunnel_url(url: str) -> bool:
@@ -472,6 +504,24 @@ def register_song(
 # ──────────────────────────────────────────────
 
 def main() -> None:
+    # job_id + D1-Zugang fuer die Statusmeldung sichern, BEVOR irgendetwas schiefgehen kann.
+    _QUEUE_REPORT.update(
+        url=os.environ.get("D1_API_URL", "").strip() or None,
+        key=os.environ.get("D1_API_KEY", "").strip() or None,
+        job_id=os.environ.get("JOB_ID", "").strip() or None,
+    )
+    try:
+        _do_import()
+    except BaseException as exc:  # schliesst SystemExit aus sys.exit(1) mit ein
+        code = getattr(exc, "code", 1)
+        if not isinstance(exc, SystemExit) or code not in (0, None):
+            msg = "Import fehlgeschlagen (Details im GitHub-Job-Log)" if isinstance(exc, SystemExit) else (str(exc) or "Import fehlgeschlagen")
+            report_queue_status("failed", msg)
+        raise
+    report_queue_status("done")
+
+
+def _do_import() -> None:
     youtube_url          = require_env("YOUTUBE_URL")
     job_id               = require_env("JOB_ID")
     r2_account_id        = require_env("R2_ACCOUNT_ID")
@@ -497,7 +547,7 @@ def main() -> None:
             file_ext    = "mp3"
             content_type = "audio/mpeg"
         elif COBALT_ONLY_TESTING:
-            gh_error("Cobalt-Pool fehlgeschlagen – yt-dlp-Fallback ist zur Testphase deaktiviert (COBALT_ONLY_TESTING=True), Job bricht ab statt auf Cookies umzuschwenken.")
+            gh_error("Cobalt-Pool fehlgeschlagen und COBALT_ONLY_TESTING ist gesetzt – Job bricht ab statt auf yt-dlp+Cookies umzuschwenken. (Standard ist False; nur fuer eine gezielte Messung wieder aktivieren.)")
             sys.exit(1)
         else:
             # Cookies EINMAL schreiben, für Metadaten- und Download-Aufruf gemeinsam nutzen
