@@ -175,9 +175,7 @@ function _renderVibesText(el, vibesArr, songId) {
     const vibes = _parseVibes(vibesArr);
     if (vibes.length === 0) { el.innerText = 'Aktueller Titel'; return; }
     const mainVibes = songId != null ? _getMainVibes(songId) : [];
-    // Hauptvibes bleiben fett in der Akzentfarbe (staerkste Hervorhebung); die uebrigen tragen
-    // ihre feste Vibe-Farbe (siehe _vibeColor) - dieselbe Farbe wie in den Auswahl-Pillen.
-    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b style="color:var(--accent)">${_esc(v)}</b>` : `<span style="color:${_vibeColor(v)}">${_esc(v)}</span>`).join(' • ');
+    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b style="color:var(--accent)">${_esc(v)}</b>` : _esc(v)).join(' • ');
 }
 
 // Sender-Songliste für einen Ausgangssong: gewichtete Ähnlichkeit statt reinem Overlap-Zähler.
@@ -1044,37 +1042,6 @@ async function fetchCoverFromiTunes(title, artist) {
 }
 
 const AVAILABLE_VIBES = ["Afro", "Ghana", "RnB", "Old School", "Deepdream", "LD", "Calm", "SAD", "Gym", "HYPE", "Carpool", "Amapiano", "Hard rap", "Dancehall", "Rap", "Summer", "Latenight", "Dance", "Christ", "Soul", "Exotic", "N-rei", "ODS", "G-Nrei","POP","OGG"];
-
-// Feste, wiedererkennbare Farbe pro Vibe - nur die Schrift, an jeder Auswahl-Stelle
-// (Tag-Editor, Filter, Vibe-Mix-Ersteller) und in der Vibes-Zeile des grossen Players.
-// Zweck: beim Vibe-Mix-Erstellen nicht mehr die ganze Liste absuchen muessen, sondern den
-// gesuchten Vibe an seiner Farbe finden. Der GOLDENE WINKEL (137.508 Grad) verteilt die 26
-// Namen maximal gleichmaessig ueber den Farbkreis und legt in der Liste benachbarte Vibes
-// weit auseinander - keine Handpflege noetig, deterministisch und stabil (dieselbe Farbe bei
-// jedem Laden). Feste Helligkeit 70% haelt jede Farbe auf dem dunklen Pillen-Grund lesbar.
-function _vibeColor(name) {
-    const i = AVAILABLE_VIBES.indexOf(name);
-    if (i < 0) return 'var(--text-secondary)';
-    return `hsl(${Math.round((i * 137.508) % 360)}, 70%, 70%)`;
-}
-
-// Erzeugt einmal einen <style>-Block mit einer Regel je Vibe. Bewusst NICHT in den 3
-// Render-Stellen inline gesetzt: so bleiben aktive (.active) und ausgeschlossene (.excluded)
-// Pillen unveraendert (die :not() schuetzen sie) und die Klick-Handler brauchen keine
-// Aenderung. data-vibe ist ein fester Konstanten-Wert (AVAILABLE_VIBES), kein Nutzer-Input -
-// die beiden Sonderzeichen, die einen Attribut-Selektor sprengen koennten, werden trotzdem
-// maskiert.
-function _injectVibeColorStyles() {
-    if (document.getElementById('vibe-color-rules')) return;
-    const css = AVAILABLE_VIBES.map(v =>
-        `.vibe-pill[data-vibe="${v.replace(/["\\]/g, '\\$&')}"]:not(.active):not(.excluded){color:${_vibeColor(v)};font-weight:600}`
-    ).join('\n');
-    const style = document.createElement('style');
-    style.id = 'vibe-color-rules';
-    style.textContent = css;
-    (document.head || document.documentElement).appendChild(style);
-}
-_injectVibeColorStyles();
 
 function addClearButton(inputElement) {
     if (!inputElement || inputElement.dataset.hasClearBtn) return;
@@ -3167,7 +3134,7 @@ let _bgCacheActive = false;
         actionFilterVibeBtn.addEventListener('click', () => {
             actionSheetOverlay.classList.remove('active');
             if(filterVibesContainer.innerHTML === '') {
-                const noVibePill = document.createElement('div'); noVibePill.className = 'vibe-pill'; noVibePill.innerText = 'Kein Vibe'; noVibePill.dataset.vibe = '__no_vibe__';
+                const noVibePill = document.createElement('div'); noVibePill.className = 'vibe-pill vibe-pill-wide'; noVibePill.innerText = 'Kein Vibe'; noVibePill.dataset.vibe = '__no_vibe__';
                 noVibePill.addEventListener('click', () => noVibePill.classList.toggle('active')); filterVibesContainer.appendChild(noVibePill);
                 AVAILABLE_VIBES.forEach(vibe => { const pill = document.createElement('div'); pill.className = 'vibe-pill'; pill.innerText = vibe; pill.dataset.vibe = vibe; pill.addEventListener('click', () => pill.classList.toggle('active')); filterVibesContainer.appendChild(pill); });
             }
@@ -3596,7 +3563,7 @@ async function createNewPlaylistProcess() {
     document.getElementById('btn-home-vibemix')?.addEventListener('click', () => {
         const cont = document.getElementById('mix-vibes-container');
         if(cont && cont.innerHTML === '') {
-            const noVibePill = document.createElement('div'); noVibePill.className = 'vibe-pill'; noVibePill.innerText = '🚫 Kein Vibe'; noVibePill.dataset.vibe = '__no_vibe__';
+            const noVibePill = document.createElement('div'); noVibePill.className = 'vibe-pill vibe-pill-wide'; noVibePill.innerText = '🚫 Kein Vibe'; noVibePill.dataset.vibe = '__no_vibe__';
             noVibePill.addEventListener('click', () => { noVibePill.classList.toggle('active'); if (noVibePill.classList.contains('active')) { cont.querySelectorAll('.vibe-pill:not([data-vibe="__no_vibe__"])').forEach(p => p.classList.remove('active')); } }); cont.appendChild(noVibePill);
             // Antippen = einschließen (UND-Pflicht bzw. Hauptvibe-Treffer, siehe Handler unten), Longpress
             // = ausschließen. Beide Zustände schließen sich pro Pille gegenseitig aus. longPressFired

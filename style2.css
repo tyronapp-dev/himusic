@@ -875,18 +875,31 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     outline: none; font-family: inherit;
 }
 
+/* FESTES 3-Spalten-Raster (vorher flex-wrap). Grund: flex-wrap brach je nach Overlay-Breite
+   an anderer Stelle um, und der Vibe-Mix hatte zusaetzlich eine fuehrende "Kein Vibe"-Pille -
+   die 2D-Anordnung der Vibes war dadurch im Tag-Editor, im Filter und im Vibe-Mix jeweils
+   anders. Mit einem festen Raster sitzt jeder Vibe UEBERALL in derselben Zelle, die Position
+   wird lernbar (Nutzerwunsch: nicht mehr lange nach dem richtigen Vibe suchen muessen). */
 .vibes-container {
-    display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;
-    max-height: 155px; overflow-y: auto; padding-bottom: 4px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px; margin-bottom: 20px;
+    max-height: 46vh; overflow-y: auto; padding-bottom: 4px;
 }
 .vibe-pill {
     background: rgba(255,255,255,0.08);
     border: 0.5px solid rgba(255,255,255,0.14);
-    padding: 8px 16px; border-radius: 20px;
+    padding: 8px 10px; border-radius: 14px;
     font-size: 13px; font-weight: 500;
     color: var(--text-secondary); cursor: pointer;
     transition: background 0.18s, color 0.18s, border-color 0.18s;
+    /* einzeilig + zentriert statt textbreit - sonst spraengen lange Namen die Rasterzelle */
+    min-height: 40px; display: flex; align-items: center; justify-content: center;
+    text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* Volle Zeile fuer die "Kein Vibe"-Pille (Filter + Vibe-Mix) - stoert das 3er-Raster
+   der 26 Vibes darunter nicht, die stehen damit an denselben Zellen wie im Tag-Editor. */
+.vibe-pill.vibe-pill-wide { grid-column: 1 / -1; }
 .vibe-pill.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 /* Hauptvibe: zusätzlicher Ring um die normale aktive Pille, gut sichtbar auch im Glass-Stil weiter unten. */
 .vibe-pill.main-vibe { box-shadow: 0 0 0 2px var(--accent-text, #fff); }
