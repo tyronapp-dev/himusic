@@ -594,6 +594,228 @@ async function _ytDownloadAudio(ex) {
     return { status: 206, bytes: out, chunks: chunkLog };
 }
 
+// YouTube liefert Audio nur noch als fragmentiertes MP4 (DASH: ftyp + winziges moov ohne
+// Sample-Tabellen + viele moof/mdat-Paare). Der Browser spielt das, der native iOS-AVPlayer
+// der Huelle NICHT zuverlaessig - yt-dlp remuxt dafuer normalerweise mit ffmpeg. In der App
+// gibt es kein ffmpeg, also bauen wir das MP4 selbst zu progressiver Form um (ftyp + volles
+// moov mit stbl + ein mdat). Rein binaer, kein Re-Encoding - die AAC-Samples bleiben Bit fuer
+// Bit gleich (per WebAudio-Decode gegen die Quelle geprueft). Annahme: genau eine Audiospur.
+function _mp4IsFragmented(b) {
+    let p = 0;
+    for (let guard = 0; guard < 8 && p + 8 <= b.length; guard++) {
+        let size = b[p] * 0x1000000 + (b[p + 1] << 16) + (b[p + 2] << 8) + b[p + 3];
+        const type = String.fromCharCode(b[p + 4], b[p + 5], b[p + 6], b[p + 7]);
+        if (type === 'moof') return true;
+        if (type === 'mdat') return false;      // progressiv: mdat vor jedem moof
+        if (size < 8) return false;
+        p += size;
+    }
+    return false;
+}
+
+function _ytRemuxToProgressiveMp4(input) {
+    const b = input instanceof Uint8Array ? input : new Uint8Array(input);
+    const N = b.length;
+    const u32 = (o) => b[o] * 0x1000000 + (b[o + 1] << 16) + (b[o + 2] << 8) + b[o + 3];
+    const u64 = (o) => u32(o) * 0x100000000 + u32(o + 4);
+    const wU32 = (buf, o, v) => { buf[o] = (v >>> 24) & 255; buf[o + 1] = (v >>> 16) & 255; buf[o + 2] = (v >>> 8) & 255; buf[o + 3] = v & 255; };
+    const TAG = (o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+    function eachBox(start, end, cb) {
+        let p = start;
+        while (p + 8 <= end) {
+            let size = u32(p); let hdr = 8;
+            if (size === 1) { size = u64(p + 8); hdr = 16; }
+            else if (size === 0) size = end - p;
+            if (size < hdr || p + size > end) break;
+            cb(TAG(p + 4), p + hdr, p + size, p);
+            p += size;
+        }
+    }
+    function findBox(start, end, path) {
+        const [head, ...rest] = path;
+        let found = null;
+        eachBox(start, end, (t, cs, ce) => { if (!found && t === head) found = [cs, ce]; });
+        if (!found) return null;
+        return rest.length ? findBox(found[0], found[1], rest) : found;
+    }
+    function mkBox(type, ...parts) {
+        let len = 8;
+        for (const p of parts) len += p.length;
+        const out = new Uint8Array(len);
+        wU32(out, 0, len);
+        out[4] = type.charCodeAt(0); out[5] = type.charCodeAt(1); out[6] = type.charCodeAt(2); out[7] = type.charCodeAt(3);
+        let o = 8;
+        for (const p of parts) { out.set(p, o); o += p.length; }
+        return out;
+    }
+
+    let ftyp = null, moovRange = null;
+    eachBox(0, N, (t, cs, ce, bs) => {
+        if (t === 'ftyp' && !ftyp) ftyp = b.slice(bs, ce);
+        if (t === 'moov' && !moovRange) moovRange = [cs, ce];
+    });
+    if (!moovRange) throw new Error('kein moov');
+    if (!ftyp) ftyp = mkBox('ftyp', new Uint8Array([0x69, 0x73, 0x6f, 0x6d, 0, 0, 2, 0, 0x69, 0x73, 0x6f, 0x6d, 0x69, 0x73, 0x6f, 0x32, 0x6d, 0x70, 0x34, 0x31]));
+    const [mvS, mvE] = moovRange;
+
+    const mvhd = findBox(mvS, mvE, ['mvhd']);
+    if (!mvhd) throw new Error('kein mvhd');
+    const movieTimescale = b[mvhd[0]] === 1 ? u32(mvhd[0] + 20) : u32(mvhd[0] + 12);
+
+    const trak = findBox(mvS, mvE, ['trak']);
+    if (!trak) throw new Error('kein trak');
+    const tkhd = findBox(trak[0], trak[1], ['tkhd']);
+    const edts = findBox(trak[0], trak[1], ['edts']); // Edit-List schneidet AAC-Priming - behalten
+    const mdia = findBox(trak[0], trak[1], ['mdia']);
+    const mdhd = mdia && findBox(mdia[0], mdia[1], ['mdhd']);
+    const hdlr = mdia && findBox(mdia[0], mdia[1], ['hdlr']);
+    const minf = mdia && findBox(mdia[0], mdia[1], ['minf']);
+    const stbl = minf && findBox(minf[0], minf[1], ['stbl']);
+    const stsd = stbl && findBox(stbl[0], stbl[1], ['stsd']);
+    const smhd = minf && findBox(minf[0], minf[1], ['smhd']);
+    const dinf = minf && findBox(minf[0], minf[1], ['dinf']);
+    if (!tkhd || !stsd || !smhd || !dinf || !mdhd || !hdlr) throw new Error('moov unvollstaendig');
+    const mediaTimescale = b[mdhd[0]] === 1 ? u32(mdhd[0] + 20) : u32(mdhd[0] + 12);
+
+    let trexDefDur = 0, trexDefSize = 0;
+    const mvex = findBox(mvS, mvE, ['mvex']);
+    if (mvex) {
+        const trex = findBox(mvex[0], mvex[1], ['trex']);
+        if (trex) { trexDefDur = u32(trex[0] + 16); trexDefSize = u32(trex[0] + 20); }
+    }
+
+    const sizes = [], durations = [], sampleChunks = [];
+    let totalBytes = 0, p = 0;
+    while (p + 8 <= N) {
+        let size = u32(p); let hdr = 8;
+        if (size === 1) { size = u64(p + 8); hdr = 16; }
+        else if (size === 0) size = N - p;
+        if (TAG(p + 4) === 'moof') {
+            const moofStart = p;
+            const traf = findBox(p + hdr, p + size, ['traf']);
+            if (traf) {
+                const tfhd = findBox(traf[0], traf[1], ['tfhd']);
+                const tfhdFlags = u32(tfhd[0]) & 0xffffff;
+                let q = tfhd[0] + 8;
+                let baseDataOffset = null, defDur = trexDefDur, defSize = trexDefSize;
+                if (tfhdFlags & 0x000001) { baseDataOffset = u64(q); q += 8; }
+                if (tfhdFlags & 0x000002) q += 4;
+                if (tfhdFlags & 0x000008) { defDur = u32(q); q += 4; }
+                if (tfhdFlags & 0x000010) { defSize = u32(q); q += 4; }
+                if (tfhdFlags & 0x000020) q += 4;
+                const defaultBaseIsMoof = !!(tfhdFlags & 0x020000);
+                eachBox(traf[0], traf[1], (tt, tcs) => {
+                    if (tt !== 'trun') return;
+                    const f = u32(tcs) & 0xffffff;
+                    let r = tcs + 4;
+                    const count = u32(r); r += 4;
+                    let dataOffset = 0;
+                    if (f & 0x000001) { dataOffset = (u32(r) | 0); r += 4; }
+                    if (f & 0x000004) r += 4;
+                    const base = baseDataOffset != null ? baseDataOffset : moofStart;
+                    let pos = base + dataOffset;
+                    for (let i = 0; i < count; i++) {
+                        let dur = defDur, sz = defSize;
+                        if (f & 0x000100) { dur = u32(r); r += 4; }
+                        if (f & 0x000200) { sz = u32(r); r += 4; }
+                        if (f & 0x000400) r += 4;
+                        if (f & 0x000800) r += 4;
+                        sizes.push(sz); durations.push(dur);
+                        sampleChunks.push(b.subarray(pos, pos + sz));
+                        pos += sz; totalBytes += sz;
+                    }
+                });
+            }
+        }
+        if (size < hdr) break;
+        p += size;
+    }
+    if (!sizes.length) throw new Error('keine Samples in moof');
+
+    const stts = (() => {
+        const runs = [];
+        for (const d of durations) {
+            const last = runs[runs.length - 1];
+            if (last && last[1] === d) last[0]++; else runs.push([1, d]);
+        }
+        const body = new Uint8Array(8 + runs.length * 8);
+        wU32(body, 4, runs.length);
+        runs.forEach(([c, d], i) => { wU32(body, 8 + i * 8, c); wU32(body, 12 + i * 8, d); });
+        return mkBox('stts', body);
+    })();
+    const stsc = (() => {
+        const body = new Uint8Array(20);
+        wU32(body, 4, 1); wU32(body, 8, 1); wU32(body, 12, sizes.length); wU32(body, 16, 1);
+        return mkBox('stsc', body);
+    })();
+    const stsz = (() => {
+        const body = new Uint8Array(12 + sizes.length * 4);
+        wU32(body, 8, sizes.length);
+        sizes.forEach((s, i) => wU32(body, 12 + i * 4, s));
+        return mkBox('stsz', body);
+    })();
+    // stco: [version/flags][entry_count=1][offset] - Offset wird nach dem moov-Bau gepatcht.
+    const stco = mkBox('stco', (() => { const bd = new Uint8Array(12); wU32(bd, 4, 1); return bd; })());
+
+    const slice = (r) => b.slice(r[0] - 8, r[1]);
+    const newStbl = mkBox('stbl', slice(stsd), stts, stsc, stsz, stco);
+    const newMinf = mkBox('minf', slice(smhd), slice(dinf), newStbl);
+
+    const totalMediaDur = durations.reduce((a, c) => a + c, 0);
+    const newMdhd = (() => {
+        const body = new Uint8Array(24);
+        wU32(body, 12, mediaTimescale); wU32(body, 16, totalMediaDur);
+        body[20] = 0x55; body[21] = 0xC4; // 'und'
+        return mkBox('mdhd', body);
+    })();
+    const newMdia = mkBox('mdia', newMdhd, slice(hdlr), newMinf);
+
+    const tkhdBox = slice(tkhd);
+    const movieDur = Math.round(totalMediaDur * movieTimescale / mediaTimescale);
+    (tkhdBox[8] === 1)
+        ? (wU32(tkhdBox, 36, 0), wU32(tkhdBox, 40, movieDur))
+        : wU32(tkhdBox, 28, movieDur);
+    const trakParts = [tkhdBox];
+    if (edts) trakParts.push(slice(edts));
+    trakParts.push(newMdia);
+    const newTrak = mkBox('trak', ...trakParts);
+
+    const mvhdBox = slice(mvhd);
+    (mvhdBox[8] === 1)
+        ? (wU32(mvhdBox, 32, 0), wU32(mvhdBox, 36, movieDur))   // v1: 64-bit Dauer bei Offset 32
+        : wU32(mvhdBox, 24, movieDur);                          // v0: 32-bit Dauer bei Offset 24
+    const newMoov = mkBox('moov', mvhdBox, newTrak);
+
+    // stco im frisch gebauten moov auf den echten Offset des ersten Samples patchen.
+    const firstSampleOffset = ftyp.length + newMoov.length + 8;
+    (function patchStco(path) {
+        const walk = (start, end, pth) => {
+            const [head, ...rest] = pth;
+            let pp = start;
+            while (pp + 8 <= end) {
+                const sz = newMoov[pp] * 0x1000000 + (newMoov[pp + 1] << 16) + (newMoov[pp + 2] << 8) + newMoov[pp + 3];
+                const ty = String.fromCharCode(newMoov[pp + 4], newMoov[pp + 5], newMoov[pp + 6], newMoov[pp + 7]);
+                if (ty === head) { rest.length ? walk(pp + 8, pp + sz, rest) : wU32(newMoov, pp + 16, firstSampleOffset); return; }
+                if (sz < 8) return;
+                pp += sz;
+            }
+        };
+        walk(8, newMoov.length, path);
+    })(['trak', 'mdia', 'minf', 'stbl', 'stco']);
+
+    const mdatHeader = new Uint8Array(8);
+    wU32(mdatHeader, 0, 8 + totalBytes);
+    mdatHeader[4] = 0x6d; mdatHeader[5] = 0x64; mdatHeader[6] = 0x61; mdatHeader[7] = 0x74;
+
+    const out = new Uint8Array(ftyp.length + newMoov.length + 8 + totalBytes);
+    let o = 0;
+    out.set(ftyp, o); o += ftyp.length;
+    out.set(newMoov, o); o += newMoov.length;
+    out.set(mdatHeader, o); o += 8;
+    for (const c of sampleChunks) { out.set(c, o); o += c.length; }
+    return { bytes: out, samples: sizes.length, durationSec: totalMediaDur / mediaTimescale };
+}
+
 async function _ytImportOne(item) {
     // Primaerweg ist der IOS-Client (liefert direkte, nicht-verschluesselte URLs). Scheitert der
     // Download trotzdem (403/401), wird der naechste Client versucht - meist bringt das nichts
@@ -630,8 +852,30 @@ async function _ytImportOne(item) {
         return { ok: false, reason: 'keine m4a-Datei (falsche Kopfsignatur, Client ' + ex.client + ')' };
     }
 
+    // Fragmentiertes MP4 (DASH) -> progressives MP4, sonst spielt der native AVPlayer es nicht.
+    let outBytes = bytes;
+    if (_mp4IsFragmented(bytes)) {
+        try {
+            const r = _ytRemuxToProgressiveMp4(bytes);
+            // Ein sauberer Remux ist ~99% der Eingabegroesse (nur moof/sidx-Overhead faellt weg)
+            // und hat einen ftyp-Kopf. Passt das nicht, lieber die Rohdatei nehmen.
+            const plausible = r && r.bytes && r.samples > 10 &&
+                r.bytes.length > bytes.length * 0.8 && r.bytes.length < bytes.length * 1.1 &&
+                String.fromCharCode(r.bytes[4], r.bytes[5], r.bytes[6], r.bytes[7]) === 'ftyp' &&
+                !_mp4IsFragmented(r.bytes);
+            if (plausible) {
+                outBytes = r.bytes;
+                dbg.remux = { ok: true, samples: r.samples, durationSec: Math.round(r.durationSec), inBytes: bytes.length, outBytes: r.bytes.length };
+            } else {
+                dbg.remux = { ok: false, reason: 'Ergebnis unplausibel', outBytes: r && r.bytes && r.bytes.length };
+            }
+        } catch (e) {
+            dbg.remux = { ok: false, reason: e.message };   // Rohdatei hochladen - besser als nichts
+        }
+    }
+
     const fname = 'fast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '_local_yt.m4a';
-    const up = await _apiFetch(`${API_URL}/upload/${fname}`, { method: 'PUT', headers: { 'Content-Type': 'audio/mp4' }, body: bytes });
+    const up = await _apiFetch(`${API_URL}/upload/${fname}`, { method: 'PUT', headers: { 'Content-Type': 'audio/mp4' }, body: outBytes });
     if (!up.ok) return { ok: false, reason: 'Upload HTTP ' + up.status };
     const upData = await up.json().catch(() => ({}));
     const fileUrl = upData.url || `${API_URL}/media/${fname}`;
@@ -640,12 +884,12 @@ async function _ytImportOne(item) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             title: ex.title || 'YouTube Import', artist: 'Unbekannt', cover_data: '',
-            file_url: fileUrl, file_size: bytes.length, duration: ex.lengthSeconds || 0, vibes: [],
+            file_url: fileUrl, file_size: outBytes.length, duration: ex.lengthSeconds || 0, vibes: [],
         }),
     });
     if (!reg.ok) return { ok: false, reason: 'Song anlegen HTTP ' + reg.status };
     const regData = await reg.json().catch(() => ({}));
-    return { ok: true, title: ex.title, client: ex.client, bytes: bytes.length, duplicate: !!regData.duplicate, videoId: ex.videoId };
+    return { ok: true, title: ex.title, client: ex.client, bytes: outBytes.length, remuxed: outBytes !== bytes, duplicate: !!regData.duplicate, videoId: ex.videoId };
 }
 
 // auto=true (Auslauf beim App-Oeffnen): gescheiterte Eintraege werden AUFGEGEBEN. Sonst wuerde
