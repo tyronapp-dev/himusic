@@ -458,14 +458,11 @@ let _ytImportRunning = false;
 
 async function _ytDownloadAudio(ex) {
     const ua = (_YT_CLIENTS.find(c => c.name === ex.client) || {}).ua || '';
-    const rangeEnd = ex.contentLength ? String(ex.contentLength - 1) : '9999999999';
-    // googlevideo kennt ZWEI Wege fuer einen Bytebereich: den HTTP-Range-Header UND den
-    // URL-Parameter &range=. Manche URL-Formen (c=IOS, gir=yes) beantworten nur den einen und
-    // geben beim anderen 403. Deshalb beide setzen. KEIN &alr=yes - damit antwortet googlevideo
-    // mit einer Text-Redirect-URL statt den Audiodaten.
-    let url = ex.url;
-    if (!/[?&]range=/.test(url)) url += '&range=0-' + rangeEnd;
-    return _nativeHttp('GET', url, {
+    const rangeEnd = ex.contentLength ? String(ex.contentLength - 1) : '';
+    // URL UNANGETASTET lassen und den Bytebereich NUR ueber den HTTP-Range-Header anfordern -
+    // genau so, wie der Phase-0-Test 206 + volle Geschwindigkeit bekam. Ein zusaetzliches
+    // &range= AN DER URL laesst googlevideo bei gir=yes-URLs mit 403 abweisen.
+    return _nativeHttp('GET', ex.url, {
         headers: Object.assign({ 'Range': 'bytes=0-' + rangeEnd, 'Accept': '*/*' }, ua ? { 'User-Agent': ua } : {}),
     });
 }
