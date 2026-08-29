@@ -467,13 +467,20 @@ async function _ytDownloadAudio(ex) {
     const total = ex.contentLength || 0;
     const hardCap = _YT_IMPORT_MAX_BYTES + 2 * 1024 * 1024;
     const parts = [];
+    const chunkLog = [];
     let got = 0;
     while (true) {
         const end = total ? (Math.min(got + _YT_DL_CHUNK, total) - 1) : (got + _YT_DL_CHUNK - 1);
+        // Accept-Encoding: identity - iOS-URLSession schickt sonst "gzip, deflate, br"; googlevideo
+        // weist eine videoplayback-Range mit Kompressionswunsch mit 403 ab (curl schickt keins).
         const res = await _nativeHttp('GET', ex.url, {
-            headers: Object.assign({ 'Range': 'bytes=' + got + '-' + end }, ua ? { 'User-Agent': ua } : {}),
+            headers: Object.assign(
+                { 'Range': 'bytes=' + got + '-' + end, 'Accept-Encoding': 'identity' },
+                ua ? { 'User-Agent': ua } : {}
+            ),
         });
-        if (res.status !== 200 && res.status !== 206) return { status: res.status, bytes: null };
+        chunkLog.push({ range: got + '-' + end, http: res.status, got: res.bodyLength });
+        if (res.status !== 200 && res.status !== 206) return { status: res.status, bytes: null, chunks: chunkLog };
         const b = _b64ToBytes(res.bodyBase64);
         if (b.length === 0) break;
         parts.push(b);
@@ -481,12 +488,12 @@ async function _ytDownloadAudio(ex) {
         if (total && got >= total) break;
         if (b.length > _YT_DL_CHUNK) break;   // Server hat die ganze Datei auf einmal geliefert
         if (!total && b.length < _YT_DL_CHUNK) break; // weniger als angefragt = Dateiende
-        if (got > hardCap) return { status: 998, bytes: null };
+        if (got > hardCap) return { status: 998, bytes: null, chunks: chunkLog };
     }
     const out = new Uint8Array(got);
     let off = 0;
     for (const p of parts) { out.set(p, off); off += p.length; }
-    return { status: 206, bytes: out };
+    return { status: 206, bytes: out, chunks: chunkLog };
 }
 
 async function _ytImportOne(item) {
@@ -494,21 +501,25 @@ async function _ytImportOne(item) {
     // Download trotzdem (403/401), wird der naechste Client versucht - meist bringt das nichts
     // (die anderen Client-Konfigs sind zzt. veraltet), aber es kostet nichts als Sicherheitsnetz.
     const tried = [];
+    const dbg = { url: item.url, rounds: [] };
     let ex = null, dl = null;
     while (true) {
         const cand = await _ytExtract(item.url, { skipClients: tried });
-        if (!cand.ok || !cand.url) return { ok: false, reason: (cand.error || 'Extraktion fehlgeschlagen') + (tried.length ? ' (getestet: ' + tried.join(', ') + ')' : '') };
-        if (cand.hasCipher) { tried.push(cand.client); continue; } // Cipher-URL koennen wir (noch) nicht
+        const round = { skip: tried.slice(), client: cand.client || null, extractOk: !!cand.ok, hasUrl: !!cand.url, hasCipher: !!cand.hasCipher, playerAttempts: cand.attempts };
+        if (cand.url) { try { round.ip = new URL(cand.url).searchParams.get('ip'); round.gir = new URL(cand.url).searchParams.get('gir'); } catch (e) {} }
+        dbg.rounds.push(round);
+        if (!cand.ok || !cand.url) return { ok: false, reason: (cand.error || 'Extraktion fehlgeschlagen') + (tried.length ? ' (getestet: ' + tried.join(', ') + ')' : ''), detail: dbg };
+        if (cand.hasCipher) { tried.push(cand.client); continue; }
         tried.push(cand.client);
-        // Schon per Video-ID importiert (auch "andere URL, selbes Video"): kein zweiter Upload.
         try { if (_loadImportedYtUrls().has('vid:' + cand.videoId)) return { ok: true, duplicate: true, skipped: true, title: cand.title }; } catch (e) {}
         if (cand.contentLength && cand.contentLength > _YT_IMPORT_MAX_BYTES) {
-            return { ok: false, reason: 'Datei zu gross fuer In-App-Import (' + Math.round(cand.contentLength / 1048576) + ' MB)' };
+            return { ok: false, reason: 'Datei zu gross fuer In-App-Import (' + Math.round(cand.contentLength / 1048576) + ' MB)', detail: dbg };
         }
         const d = await _ytDownloadAudio(cand);
+        round.download = { status: d.status, chunks: d.chunks };
         if ((d.status === 200 || d.status === 206) && d.bytes) { ex = cand; dl = d; break; }
-        if ((d.status === 403 || d.status === 401) && tried.length < _YT_CLIENTS.length) continue; // naechster Client
-        return { ok: false, reason: 'Download HTTP ' + d.status + ' (Clients: ' + tried.join(', ') + ')' };
+        if ((d.status === 403 || d.status === 401) && tried.length < _YT_CLIENTS.length) continue;
+        return { ok: false, reason: 'Download HTTP ' + d.status + ' (Clients: ' + tried.join(', ') + ')', detail: dbg };
     }
 
     const bytes = dl.bytes;
@@ -560,12 +571,12 @@ async function _ytImportQueue(auto = false) {
     items = items.slice(0, _YT_IMPORT_RUN_CAP);
     _ytImportRunning = true;
     if (window._showToast) window._showToast('In-App-Import startet: ' + items.length + (uebrig ? ' (+' + uebrig + ' spaeter)' : '') + ' …', 3000);
-    let ok = 0, fail = 0;
+    let ok = 0, fail = 0, lastFail = null;
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
         item.clientState = 'processing'; item.updatedAt = Date.now(); _saveAndRenderYtQueue();
         let res;
-        try { res = await _ytImportOne(item); } catch (e) { res = { ok: false, reason: e.message }; }
+        try { res = await _ytImportOne(item); } catch (e) { res = { ok: false, reason: 'Ausnahme: ' + e.message }; }
         if (res.ok) {
             ok++;
             item.clientState = 'done'; item.updatedAt = Date.now();
@@ -574,10 +585,19 @@ async function _ytImportQueue(auto = false) {
             if (item.queueItemId) { try { await _apiFetch(`${API_URL}/youtube-queue/${item.queueItemId}`, { method: 'DELETE' }); } catch (e) {} }
         } else {
             fail++;
+            lastFail = { title: item.title || item.url, reason: res.reason, detail: res.detail || null };
             item.clientState = 'failed'; item.errorMessage = res.reason || 'Fehler'; item.updatedAt = Date.now();
         }
         _saveAndRenderYtQueue();
         if (i < items.length - 1 && !res.skipped) await new Promise(r => setTimeout(r, _YT_IMPORT_ITEM_DELAY_MS));
+    }
+    // Letzten Fehler in den Diagnose-Kasten schreiben (Einstellungen -> YouTube-Import-Test) -
+    // damit man ihn kopieren kann. Enthaelt pro Runde: Client, ip=/gir= der URL, Player-Antworten
+    // je Client, und pro Chunk den HTTP-Status des Downloads.
+    if (lastFail) {
+        const box = document.getElementById('yt-spike-out');
+        if (box) box.textContent = 'LETZTER IMPORT-FEHLER\n' + JSON.stringify(lastFail, null, 2);
+        window.__ytLastImportFail = lastFail;
     }
     _ytImportRunning = false;
     if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
