@@ -34,6 +34,17 @@ struct WebShellView: UIViewRepresentable {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "himusicNative")
 
+        // Request/Response-Kanal (im Gegensatz zu "himusicNative", das reines fire-and-forget
+        // ist): JS ruft `await window.webkit.messageHandlers.himusicHttp.postMessage({...})`
+        // und bekommt {ok,status,headers,bodyBase64} zurueck. Zweck: der YouTube-Import laeuft
+        // dann direkt in der App - der HTTP-Aufruf geht ueber die IP des GERAETS (Heim-WLAN =
+        // von YouTube tolerierte Privatanschluss-IP) und umgeht die CORS-Sperre von
+        // youtubei.googleapis.com. Die Extraktions-LOGIK bleibt bewusst in JS (per GitHub
+        // Pages heiss aktualisierbar, kein IPA-Neubau bei YouTube-Aenderungen) - nativ ist nur
+        // der dumme Kanal. Streng auf YouTube-/Google-Video-Hosts begrenzt (siehe Coordinator),
+        // damit daraus kein offener Proxy wird.
+        controller.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "himusicHttp")
+
         // Marker fuer app2.js: laeuft die Seite in der Huelle, geht Wiedergabe immer
         // nativ - unabhaengig vom Schalter in den Einstellungen, der nur den alten
         // Weg aus Safari betraf. atDocumentStart, damit er vor app2.js gesetzt ist.
@@ -84,9 +95,37 @@ struct WebShellView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, WKNavigationDelegate, WKUIDelegate {
         private let player: PlayerViewModel
         weak var webView: WKWebView?
+
+        /// Eigene, ephemere Session fuer den himusicHttp-Kanal: KEIN gemeinsamer Cookie-/
+        /// Cache-Speicher (weder mit der WKWebView noch mit URLSession.shared), damit weder ein
+        /// himusic-Login noch sonst etwas mitgeschickt wird. Nur fuer die YouTube-Extraktion.
+        private lazy var httpSession: URLSession = {
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.timeoutIntervalForRequest = 45
+            cfg.httpCookieStorage = nil
+            cfg.urlCache = nil
+            return URLSession(configuration: cfg)
+        }()
+
+        /// Nur diese Hosts darf der himusicHttp-Kanal ansprechen - alles, was die
+        /// YouTube-Extraktion + der Medien-Download braucht, nichts sonst. Verhindert, dass die
+        /// Bruecke zu einem offenen Proxy wird, falls je fremdes JS in der Seite laeuft.
+        private static func httpHostAllowed(_ host: String?) -> Bool {
+            guard let host = host?.lowercased() else { return false }
+            let suffixes = [
+                "youtube.com", "youtubei.googleapis.com", "googlevideo.com",
+                "ytimg.com", "ggpht.com", "youtube-nocookie.com"
+            ]
+            return suffixes.contains { host == $0 || host.hasSuffix("." + $0) }
+        }
+
+        /// Harte Obergrenze fuer eine einzelne Antwort (ein Song sind ~3-8 MB; als
+        /// base64-String ~1,35x). Schuetzt vor einem Riesen-Download, der die App-Speicher
+        /// sprengt. Fuer Phase 1 kommt hier ein Streaming-in-Datei-Weg statt base64 rein.
+        private static let httpMaxResponseBytes = 30 * 1024 * 1024
 
         init(player: PlayerViewModel) {
             self.player = player
@@ -229,6 +268,57 @@ struct WebShellView: UIViewRepresentable {
             Task { @MainActor in
                 self.player.handleBridgeJSON(json)
             }
+        }
+
+        // MARK: - himusicHttp: Request/Response fuer die YouTube-Extraktion (siehe makeUIView)
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage,
+            replyHandler: @escaping (Any?, String?) -> Void
+        ) {
+            guard message.name == "himusicHttp" else { replyHandler(nil, "unbekannter Kanal"); return }
+            guard let body = message.body as? [String: Any],
+                  let urlStr = body["url"] as? String,
+                  let url = URL(string: urlStr) else {
+                replyHandler(["ok": false, "error": "ungueltige Anfrage"], nil); return
+            }
+            guard Self.httpHostAllowed(url.host) else {
+                replyHandler(["ok": false, "error": "Host nicht erlaubt: \(url.host ?? "?")"], nil); return
+            }
+
+            var req = URLRequest(url: url)
+            req.httpMethod = (body["method"] as? String)?.uppercased() ?? "GET"
+            if let headers = body["headers"] as? [String: String] {
+                for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+            }
+            if let bodyText = body["body"] as? String, !bodyText.isEmpty {
+                req.httpBody = bodyText.data(using: .utf8)
+            }
+
+            let task = httpSession.dataTask(with: req) { data, response, error in
+                let reply: [String: Any]
+                if let error {
+                    reply = ["ok": false, "error": error.localizedDescription]
+                } else if let data, data.count > Self.httpMaxResponseBytes {
+                    reply = ["ok": false, "error": "Antwort zu gross (\(data.count) Bytes)"]
+                } else {
+                    let http = response as? HTTPURLResponse
+                    var respHeaders: [String: String] = [:]
+                    http?.allHeaderFields.forEach { pair in
+                        if let k = pair.key as? String, let v = pair.value as? String { respHeaders[k.lowercased()] = v }
+                    }
+                    reply = [
+                        "ok": true,
+                        "status": http?.statusCode ?? 0,
+                        "headers": respHeaders,
+                        "bodyBase64": (data ?? Data()).base64EncodedString(),
+                        "bodyLength": data?.count ?? 0
+                    ]
+                }
+                DispatchQueue.main.async { replyHandler(reply, nil) }
+            }
+            task.resume()
         }
 
         /// Behebt "App zeigt trotz frisch ausgeliefertem Code den alten Stand" (siehe Session

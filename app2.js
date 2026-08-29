@@ -280,6 +280,141 @@ function _nativeBridge() {
     return (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicNative) || null;
 }
 
+// ── YOUTUBE-IMPORT IN DER APP (Phase-0-Spike) ─────────────────────────────────
+// Ziel: Import laeuft direkt in himusic, wenn die App offen ist - der HTTP-Aufruf geht ueber
+// die IP des Geraets (Heim-WLAN = tolerierte Privatanschluss-IP) statt ueber tote Cobalt-
+// Instanzen oder GitHub-Actions-Rechenzentrums-IPs. Nativer Kanal (WebShellView.swift,
+// "himusicHttp") umgeht CORS. Die Extraktions-Logik bleibt hier in JS, damit YouTube-
+// Aenderungen ohne IPA-Neubau nachgezogen werden koennen.
+
+async function _nativeHttp(method, url, opts) {
+    opts = opts || {};
+    const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicHttp;
+    if (!h) throw new Error('himusicHttp-Bruecke fehlt (nur in der App-Huelle, neue IPA noetig)');
+    const res = await h.postMessage({ method: method || 'GET', url, headers: opts.headers || {}, body: opts.body || null });
+    if (!res || !res.ok) throw new Error('nativer HTTP-Fehler: ' + ((res && res.error) || 'unbekannt'));
+    return res; // { ok, status, headers:{lowercased}, bodyBase64, bodyLength }
+}
+function _b64ToBytes(b64) {
+    const bin = atob(b64 || ''); const n = bin.length; const out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) out[i] = bin.charCodeAt(i);
+    return out;
+}
+function _b64ToText(b64) { try { return new TextDecoder().decode(_b64ToBytes(b64)); } catch (e) { return ''; } }
+
+function _ytVideoId(input) {
+    const s = String(input || '').trim();
+    if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
+    let m = s.match(/[?&]v=([A-Za-z0-9_-]{11})/) || s.match(/youtu\.be\/([A-Za-z0-9_-]{11})/) || s.match(/\/shorts\/([A-Za-z0-9_-]{11})/) || s.match(/\/embed\/([A-Za-z0-9_-]{11})/);
+    return m ? m[1] : null;
+}
+
+// InnerTube-Clients, die historisch DIREKTE (unverschluesselte) Audio-URLs ohne PO-Token
+// liefern - Reihenfolge = Wahrscheinlichkeit, dass es klappt. Werte werden nach dem ersten
+// echten Test am Geraet nachjustiert (Client-Versionen driften staendig).
+const _YT_CLIENTS = [
+    { name: 'IOS', key: 'AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc',
+      ua: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
+      ctx: { clientName: 'IOS', clientVersion: '20.10.4', deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.3.2.22D82', hl: 'en', gl: 'US' } },
+    { name: 'ANDROID_VR', key: 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w',
+      ua: 'com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12; GB) gzip',
+      ctx: { clientName: 'ANDROID_VR', clientVersion: '1.62.27', deviceMake: 'Oculus', deviceModel: 'Quest 3', osName: 'Android', osVersion: '12', androidSdkVersion: 32, hl: 'en', gl: 'US' } },
+    { name: 'MWEB', key: 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
+      ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1',
+      ctx: { clientName: 'MWEB', clientVersion: '2.20250310.02.00', hl: 'en', gl: 'US' } },
+    { name: 'WEB', key: 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
+      ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ctx: { clientName: 'WEB', clientVersion: '2.20250310.02.00', hl: 'en', gl: 'US' } },
+];
+
+async function _ytPlayerResponse(videoId) {
+    const attempts = [];
+    for (const c of _YT_CLIENTS) {
+        try {
+            const res = await _nativeHttp('POST', `https://www.youtube.com/youtubei/v1/player?key=${c.key}&prettyPrint=false`, {
+                headers: { 'Content-Type': 'application/json', 'User-Agent': c.ua, 'X-Goog-Api-Format-Version': '2' },
+                body: JSON.stringify({
+                    videoId,
+                    context: { client: c.ctx },
+                    contentCheckOk: true, racyCheckOk: true,
+                    playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
+                }),
+            });
+            let json = null; try { json = JSON.parse(_b64ToText(res.bodyBase64)); } catch (e) {}
+            const status = json && json.playabilityStatus && json.playabilityStatus.status;
+            attempts.push({ client: c.name, http: res.status, playability: status || '(keine Antwort)', reason: json && json.playabilityStatus && json.playabilityStatus.reason });
+            if (res.status === 200 && status === 'OK' && json.streamingData) {
+                return { ok: true, client: c.name, json, attempts };
+            }
+        } catch (e) {
+            attempts.push({ client: c.name, error: e.message });
+        }
+    }
+    return { ok: false, attempts };
+}
+
+function _ytPickAudio(streamingData) {
+    const all = [].concat(streamingData.adaptiveFormats || [], streamingData.formats || []);
+    const audio = all.filter(f => String(f.mimeType || '').startsWith('audio/'));
+    if (audio.length === 0) return null;
+    audio.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+    const mp4 = audio.filter(f => String(f.mimeType || '').includes('mp4')); // AAC = kein Transcode noetig
+    return mp4[0] || audio[0];
+}
+
+// Gibt ein Diagnose-Objekt zurueck - im Spike bewusst NICHT schon der fertige Import,
+// erst pruefen was ueberhaupt ankommt.
+async function _ytExtract(input) {
+    const videoId = _ytVideoId(input);
+    if (!videoId) return { ok: false, error: 'keine Video-ID erkannt' };
+    const pr = await _ytPlayerResponse(videoId);
+    if (!pr.ok) return { ok: false, videoId, error: 'kein Client lieferte OK + streamingData', attempts: pr.attempts };
+    const vd = pr.json.videoDetails || {};
+    const fmt = _ytPickAudio(pr.json.streamingData);
+    if (!fmt) return { ok: false, videoId, client: pr.client, error: 'keine Audio-Formate', attempts: pr.attempts };
+    const cipher = fmt.signatureCipher || fmt.cipher || null;
+    return {
+        ok: true, videoId, client: pr.client,
+        title: vd.title, lengthSeconds: parseInt(vd.lengthSeconds || '0', 10),
+        itag: fmt.itag, mimeType: fmt.mimeType, bitrate: fmt.bitrate,
+        contentLength: fmt.contentLength ? parseInt(fmt.contentLength, 10) : null,
+        url: fmt.url || null,
+        hasCipher: !!cipher, cipher,
+        attempts: pr.attempts,
+    };
+}
+
+// Testknopf (Einstellungen, nur in der Huelle): extrahiert + laedt die ersten ~512 KB, misst
+// Status/Content-Type/Tempo. Zeigt, ob der Weg ohne PO-Token/ohne Cipher traegt.
+window._ytSpikeTest = async function () {
+    const out = document.getElementById('yt-spike-out');
+    const put = (o) => { if (out) out.textContent = (typeof o === 'string') ? o : JSON.stringify(o, null, 2); };
+    const input = prompt('YouTube-URL oder Video-ID zum Testen:', '');
+    if (!input) return;
+    put('… extrahiere …');
+    try {
+        const r = await _ytExtract(input);
+        if (!r.ok || !r.url) { put(r); return; }
+        put('… gefunden (' + r.client + ', itag ' + r.itag + '). Lade Probe …');
+        const t0 = (performance.now ? performance.now() : Date.now());
+        const dl = await _nativeHttp('GET', r.url, { headers: { 'Range': 'bytes=0-524287', 'User-Agent': _YT_CLIENTS.find(c => c.name === r.client).ua } });
+        const ms = (performance.now ? performance.now() : Date.now()) - t0;
+        const kbps = dl.bodyLength > 0 ? Math.round((dl.bodyLength / 1024) / (ms / 1000)) : 0;
+        put({
+            extract: r,
+            probe: {
+                http: dl.status, // 206 = Range ok, 200 = voll, 403 = geblockt
+                contentType: dl.headers && dl.headers['content-type'],
+                contentRange: dl.headers && dl.headers['content-range'],
+                bytes: dl.bodyLength, tempo_KBs: kbps,
+                verdict: (dl.status === 206 || dl.status === 200)
+                    ? (kbps < 60 ? 'laedt, aber GEDROSSELT (n-Parameter noetig)' : 'laedt in voller Geschwindigkeit ✓')
+                    : 'geblockt (' + dl.status + ') - vermutlich PO-Token noetig',
+            },
+        });
+    } catch (e) { put('Fehler: ' + e.message); }
+};
+
 // Rueckkanal: die Huelle ruft das nach JEDEM eigenen Songwechsel/Play-Pause auf
 // (WebShellView.Coordinator.pushNowPlaying in der Swift-Huelle), damit diese Seite mit dem
 // WIRKLICH laufenden nativen Zustand synchron bleibt. Ohne das zeigt die Oberflaeche nach
@@ -4168,6 +4303,16 @@ async function createNewPlaylistProcess() {
         });
     }
     document.getElementById('btn-check-library')?.addEventListener('click', _checkLibrary);
+
+    // YouTube-Import-Test (Phase 0): nur in der App-Huelle sinnvoll (braucht die native
+    // himusicHttp-Bruecke). Abschnitt sonst ausgeblendet lassen.
+    if (window.__himusicNativeShell) {
+        const ytSec = document.getElementById('yt-spike-section');
+        if (ytSec) ytSec.hidden = false;
+        document.getElementById('btn-yt-spike')?.addEventListener('click', () => {
+            if (typeof window._ytSpikeTest === 'function') window._ytSpikeTest();
+        });
+    }
     // Beim Start einmal fuellen, damit die Liste nicht leer wirkt, wenn die Einstellungen
     // geoeffnet werden, ohne dass zwischendurch etwas uebersprungen wurde.
     if (typeof window._renderSkipLog === 'function') window._renderSkipLog();
