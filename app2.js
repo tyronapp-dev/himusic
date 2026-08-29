@@ -441,6 +441,107 @@ window._ytSpikeTest = async function () {
     } catch (e) { put('Fehler: ' + e.message); }
 };
 
+// ── PHASE 1: echter In-App-YouTube-Import ────────────────────────────────────
+// Laeuft NUR in der App-Huelle (braucht die native himusicHttp-Bruecke - der Aufruf geht
+// dann ueber die Geraete-IP, siehe Phase-0-Test). Pro Warteschlangen-Eintrag: extrahieren ->
+// ganze Datei laden -> nach R2 hoch -> POST /songs (Server dedupt per Content-Hash). Einer
+// nach dem anderen, damit immer nur EINE ~5-MB-base64-Antwort im Speicher liegt.
+// 20 MB (nicht 28): begrenzt den ~90-MB-Speicher-Spike (base64 nativ -> Bruecke -> atob ->
+// Uint8Array) auf einem iPhone. Laengere Dateien gehen erst mit dem geplanten
+// Streaming-in-Datei-Weg. Bruecken-Cap in WebShellView.swift bleibt bei 30 MB.
+const _YT_IMPORT_MAX_BYTES = 20 * 1024 * 1024;
+const _YT_IMPORT_RUN_CAP = 20;   // hoechstens so viele Songs pro Lauf - gegen bot-artige Bursts
+const _YT_IMPORT_ITEM_DELAY_MS = 1500; // Pause zwischen zwei Songs, gleicher Grund
+let _ytImportRunning = false;
+
+async function _ytImportOne(item) {
+    const ex = await _ytExtract(item.url);
+    if (!ex.ok || !ex.url) return { ok: false, reason: ex.error || 'Extraktion fehlgeschlagen' };
+    if (ex.hasCipher) return { ok: false, reason: 'Signatur-Entschluesselung noetig (noch nicht unterstuetzt)' };
+    // Schon importiert (per Video-ID, deckt auch "andere URL, selbes Video" ab): NICHT nochmal
+    // hochladen - sonst entsteht ein verwaistes R2-Objekt, das der Server-Dedup danach nur noch
+    // verwirft. Gilt als Erfolg (der Song ist ja da).
+    try { if (_loadImportedYtUrls().has('vid:' + ex.videoId)) return { ok: true, duplicate: true, skipped: true, title: ex.title }; } catch (e) {}
+    if (ex.contentLength && ex.contentLength > _YT_IMPORT_MAX_BYTES) {
+        return { ok: false, reason: 'Datei zu gross fuer In-App-Import (' + Math.round(ex.contentLength / 1048576) + ' MB)' };
+    }
+    const ua = (_YT_CLIENTS.find(c => c.name === ex.client) || {}).ua || '';
+    const dl = await _nativeHttp('GET', ex.url, { headers: ua ? { 'User-Agent': ua } : {} });
+    if (dl.status !== 200) return { ok: false, reason: 'Download HTTP ' + dl.status };
+    const bytes = _b64ToBytes(dl.bodyBase64);
+    if (bytes.length < 16384) return { ok: false, reason: 'Download zu klein (' + bytes.length + ' Bytes)' };
+    if (ex.contentLength && bytes.length < ex.contentLength * 0.95) {
+        return { ok: false, reason: 'Download unvollstaendig (' + bytes.length + '/' + ex.contentLength + ')' };
+    }
+    // m4a beginnt mit "....ftyp" ab Byte 4 - faengt eine Fehlerseite/leere Antwort ab
+    if (String.fromCharCode(bytes[4] || 0, bytes[5] || 0, bytes[6] || 0, bytes[7] || 0) !== 'ftyp') {
+        return { ok: false, reason: 'keine m4a-Datei (falsche Kopfsignatur)' };
+    }
+
+    const fname = 'fast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '_local_yt.m4a';
+    const up = await _apiFetch(`${API_URL}/upload/${fname}`, { method: 'PUT', headers: { 'Content-Type': 'audio/mp4' }, body: bytes });
+    if (!up.ok) return { ok: false, reason: 'Upload HTTP ' + up.status };
+    const upData = await up.json().catch(() => ({}));
+    const fileUrl = upData.url || `${API_URL}/media/${fname}`;
+
+    const reg = await _apiFetch(`${API_URL}/songs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            title: ex.title || 'YouTube Import', artist: 'Unbekannt', cover_data: '',
+            file_url: fileUrl, file_size: bytes.length, duration: ex.lengthSeconds || 0, vibes: [],
+        }),
+    });
+    if (!reg.ok) return { ok: false, reason: 'Song anlegen HTTP ' + reg.status };
+    const regData = await reg.json().catch(() => ({}));
+    return { ok: true, title: ex.title, client: ex.client, bytes: bytes.length, duplicate: !!regData.duplicate, videoId: ex.videoId };
+}
+
+// auto=true (Auslauf beim App-Oeffnen): gescheiterte Eintraege werden AUFGEGEBEN. Sonst wuerde
+// ein dauerhaft scheiterndes Item (Cipher noetig, Dauer-403, oversize) bei jedem Sichtbar-
+// Werden neu extrahiert+geladen - also Dauer-Traffic gegen YouTube von der Heim-IP, genau das
+// Bot-Flag-Risiko, das dieser Weg vermeiden soll. Der Knopf (auto=false) versucht bewusst alles.
+async function _ytImportQueue(auto = false) {
+    if (_ytImportRunning) return;
+    if (!window.__himusicNativeShell || !(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicHttp)) {
+        if (window._showToast) window._showToast('In-App-Import nur in der App-Huelle moeglich', 3000);
+        return;
+    }
+    const terminal = auto
+        ? ['done', 'fallback_done', 'failed', 'fallback_failed']
+        : ['done', 'fallback_done'];
+    let items = (typeof _ytQueueState !== 'undefined' ? _ytQueueState : []).filter(
+        it => it && it.url && !terminal.includes(it.clientState)
+    );
+    if (items.length === 0) { if (!auto && window._showToast) window._showToast('Nichts in der Warteschlange', 2500); return; }
+    const uebrig = Math.max(0, items.length - _YT_IMPORT_RUN_CAP);
+    items = items.slice(0, _YT_IMPORT_RUN_CAP);
+    _ytImportRunning = true;
+    if (window._showToast) window._showToast('In-App-Import startet: ' + items.length + (uebrig ? ' (+' + uebrig + ' spaeter)' : '') + ' …', 3000);
+    let ok = 0, fail = 0;
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        item.clientState = 'processing'; item.updatedAt = Date.now(); _saveAndRenderYtQueue();
+        let res;
+        try { res = await _ytImportOne(item); } catch (e) { res = { ok: false, reason: e.message }; }
+        if (res.ok) {
+            ok++;
+            item.clientState = 'done'; item.updatedAt = Date.now();
+            _rememberImportedYtUrl(item.url);
+            if (res.videoId) { try { _rememberImportedYtUrl('vid:' + res.videoId); } catch (e) {} }
+            if (item.queueItemId) { try { await _apiFetch(`${API_URL}/youtube-queue/${item.queueItemId}`, { method: 'DELETE' }); } catch (e) {} }
+        } else {
+            fail++;
+            item.clientState = 'failed'; item.errorMessage = res.reason || 'Fehler'; item.updatedAt = Date.now();
+        }
+        _saveAndRenderYtQueue();
+        if (i < items.length - 1 && !res.skipped) await new Promise(r => setTimeout(r, _YT_IMPORT_ITEM_DELAY_MS));
+    }
+    _ytImportRunning = false;
+    if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
+    if (window._showToast) window._showToast('In-App-Import fertig: ' + ok + ' ok' + (fail ? ', ' + fail + ' fehlgeschlagen' : ''), 5000);
+}
+window._ytImportQueue = _ytImportQueue;
+
 // Rueckkanal: die Huelle ruft das nach JEDEM eigenen Songwechsel/Play-Pause auf
 // (WebShellView.Coordinator.pushNowPlaying in der Swift-Huelle), damit diese Seite mit dem
 // WIRKLICH laufenden nativen Zustand synchron bleibt. Ohne das zeigt die Oberflaeche nach
@@ -4358,6 +4459,28 @@ async function createNewPlaylistProcess() {
                 } catch (e2) { done(false); }
             }
         });
+
+        // Phase 1: In-App-Import. Knopf sichtbar machen + verdrahten, plus automatisch
+        // anstossen, wenn himusic geoeffnet/sichtbar wird und etwas in der Warteschlange
+        // liegt (gedrosselt: hoechstens alle 90 s ein Auto-Lauf).
+        const impRow = document.getElementById('btn-yt-import-now');
+        if (impRow) {
+            impRow.hidden = false;
+            impRow.addEventListener('click', () => { if (typeof window._ytImportQueue === 'function') window._ytImportQueue(); });
+        }
+        let _lastAutoImport = 0;
+        const _maybeAutoImport = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (Date.now() - _lastAutoImport < 90000) return;
+            const pending = (typeof _ytQueueState !== 'undefined' ? _ytQueueState : []).some(
+                it => it && it.url && !['done', 'fallback_done', 'failed', 'fallback_failed'].includes(it.clientState)
+            );
+            if (!pending) return;
+            _lastAutoImport = Date.now();
+            setTimeout(() => { if (typeof window._ytImportQueue === 'function') window._ytImportQueue(true); }, 2000);
+        };
+        document.addEventListener('visibilitychange', _maybeAutoImport);
+        setTimeout(_maybeAutoImport, 5000);
     }
     // Beim Start einmal fuellen, damit die Liste nicht leer wirkt, wenn die Einstellungen
     // geoeffnet werden, ohne dass zwischendurch etwas uebersprungen wurde.

@@ -9,6 +9,38 @@ extension Notification.Name {
     static let himusicExpandFullscreenPlayer = Notification.Name("himusic.expandFullscreenPlayer")
 }
 
+/// Nur diese Hosts darf der himusicHttp-Kanal ansprechen (siehe WebShellView) - alles, was die
+/// YouTube-Extraktion + der Medien-Download braucht, nichts sonst. Auf Datei-Ebene, damit auch
+/// der Redirect-Waechter unten dieselbe Liste nutzt.
+func himusicHttpHostAllowed(_ host: String?) -> Bool {
+    guard let host = host?.lowercased() else { return false }
+    let suffixes = [
+        "youtube.com", "youtubei.googleapis.com", "googlevideo.com",
+        "ytimg.com", "ggpht.com", "youtube-nocookie.com"
+    ]
+    return suffixes.contains { host == $0 || host.hasSuffix("." + $0) }
+}
+
+/// Waechter fuer die ephemere himusicHttp-Session: die Host-Allowlist im Message-Handler greift
+/// nur auf der INITIAL-URL - URLSession folgt 3xx-Redirects sonst automatisch, auch cross-host
+/// (ein Redirect von einem erlaubten CDN auf http://192.168.x/ oder eine Fremd-Domain wuerde
+/// gefolgt). Dieser Delegate prueft jedes Redirect-Ziel erneut gegen die Allowlist und laesst
+/// nur https zu. Eigenes kleines Objekt statt der Coordinator-Instanz, damit kein Retain-Zyklus
+/// ueber URLSession(delegate:) entsteht.
+final class HimusicHttpRedirectGuard: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        if himusicHttpHostAllowed(request.url?.host),
+           request.url?.scheme?.lowercased() == "https" {
+            completionHandler(request)
+        } else {
+            completionHandler(nil) // Redirect stoppen; die Task endet mit der 3xx-Antwort
+        }
+    }
+}
+
 /// Traegt die komplette himusic-Oberflaeche als eingebettete Webseite.
 ///
 /// Warum: Der vorherige Ansatz (separate Player-App, Aufruf per himusicplayer://) hat
@@ -102,25 +134,15 @@ struct WebShellView: UIViewRepresentable {
         /// Eigene, ephemere Session fuer den himusicHttp-Kanal: KEIN gemeinsamer Cookie-/
         /// Cache-Speicher (weder mit der WKWebView noch mit URLSession.shared), damit weder ein
         /// himusic-Login noch sonst etwas mitgeschickt wird. Nur fuer die YouTube-Extraktion.
+        /// Der Redirect-Waechter prueft jedes 3xx-Ziel erneut gegen die Host-Allowlist.
+        private let httpRedirectGuard = HimusicHttpRedirectGuard()
         private lazy var httpSession: URLSession = {
             let cfg = URLSessionConfiguration.ephemeral
             cfg.timeoutIntervalForRequest = 45
             cfg.httpCookieStorage = nil
             cfg.urlCache = nil
-            return URLSession(configuration: cfg)
+            return URLSession(configuration: cfg, delegate: httpRedirectGuard, delegateQueue: nil)
         }()
-
-        /// Nur diese Hosts darf der himusicHttp-Kanal ansprechen - alles, was die
-        /// YouTube-Extraktion + der Medien-Download braucht, nichts sonst. Verhindert, dass die
-        /// Bruecke zu einem offenen Proxy wird, falls je fremdes JS in der Seite laeuft.
-        private static func httpHostAllowed(_ host: String?) -> Bool {
-            guard let host = host?.lowercased() else { return false }
-            let suffixes = [
-                "youtube.com", "youtubei.googleapis.com", "googlevideo.com",
-                "ytimg.com", "ggpht.com", "youtube-nocookie.com"
-            ]
-            return suffixes.contains { host == $0 || host.hasSuffix("." + $0) }
-        }
 
         /// Harte Obergrenze fuer eine einzelne Antwort (ein Song sind ~3-8 MB; als
         /// base64-String ~1,35x). Schuetzt vor einem Riesen-Download, der die App-Speicher
@@ -283,8 +305,11 @@ struct WebShellView: UIViewRepresentable {
                   let url = URL(string: urlStr) else {
                 replyHandler(["ok": false, "error": "ungueltige Anfrage"], nil); return
             }
-            guard Self.httpHostAllowed(url.host) else {
+            guard himusicHttpHostAllowed(url.host) else {
                 replyHandler(["ok": false, "error": "Host nicht erlaubt: \(url.host ?? "?")"], nil); return
+            }
+            guard url.scheme?.lowercased() == "https" else {
+                replyHandler(["ok": false, "error": "nur https erlaubt"], nil); return
             }
 
             var req = URLRequest(url: url)
