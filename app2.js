@@ -355,33 +355,65 @@ const _YT_CLIENTS = [
       ctx: { clientName: 'WEB', clientVersion: '2.20250310.02.00', hl: 'en', gl: 'US' } },
 ];
 
-// Holt EINMAL ein visitorData aus einer echten YouTube-watch-Seite und cacht es ~30 Min.
-// Das ist die einzige Zutat, die der VISIONOS-Client zwingend braucht (siehe _YT_CLIENTS oben):
-// die ytcfg der watch-Seite enthaelt ein visitorData, das YouTube nicht als Bot flaggt. Ein reiner
-// GET einer normalen Videoseite von der Geraete-IP ist die unauffaelligste denkbare Anfrage; das
-// Ergebnis bedient danach beliebig viele Importe. SOCS-Cookie nimmt die EU-Consent-Zwischenseite
-// vorweg (die Geraete-IP kann in der EU geolokalisiert werden).
+// Holt EINMAL ein visitorData und cacht es ~30 Min. Das ist die einzige Zutat, die der
+// VISIONOS-Client zwingend braucht (siehe _YT_CLIENTS oben): eine echte YouTube-Seite bettet in
+// ihre ytcfg ein visitorData ein, das YouTube nicht als Bot flaggt. Reine GETs von der Geraete-IP
+// sind die unauffaelligste denkbare Anfrage; das Ergebnis bedient danach beliebig viele Importe.
+// SOCS-Cookie nimmt die EU-Consent-Zwischenseite vorweg (die Geraete-IP kann in der EU liegen).
+const _YT_BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15';
+const _YT_SOCS = 'SOCS=CAISEwgDEgk2NzY4NDU5MjMaAmVuIAEaBgiA_LyaBg';
 let _ytVisitor = { data: null, ts: 0 };
 const _YT_VISITOR_TTL = 30 * 60 * 1000;
+
+// Zieht das visitorData aus einer HTML-Seite. Der Wert ist base64url + evtl. %-/=-Padding und
+// steht mal roh (`"visitorData":"…"`), mal in einen JS-String einescaped (`\"visitorData\":\"…"`);
+// die Laenge schwankt stark (~110 bis ~560 Zeichen). Die Zeichenklasse im Capture endet von
+// selbst am ersten `\` oder `"`, also kann kein Seiten-Text in einen Header/Body durchsickern.
+// YouTube akzeptiert den rohen Wert (mit `%3D%3D`) unveraendert - kein Decoding noetig.
+function _extractVisitorData(html) {
+    const m = html.match(/\\?"visitorData\\?"\s*:\s*\\?"([A-Za-z0-9_%=.-]{40,800})/)
+           || html.match(/\\?"VISITOR_DATA\\?"\s*:\s*\\?"([A-Za-z0-9_%=.-]{40,800})/);
+    return m ? m[1] : null;
+}
+
+async function _ytGet(url) {
+    return _nativeHttp('GET', url, { headers: {
+        'User-Agent': _YT_BROWSER_UA,
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'identity',
+        'Cookie': _YT_SOCS,
+    } });
+}
+
 async function _ytVisitorData(seedVideoId, force) {
     if (!force && _ytVisitor.data && (Date.now() - _ytVisitor.ts) < _YT_VISITOR_TTL) return _ytVisitor.data;
     const vid = /^[A-Za-z0-9_-]{11}$/.test(seedVideoId || '') ? seedVideoId : 'dQw4w9WgXcQ';
-    const res = await _nativeHttp('GET',
+    const sources = [
         `https://www.youtube.com/watch?v=${vid}&hl=en&gl=US&has_verified=1&bpctr=9999999999`,
-        { headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Cookie': 'SOCS=CAISEwgDEgk2NzY4NDU5MjMaAmVuIAEaBgiA_LyaBg',
-        } });
-    const html = _b64ToText(res.bodyBase64);
-    // visitorData ist base64url + evtl. %-Escapes - eng gefasst, damit nichts anderes aus der
-    // Seite (Steuerzeichen, Header-Trenner) in einen Request-Header/Body wandern kann.
-    const m = html.match(/"visitorData":\s*"([A-Za-z0-9%_-]{16,200})"/)
-           || html.match(/"VISITOR_DATA":\s*"([A-Za-z0-9%_-]{16,200})"/);
-    if (!m) throw new Error('visitorData nicht in der watch-Seite gefunden (HTTP ' + res.status + ')');
-    const vd = m[1];
-    _ytVisitor = { data: vd, ts: Date.now() };
-    return vd;
+        'https://www.youtube.com/?hl=en&gl=US',
+        `https://m.youtube.com/watch?v=${vid}&hl=en&gl=US`,
+    ];
+    const diag = [];
+    for (const url of sources) {
+        try {
+            const res = await _ytGet(url);
+            const html = _b64ToText(res.bodyBase64);
+            const vd = _extractVisitorData(html);
+            const info = {
+                url, http: res.status, len: html.length,
+                hasToken: /visitorData/i.test(html),
+                consent: /consent\.youtube|CONSENT|Bevor du fortf|before you continue/i.test(html),
+                botwall: /Sign in to confirm|not a bot|unusual traffic/i.test(html),
+                head: html.slice(0, 160).replace(/\s+/g, ' '),
+            };
+            diag.push(info);
+            if (vd) { _ytVisitor = { data: vd, ts: Date.now() }; return vd; }
+        } catch (e) {
+            diag.push({ url, error: e.message });
+        }
+    }
+    try { window.__ytWatchDump = diag; } catch (e) {}
+    throw new Error('visitorData in keiner Quelle gefunden - Details in window.__ytWatchDump: ' + JSON.stringify(diag));
 }
 
 async function _ytPlayerResponse(videoId, skipClients) {
