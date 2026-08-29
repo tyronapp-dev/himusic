@@ -5862,7 +5862,11 @@ async function _dispatchYtFallbackOnly(item) {
         const data = await res.json().catch(() => ({}));
         const returnedId = data && (data.queue_id || data.job_id);
         if (returnedId && !item.queueItemId) item.queueItemId = returnedId;
-        _rememberImportedYtUrl(item.url);
+        // BEWUSST NICHT hier _rememberImportedYtUrl: der Fallback ist nur ANGESTOSSEN, der Song
+        // ist noch lange nicht da. Ihn jetzt als "importiert" zu merken hiess wochenlang: jeder
+        // erneute Einreih-Versuch derselben URL wurde stumm uebersprungen, obwohl nie ein Song
+        // ankam. Gemerkt wird erst bei BESTAETIGTER Ankunft (_pollYtQueueTick server=done,
+        // _watchForFallbackResults, _ytImportOne-Erfolg).
         return true;
     } catch (e) {
         item.clientState = 'fallback_failed';
@@ -6044,12 +6048,13 @@ async function _enqueueOneLink(url, meta) {
     }
 }
 
-async function _enqueueYoutubeLinks(urls, meta) {
+async function _enqueueYoutubeLinks(urls, meta, opts) {
     // Schnell-Check VOR dem Einreihen: URLs, die laut lokaler Historie schon fertig importiert
-    // wurden, werden sofort übersprungen (Set-Lookup, keine Millisekunden) statt erst den vollen
-    // Weg (Download + Upload + Server-Dedupe) zu durchlaufen und ganz am Ende als Duplikat zu
-    // scheitern. Siehe _rememberImportedYtUrl weiter oben.
-    const importedUrls = _loadImportedYtUrls();
+    // wurden, werden uebersprungen - nuetzlich beim Masseneinfuegen ueberlappender Playlists.
+    // opts.force = true (gezielter Einzel-Download aus der Suche) umgeht den Filter: wer bewusst
+    // auf EINEN Song "herunterladen" drueckt, will ihn haben, auch wenn die Historie ihn kennt.
+    const force = opts && opts.force;
+    const importedUrls = force ? new Set() : _loadImportedYtUrls();
     const toEnqueue = urls.filter(u => !importedUrls.has(u));
     const skipped = urls.length - toEnqueue.length;
     if (skipped > 0 && typeof window._showToast === 'function') {
@@ -6323,7 +6328,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 downloadBtn.addEventListener('click', () => {
                     downloadBtn.disabled = true; downloadBtn.style.opacity = '0.5';
                     if (_ytActiveRow === row) _stopYtPreview();
-                    _enqueueYoutubeLinks([`https://www.youtube.com/watch?v=${item.videoId}`], { title: item.title, thumbnail: item.thumbnail });
+                    _enqueueYoutubeLinks([`https://www.youtube.com/watch?v=${item.videoId}`], { title: item.title, thumbnail: item.thumbnail }, { force: true });
                     window._showToast('Zur Warteschlange hinzugefügt');
                     row.remove();
                 });
