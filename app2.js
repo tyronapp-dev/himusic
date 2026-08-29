@@ -326,10 +326,21 @@ function _ytVideoId(input) {
     return loose ? loose[1] : null;
 }
 
-// InnerTube-Clients, die historisch DIREKTE (unverschluesselte) Audio-URLs ohne PO-Token
-// liefern - Reihenfolge = Wahrscheinlichkeit, dass es klappt. Werte werden nach dem ersten
-// echten Test am Geraet nachjustiert (Client-Versionen driften staendig).
+// InnerTube-Clients, die DIREKTE (unverschluesselte) Audio-URLs ohne PO-Token liefern.
+// Reihenfolge = Wahrscheinlichkeit, dass es klappt.
+//
+// VISIONOS (Apple Vision Pro) ist seit 2026-08-30 der Primaerweg: er liefert PLAIN Audio-URLs
+// OHNE PO-Token, OHNE n-sig-Entschluesselung UND OHNE die sps=2/1-MiB-403-Wand, an der der
+// IOS-Client bei geschuetzten (Musik-)Videos ab Byte 1.048.576 abbricht. Byte-genau verifiziert
+// gegen mehrere gesperrte Videos. Einzige Bedingung: im Player-Request muss ein visitorData aus
+// einer ECHTEN watch-Seite stehen (siehe _ytVisitorData) - ein frisch gebootstrapptes visitorData
+// wird als Bot geflaggt ("Sign in to confirm you're not a bot"). Kein API-Key, kein Cookie noetig.
+// Grenze: "Made for kids"-Videos liefert dieser Client nicht (dann greift die IOS-Rueckfallebene).
+// Damit ist der frueher geplante Oracle/Docker/bgutil-PO-Token-Weg (Option 3) hinfaellig.
 const _YT_CLIENTS = [
+    { name: 'VISIONOS', keyless: true, needsVisitor: true, clientNum: 101,
+      ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15',
+      ctx: { clientName: 'VISIONOS', clientVersion: '1.02', deviceMake: 'Apple', deviceModel: 'RealityDevice17,1', osName: 'visionOS', osVersion: '26.5.23O471', hl: 'en', gl: 'US' } },
     { name: 'IOS', key: 'AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc',
       ua: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
       ctx: { clientName: 'IOS', clientVersion: '20.10.4', deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.3.2.22D82', hl: 'en', gl: 'US' } },
@@ -344,23 +355,75 @@ const _YT_CLIENTS = [
       ctx: { clientName: 'WEB', clientVersion: '2.20250310.02.00', hl: 'en', gl: 'US' } },
 ];
 
+// Holt EINMAL ein visitorData aus einer echten YouTube-watch-Seite und cacht es ~30 Min.
+// Das ist die einzige Zutat, die der VISIONOS-Client zwingend braucht (siehe _YT_CLIENTS oben):
+// die ytcfg der watch-Seite enthaelt ein visitorData, das YouTube nicht als Bot flaggt. Ein reiner
+// GET einer normalen Videoseite von der Geraete-IP ist die unauffaelligste denkbare Anfrage; das
+// Ergebnis bedient danach beliebig viele Importe. SOCS-Cookie nimmt die EU-Consent-Zwischenseite
+// vorweg (die Geraete-IP kann in der EU geolokalisiert werden).
+let _ytVisitor = { data: null, ts: 0 };
+const _YT_VISITOR_TTL = 30 * 60 * 1000;
+async function _ytVisitorData(seedVideoId, force) {
+    if (!force && _ytVisitor.data && (Date.now() - _ytVisitor.ts) < _YT_VISITOR_TTL) return _ytVisitor.data;
+    const vid = /^[A-Za-z0-9_-]{11}$/.test(seedVideoId || '') ? seedVideoId : 'dQw4w9WgXcQ';
+    const res = await _nativeHttp('GET',
+        `https://www.youtube.com/watch?v=${vid}&hl=en&gl=US&has_verified=1&bpctr=9999999999`,
+        { headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cookie': 'SOCS=CAISEwgDEgk2NzY4NDU5MjMaAmVuIAEaBgiA_LyaBg',
+        } });
+    const html = _b64ToText(res.bodyBase64);
+    const m = html.match(/"visitorData":\s*"([^"]+)"/) || html.match(/"VISITOR_DATA":\s*"([^"]+)"/);
+    if (!m) throw new Error('visitorData nicht in der watch-Seite gefunden (HTTP ' + res.status + ')');
+    let vd; try { vd = JSON.parse('"' + m[1] + '"'); } catch (e) { vd = m[1]; }
+    _ytVisitor = { data: vd, ts: Date.now() };
+    return vd;
+}
+
 async function _ytPlayerResponse(videoId, skipClients) {
     const skip = new Set(skipClients || []);
     const attempts = [];
+
+    // Ein einzelner Player-Aufruf fuer einen Client. forceVisitor erzwingt frisches visitorData.
+    async function callClient(c, forceVisitor) {
+        const url = c.keyless
+            ? 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false'
+            : `https://www.youtube.com/youtubei/v1/player?key=${c.key}&prettyPrint=false`;
+        const client = Object.assign({}, c.ctx);
+        const headers = { 'Content-Type': 'application/json', 'User-Agent': c.ua };
+        if (c.needsVisitor) {
+            const vd = await _ytVisitorData(videoId, forceVisitor);
+            client.visitorData = vd;
+            headers['X-Goog-Visitor-Id'] = vd;
+            headers['X-Youtube-Client-Name'] = String(c.clientNum);
+            headers['X-Youtube-Client-Version'] = c.ctx.clientVersion;
+        } else {
+            headers['X-Goog-Api-Format-Version'] = '2';
+        }
+        const res = await _nativeHttp('POST', url, {
+            headers,
+            body: JSON.stringify({
+                videoId,
+                context: { client },
+                contentCheckOk: true, racyCheckOk: true,
+                playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
+            }),
+        });
+        let json = null; try { json = JSON.parse(_b64ToText(res.bodyBase64)); } catch (e) {}
+        return { res, json };
+    }
+
     for (const c of _YT_CLIENTS) {
         if (skip.has(c.name)) continue;
         try {
-            const res = await _nativeHttp('POST', `https://www.youtube.com/youtubei/v1/player?key=${c.key}&prettyPrint=false`, {
-                headers: { 'Content-Type': 'application/json', 'User-Agent': c.ua, 'X-Goog-Api-Format-Version': '2' },
-                body: JSON.stringify({
-                    videoId,
-                    context: { client: c.ctx },
-                    contentCheckOk: true, racyCheckOk: true,
-                    playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
-                }),
-            });
-            let json = null; try { json = JSON.parse(_b64ToText(res.bodyBase64)); } catch (e) {}
-            const status = json && json.playabilityStatus && json.playabilityStatus.status;
+            let { res, json } = await callClient(c, false);
+            let status = json && json.playabilityStatus && json.playabilityStatus.status;
+            // VISIONOS mit abgelaufenem/geflaggtem visitorData -> einmal frisch holen, neu versuchen.
+            if (c.needsVisitor && status === 'LOGIN_REQUIRED') {
+                ({ res, json } = await callClient(c, true));
+                status = json && json.playabilityStatus && json.playabilityStatus.status;
+            }
             attempts.push({ client: c.name, http: res.status, playability: status || '(keine Antwort)', reason: json && json.playabilityStatus && json.playabilityStatus.reason });
             if (res.status === 200 && status === 'OK' && json.streamingData) {
                 return { ok: true, client: c.name, json, attempts };
