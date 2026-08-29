@@ -466,12 +466,19 @@ async function _ytImportOne(item) {
         return { ok: false, reason: 'Datei zu gross fuer In-App-Import (' + Math.round(ex.contentLength / 1048576) + ' MB)' };
     }
     const ua = (_YT_CLIENTS.find(c => c.name === ex.client) || {}).ua || '';
-    const dl = await _nativeHttp('GET', ex.url, { headers: ua ? { 'User-Agent': ua } : {} });
-    if (dl.status !== 200) return { ok: false, reason: 'Download HTTP ' + dl.status };
+    // Ein GET OHNE Range gibt googlevideo fuer diese URL-Form (c=IOS, gir=yes) oft 403 - der
+    // Phase-0-Test lief nur, weil er einen Range-Header schickte. Also die ganze Datei per Range.
+    const rangeEnd = ex.contentLength ? String(ex.contentLength - 1) : '';
+    const dl = await _nativeHttp('GET', ex.url, {
+        headers: Object.assign({ 'Range': 'bytes=0-' + rangeEnd, 'Accept': '*/*' }, ua ? { 'User-Agent': ua } : {}),
+    });
+    if (dl.status !== 200 && dl.status !== 206) {
+        return { ok: false, reason: 'Download HTTP ' + dl.status + ' (Client ' + ex.client + ')' };
+    }
     const bytes = _b64ToBytes(dl.bodyBase64);
     if (bytes.length < 16384) return { ok: false, reason: 'Download zu klein (' + bytes.length + ' Bytes)' };
     if (ex.contentLength && bytes.length < ex.contentLength * 0.95) {
-        return { ok: false, reason: 'Download unvollstaendig (' + bytes.length + '/' + ex.contentLength + ')' };
+        return { ok: false, reason: 'Server lieferte nur ' + bytes.length + '/' + ex.contentLength + ' Bytes (gestueckelt - Phase 1.1)' };
     }
     // m4a beginnt mit "....ftyp" ab Byte 4 - faengt eine Fehlerseite/leere Antwort ab
     if (String.fromCharCode(bytes[4] || 0, bytes[5] || 0, bytes[6] || 0, bytes[7] || 0) !== 'ftyp') {
