@@ -456,23 +456,43 @@ const _YT_IMPORT_RUN_CAP = 20;   // hoechstens so viele Songs pro Lauf - gegen b
 const _YT_IMPORT_ITEM_DELAY_MS = 1500; // Pause zwischen zwei Songs, gleicher Grund
 let _ytImportRunning = false;
 
+// googlevideo-URLs mit gir=yes sind DASH-Streams: der Server erwartet Anfragen IN HAEPPCHEN
+// (wie ein echter Player / yt-dlp --http-chunk-size), nicht die ganze Datei in einer Range.
+// Eine Range ueber die komplette Datei quittiert er mit 403 - genau der Fehler. 512 KB ist die
+// Groesse, mit der der Phase-0-Test 206 bekam. URL bleibt unangetastet, nur der Range-Header,
+// KEIN Accept (der Spike schickt keins). Gibt { status, bytes: Uint8Array|null } zurueck.
+const _YT_DL_CHUNK = 512 * 1024;
 async function _ytDownloadAudio(ex) {
     const ua = (_YT_CLIENTS.find(c => c.name === ex.client) || {}).ua || '';
-    const rangeEnd = ex.contentLength ? String(ex.contentLength - 1) : '';
-    // URL UNANGETASTET lassen und den Bytebereich NUR ueber den HTTP-Range-Header anfordern -
-    // genau so, wie der Phase-0-Test 206 + volle Geschwindigkeit bekam. Ein zusaetzliches
-    // &range= AN DER URL laesst googlevideo bei gir=yes-URLs mit 403 abweisen.
-    return _nativeHttp('GET', ex.url, {
-        headers: Object.assign({ 'Range': 'bytes=0-' + rangeEnd, 'Accept': '*/*' }, ua ? { 'User-Agent': ua } : {}),
-    });
+    const total = ex.contentLength || 0;
+    const hardCap = _YT_IMPORT_MAX_BYTES + 2 * 1024 * 1024;
+    const parts = [];
+    let got = 0;
+    while (true) {
+        const end = total ? (Math.min(got + _YT_DL_CHUNK, total) - 1) : (got + _YT_DL_CHUNK - 1);
+        const res = await _nativeHttp('GET', ex.url, {
+            headers: Object.assign({ 'Range': 'bytes=' + got + '-' + end }, ua ? { 'User-Agent': ua } : {}),
+        });
+        if (res.status !== 200 && res.status !== 206) return { status: res.status, bytes: null };
+        const b = _b64ToBytes(res.bodyBase64);
+        if (b.length === 0) break;
+        parts.push(b);
+        got += b.length;
+        if (total && got >= total) break;
+        if (b.length > _YT_DL_CHUNK) break;   // Server hat die ganze Datei auf einmal geliefert
+        if (!total && b.length < _YT_DL_CHUNK) break; // weniger als angefragt = Dateiende
+        if (got > hardCap) return { status: 998, bytes: null };
+    }
+    const out = new Uint8Array(got);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.length; }
+    return { status: 206, bytes: out };
 }
 
 async function _ytImportOne(item) {
-    // googlevideo-URLs sind auf die IP festgeschrieben, von der die Extraktion kam (`ip=` in
-    // der URL). Geht der Download ueber eine andere IP-Familie raus (iOS waehlt IPv4/IPv6 je
-    // Ziel-Host eigenstaendig), antwortet googlevideo mit 403. Gegenmittel: bei 403/401 den
-    // naechsten YouTube-Client nehmen - jede neue Extraktion ist ein frischer Player-Request
-    // und damit eine neue Chance auf passende Adress-Familie / eine weniger strikte URL-Form.
+    // Primaerweg ist der IOS-Client (liefert direkte, nicht-verschluesselte URLs). Scheitert der
+    // Download trotzdem (403/401), wird der naechste Client versucht - meist bringt das nichts
+    // (die anderen Client-Konfigs sind zzt. veraltet), aber es kostet nichts als Sicherheitsnetz.
     const tried = [];
     let ex = null, dl = null;
     while (true) {
@@ -486,15 +506,15 @@ async function _ytImportOne(item) {
             return { ok: false, reason: 'Datei zu gross fuer In-App-Import (' + Math.round(cand.contentLength / 1048576) + ' MB)' };
         }
         const d = await _ytDownloadAudio(cand);
-        if (d.status === 200 || d.status === 206) { ex = cand; dl = d; break; }
+        if ((d.status === 200 || d.status === 206) && d.bytes) { ex = cand; dl = d; break; }
         if ((d.status === 403 || d.status === 401) && tried.length < _YT_CLIENTS.length) continue; // naechster Client
         return { ok: false, reason: 'Download HTTP ' + d.status + ' (Clients: ' + tried.join(', ') + ')' };
     }
 
-    const bytes = _b64ToBytes(dl.bodyBase64);
+    const bytes = dl.bytes;
     if (bytes.length < 16384) return { ok: false, reason: 'Download zu klein (' + bytes.length + ' Bytes)' };
-    if (ex.contentLength && bytes.length < ex.contentLength * 0.95) {
-        return { ok: false, reason: 'Server lieferte nur ' + bytes.length + '/' + ex.contentLength + ' Bytes (gestueckelt - Phase 1.1)' };
+    if (ex.contentLength && bytes.length < ex.contentLength * 0.98) {
+        return { ok: false, reason: 'Download unvollstaendig: ' + bytes.length + '/' + ex.contentLength + ' Bytes' };
     }
     // m4a beginnt mit "....ftyp" ab Byte 4 - faengt eine Fehlerseite/leere Antwort ab
     if (String.fromCharCode(bytes[4] || 0, bytes[5] || 0, bytes[6] || 0, bytes[7] || 0) !== 'ftyp') {
