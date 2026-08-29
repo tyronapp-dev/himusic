@@ -344,9 +344,11 @@ const _YT_CLIENTS = [
       ctx: { clientName: 'WEB', clientVersion: '2.20250310.02.00', hl: 'en', gl: 'US' } },
 ];
 
-async function _ytPlayerResponse(videoId) {
+async function _ytPlayerResponse(videoId, skipClients) {
+    const skip = new Set(skipClients || []);
     const attempts = [];
     for (const c of _YT_CLIENTS) {
+        if (skip.has(c.name)) continue;
         try {
             const res = await _nativeHttp('POST', `https://www.youtube.com/youtubei/v1/player?key=${c.key}&prettyPrint=false`, {
                 headers: { 'Content-Type': 'application/json', 'User-Agent': c.ua, 'X-Goog-Api-Format-Version': '2' },
@@ -381,10 +383,10 @@ function _ytPickAudio(streamingData) {
 
 // Gibt ein Diagnose-Objekt zurueck - im Spike bewusst NICHT schon der fertige Import,
 // erst pruefen was ueberhaupt ankommt.
-async function _ytExtract(input) {
+async function _ytExtract(input, opts) {
     const videoId = _ytVideoId(input);
     if (!videoId) return { ok: false, error: 'keine Video-ID erkannt' };
-    const pr = await _ytPlayerResponse(videoId);
+    const pr = await _ytPlayerResponse(videoId, opts && opts.skipClients);
     if (!pr.ok) return { ok: false, videoId, error: 'kein Client lieferte OK + streamingData', attempts: pr.attempts };
     const vd = pr.json.videoDetails || {};
     const fmt = _ytPickAudio(pr.json.streamingData);
@@ -454,27 +456,44 @@ const _YT_IMPORT_RUN_CAP = 20;   // hoechstens so viele Songs pro Lauf - gegen b
 const _YT_IMPORT_ITEM_DELAY_MS = 1500; // Pause zwischen zwei Songs, gleicher Grund
 let _ytImportRunning = false;
 
-async function _ytImportOne(item) {
-    const ex = await _ytExtract(item.url);
-    if (!ex.ok || !ex.url) return { ok: false, reason: ex.error || 'Extraktion fehlgeschlagen' };
-    if (ex.hasCipher) return { ok: false, reason: 'Signatur-Entschluesselung noetig (noch nicht unterstuetzt)' };
-    // Schon importiert (per Video-ID, deckt auch "andere URL, selbes Video" ab): NICHT nochmal
-    // hochladen - sonst entsteht ein verwaistes R2-Objekt, das der Server-Dedup danach nur noch
-    // verwirft. Gilt als Erfolg (der Song ist ja da).
-    try { if (_loadImportedYtUrls().has('vid:' + ex.videoId)) return { ok: true, duplicate: true, skipped: true, title: ex.title }; } catch (e) {}
-    if (ex.contentLength && ex.contentLength > _YT_IMPORT_MAX_BYTES) {
-        return { ok: false, reason: 'Datei zu gross fuer In-App-Import (' + Math.round(ex.contentLength / 1048576) + ' MB)' };
-    }
+async function _ytDownloadAudio(ex) {
     const ua = (_YT_CLIENTS.find(c => c.name === ex.client) || {}).ua || '';
-    // Ein GET OHNE Range gibt googlevideo fuer diese URL-Form (c=IOS, gir=yes) oft 403 - der
-    // Phase-0-Test lief nur, weil er einen Range-Header schickte. Also die ganze Datei per Range.
-    const rangeEnd = ex.contentLength ? String(ex.contentLength - 1) : '';
-    const dl = await _nativeHttp('GET', ex.url, {
+    const rangeEnd = ex.contentLength ? String(ex.contentLength - 1) : '9999999999';
+    // googlevideo kennt ZWEI Wege fuer einen Bytebereich: den HTTP-Range-Header UND den
+    // URL-Parameter &range=. Manche URL-Formen (c=IOS, gir=yes) beantworten nur den einen und
+    // geben beim anderen 403. Deshalb beide setzen. KEIN &alr=yes - damit antwortet googlevideo
+    // mit einer Text-Redirect-URL statt den Audiodaten.
+    let url = ex.url;
+    if (!/[?&]range=/.test(url)) url += '&range=0-' + rangeEnd;
+    return _nativeHttp('GET', url, {
         headers: Object.assign({ 'Range': 'bytes=0-' + rangeEnd, 'Accept': '*/*' }, ua ? { 'User-Agent': ua } : {}),
     });
-    if (dl.status !== 200 && dl.status !== 206) {
-        return { ok: false, reason: 'Download HTTP ' + dl.status + ' (Client ' + ex.client + ')' };
+}
+
+async function _ytImportOne(item) {
+    // googlevideo-URLs sind auf die IP festgeschrieben, von der die Extraktion kam (`ip=` in
+    // der URL). Geht der Download ueber eine andere IP-Familie raus (iOS waehlt IPv4/IPv6 je
+    // Ziel-Host eigenstaendig), antwortet googlevideo mit 403. Gegenmittel: bei 403/401 den
+    // naechsten YouTube-Client nehmen - jede neue Extraktion ist ein frischer Player-Request
+    // und damit eine neue Chance auf passende Adress-Familie / eine weniger strikte URL-Form.
+    const tried = [];
+    let ex = null, dl = null;
+    while (true) {
+        const cand = await _ytExtract(item.url, { skipClients: tried });
+        if (!cand.ok || !cand.url) return { ok: false, reason: (cand.error || 'Extraktion fehlgeschlagen') + (tried.length ? ' (getestet: ' + tried.join(', ') + ')' : '') };
+        if (cand.hasCipher) { tried.push(cand.client); continue; } // Cipher-URL koennen wir (noch) nicht
+        tried.push(cand.client);
+        // Schon per Video-ID importiert (auch "andere URL, selbes Video"): kein zweiter Upload.
+        try { if (_loadImportedYtUrls().has('vid:' + cand.videoId)) return { ok: true, duplicate: true, skipped: true, title: cand.title }; } catch (e) {}
+        if (cand.contentLength && cand.contentLength > _YT_IMPORT_MAX_BYTES) {
+            return { ok: false, reason: 'Datei zu gross fuer In-App-Import (' + Math.round(cand.contentLength / 1048576) + ' MB)' };
+        }
+        const d = await _ytDownloadAudio(cand);
+        if (d.status === 200 || d.status === 206) { ex = cand; dl = d; break; }
+        if ((d.status === 403 || d.status === 401) && tried.length < _YT_CLIENTS.length) continue; // naechster Client
+        return { ok: false, reason: 'Download HTTP ' + d.status + ' (Clients: ' + tried.join(', ') + ')' };
     }
+
     const bytes = _b64ToBytes(dl.bodyBase64);
     if (bytes.length < 16384) return { ok: false, reason: 'Download zu klein (' + bytes.length + ' Bytes)' };
     if (ex.contentLength && bytes.length < ex.contentLength * 0.95) {
@@ -482,7 +501,7 @@ async function _ytImportOne(item) {
     }
     // m4a beginnt mit "....ftyp" ab Byte 4 - faengt eine Fehlerseite/leere Antwort ab
     if (String.fromCharCode(bytes[4] || 0, bytes[5] || 0, bytes[6] || 0, bytes[7] || 0) !== 'ftyp') {
-        return { ok: false, reason: 'keine m4a-Datei (falsche Kopfsignatur)' };
+        return { ok: false, reason: 'keine m4a-Datei (falsche Kopfsignatur, Client ' + ex.client + ')' };
     }
 
     const fname = 'fast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '_local_yt.m4a';
