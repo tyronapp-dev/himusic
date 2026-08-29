@@ -303,10 +303,27 @@ function _b64ToBytes(b64) {
 function _b64ToText(b64) { try { return new TextDecoder().decode(_b64ToBytes(b64)); } catch (e) { return ''; } }
 
 function _ytVideoId(input) {
-    const s = String(input || '').trim();
+    // iOS "intelligente Zeichen" zuruecksetzen: ‐-― + − sind diverse
+    // Gedankenstriche/Minus -> normaler Bindestrich; ‘-” typografische
+    // Anfuehrungszeichen raus; ​-‍/﻿/  unsichtbare Zeichen raus.
+    // Sonst scheitert die strikte 11-Zeichen-Erkennung an einem gemangelten "-".
+    const s = String(input || '')
+        .replace(/[‐-―−]/g, '-')
+        .replace(/[‘’“”]/g, '')
+        .replace(/[​-‍﻿ ]/g, '')
+        .trim();
     if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
-    let m = s.match(/[?&]v=([A-Za-z0-9_-]{11})/) || s.match(/youtu\.be\/([A-Za-z0-9_-]{11})/) || s.match(/\/shorts\/([A-Za-z0-9_-]{11})/) || s.match(/\/embed\/([A-Za-z0-9_-]{11})/);
-    return m ? m[1] : null;
+    const pats = [
+        /[?&]v=([A-Za-z0-9_-]{11})/,
+        /youtu\.be\/([A-Za-z0-9_-]{11})/,
+        /\/shorts\/([A-Za-z0-9_-]{11})/,
+        /\/embed\/([A-Za-z0-9_-]{11})/,
+        /\/live\/([A-Za-z0-9_-]{11})/,
+        /\/v\/([A-Za-z0-9_-]{11})/,
+    ];
+    for (const p of pats) { const m = s.match(p); if (m) return m[1]; }
+    const loose = s.match(/(?:^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{11})(?:$|[^A-Za-z0-9_-])/);
+    return loose ? loose[1] : null;
 }
 
 // InnerTube-Clients, die historisch DIREKTE (unverschluesselte) Audio-URLs ohne PO-Token
@@ -389,11 +406,20 @@ async function _ytExtract(input) {
 window._ytSpikeTest = async function () {
     const out = document.getElementById('yt-spike-out');
     const put = (o) => { if (out) out.textContent = (typeof o === 'string') ? o : JSON.stringify(o, null, 2); };
-    const input = prompt('YouTube-URL oder Video-ID zum Testen:', '');
-    if (!input) return;
-    put('… extrahiere …');
+    // Prompt mit einer echten URL aus der haengenden Warteschlange vorbelegen - dann muss der
+    // Nutzer nichts tippen (und iOS mangelt nichts).
+    let vorschlag = '';
     try {
-        const r = await _ytExtract(input);
+        const q = (typeof _ytQueueState !== 'undefined' && _ytQueueState || []).find(it => it && it.url && !['done','fallback_done'].includes(it.clientState));
+        if (q) vorschlag = q.url;
+    } catch (e) {}
+    const input = prompt('YouTube-URL oder Video-ID:', vorschlag);
+    if (!input) return;
+    const vid = _ytVideoId(input);
+    if (!vid) { put({ ok: false, error: 'keine Video-ID erkannt', eingabe_erhalten: input, laenge: input.length }); return; }
+    put('… extrahiere ' + vid + ' …');
+    try {
+        const r = await _ytExtract(vid);
         if (!r.ok || !r.url) { put(r); return; }
         put('… gefunden (' + r.client + ', itag ' + r.itag + '). Lade Probe …');
         const t0 = (performance.now ? performance.now() : Date.now());
