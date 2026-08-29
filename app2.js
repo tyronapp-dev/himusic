@@ -374,9 +374,12 @@ async function _ytVisitorData(seedVideoId, force) {
             'Cookie': 'SOCS=CAISEwgDEgk2NzY4NDU5MjMaAmVuIAEaBgiA_LyaBg',
         } });
     const html = _b64ToText(res.bodyBase64);
-    const m = html.match(/"visitorData":\s*"([^"]+)"/) || html.match(/"VISITOR_DATA":\s*"([^"]+)"/);
+    // visitorData ist base64url + evtl. %-Escapes - eng gefasst, damit nichts anderes aus der
+    // Seite (Steuerzeichen, Header-Trenner) in einen Request-Header/Body wandern kann.
+    const m = html.match(/"visitorData":\s*"([A-Za-z0-9%_-]{16,200})"/)
+           || html.match(/"VISITOR_DATA":\s*"([A-Za-z0-9%_-]{16,200})"/);
     if (!m) throw new Error('visitorData nicht in der watch-Seite gefunden (HTTP ' + res.status + ')');
-    let vd; try { vd = JSON.parse('"' + m[1] + '"'); } catch (e) { vd = m[1]; }
+    const vd = m[1];
     _ytVisitor = { data: vd, ts: Date.now() };
     return vd;
 }
