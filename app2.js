@@ -4338,6 +4338,26 @@ async function createNewPlaylistProcess() {
         document.getElementById('btn-yt-spike')?.addEventListener('click', () => {
             if (typeof window._ytSpikeTest === 'function') window._ytSpikeTest();
         });
+        document.getElementById('btn-yt-spike-copy')?.addEventListener('click', async (e) => {
+            const txt = (document.getElementById('yt-spike-out') || {}).textContent || '';
+            const btn = e.currentTarget;
+            const done = (ok) => { btn.innerText = ok ? '✓ kopiert' : 'nicht kopiert'; setTimeout(() => { btn.innerText = 'Ergebnis kopieren'; }, 1500); };
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(txt); done(true); return; }
+                throw new Error('no clipboard api');
+            } catch (err) {
+                // Fallback fuer aeltere WKWebView: verstecktes Textfeld + execCommand
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = txt; ta.style.cssText = 'position:fixed;top:-1000px;left:0;opacity:0;';
+                    document.body.appendChild(ta); ta.focus(); ta.select();
+                    ta.setSelectionRange(0, txt.length);
+                    const ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    done(ok);
+                } catch (e2) { done(false); }
+            }
+        });
     }
     // Beim Start einmal fuellen, damit die Liste nicht leer wirkt, wenn die Einstellungen
     // geoeffnet werden, ohne dass zwischendurch etwas uebersprungen wurde.
