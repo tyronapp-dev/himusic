@@ -888,27 +888,37 @@ async function _ytImportOne(item) {
     }
 
     const fname = 'fast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '_local_yt.m4a';
-    const up = await _apiFetch(`${API_URL}/upload/${fname}`, { method: 'PUT', headers: { 'Content-Type': 'audio/mp4' }, body: outBytes });
-    if (!up.ok) return { ok: false, reason: 'Upload HTTP ' + up.status };
-    const upData = await up.json().catch(() => ({}));
-    const fileUrl = upData.url || `${API_URL}/media/${fname}`;
+    const verifyUrl = `${API_URL}/media/${fname}`;   // Worker-Route - hier ist der API-Key ok
+    let fileUrl = verifyUrl;
 
-    // Erst registrieren, wenn die Datei WIRKLICH ausgeliefert wird. Sonst taucht der Song in der
-    // Liste auf, bevor R2/Edge ihn servieren, und laesst sich "erst nach einer Weile" abspielen.
-    // Mehrere Versuche mit wachsendem Abstand (~0,4 s bis ~3,4 s, in Summe ~12 s).
+    // Hochladen UND danach pruefen, dass die Datei vollstaendig und als MP4 ausgeliefert wird -
+    // sonst taucht der Song abspielbereit in der Liste auf, obwohl auf R2 nichts Brauchbares
+    // liegt (fehlgeschlagener/abgeschnittener PUT, Edge noch nicht konsistent). Bis zu 3 PUT-
+    // Versuche, dazwischen je eine Verifikations-Schleife.
+    const want = outBytes.length;
     let served = false;
-    for (let i = 0; i < 6 && !served; i++) {
-        if (i) await new Promise(r => setTimeout(r, 400 + i * 600));
-        try {
-            const chk = await _apiFetch(fileUrl, { method: 'GET', headers: { 'Range': 'bytes=0-1', 'Cache-Control': 'no-cache' } });
-            if (chk.status === 200 || chk.status === 206) {
-                served = true;
-                dbg.verify = { attempt: i + 1, status: chk.status };
-            } else {
-                dbg.verify = { attempt: i + 1, status: chk.status };
-            }
-        } catch (e) { dbg.verify = { attempt: i + 1, error: e.message }; }
+    for (let tryUp = 0; tryUp < 3 && !served; tryUp++) {
+        const up = await _apiFetch(`${API_URL}/upload/${fname}`, { method: 'PUT', headers: { 'Content-Type': 'audio/mp4' }, body: outBytes });
+        if (!up.ok) { dbg.verify = { put: tryUp + 1, status: up.status }; await new Promise(r => setTimeout(r, 800)); continue; }
+        try { const ud = await up.json(); if (ud && ud.url) fileUrl = ud.url; } catch (e) {}
+        for (let i = 0; i < 6 && !served; i++) {
+            if (i) await new Promise(r => setTimeout(r, 400 + i * 600));
+            try {
+                const chk = await _apiFetch(verifyUrl, { method: 'GET', headers: { 'Range': 'bytes=0-7', 'Cache-Control': 'no-cache' } });
+                const buf = (chk.status === 200 || chk.status === 206) ? new Uint8Array(await chk.arrayBuffer()) : null;
+                // Gesamtlaenge aus Content-Range ("bytes 0-7/1234567") oder Content-Length lesen.
+                const cr = chk.headers.get('content-range');
+                const total = cr ? parseInt((cr.split('/')[1] || ''), 10)
+                                 : parseInt(chk.headers.get('content-length') || '', 10);
+                const isMp4 = buf && buf.length >= 8 && String.fromCharCode(buf[4], buf[5], buf[6], buf[7]) === 'ftyp';
+                const fullLen = Number.isFinite(total) && Math.abs(total - want) <= 8;
+                dbg.verify = { put: tryUp + 1, attempt: i + 1, status: chk.status, isMp4: !!isMp4, total: total || null, want };
+                if (isMp4 && fullLen) served = true;
+            } catch (e) { dbg.verify = { put: tryUp + 1, attempt: i + 1, error: e.message }; }
+        }
+        if (!served) await new Promise(r => setTimeout(r, 800));
     }
+    if (!served) return { ok: false, reason: 'Datei-Upload nicht bestaetigt (' + JSON.stringify(dbg.verify) + ')', detail: dbg };
 
     const reg = await _apiFetch(`${API_URL}/songs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
