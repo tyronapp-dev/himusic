@@ -855,22 +855,24 @@ async function _ytImportOne(item) {
     // Fragmentiertes MP4 (DASH) -> progressives MP4, sonst spielt der native AVPlayer es nicht.
     let outBytes = bytes;
     if (_mp4IsFragmented(bytes)) {
-        try {
-            const r = _ytRemuxToProgressiveMp4(bytes);
-            // Ein sauberer Remux ist ~99% der Eingabegroesse (nur moof/sidx-Overhead faellt weg)
-            // und hat einen ftyp-Kopf. Passt das nicht, lieber die Rohdatei nehmen.
-            const plausible = r && r.bytes && r.samples > 10 &&
-                r.bytes.length > bytes.length * 0.8 && r.bytes.length < bytes.length * 1.1 &&
-                String.fromCharCode(r.bytes[4], r.bytes[5], r.bytes[6], r.bytes[7]) === 'ftyp' &&
-                !_mp4IsFragmented(r.bytes);
-            if (plausible) {
-                outBytes = r.bytes;
-                dbg.remux = { ok: true, samples: r.samples, durationSec: Math.round(r.durationSec), inBytes: bytes.length, outBytes: r.bytes.length };
-            } else {
-                dbg.remux = { ok: false, reason: 'Ergebnis unplausibel', outBytes: r && r.bytes && r.bytes.length };
-            }
-        } catch (e) {
-            dbg.remux = { ok: false, reason: e.message };   // Rohdatei hochladen - besser als nichts
+        let r = null;
+        try { r = _ytRemuxToProgressiveMp4(bytes); }
+        catch (e) { dbg.remux = { ok: false, reason: e.message }; }
+        // Ein sauberer Remux ist ~99% der Eingabegroesse (nur moof/sidx-Overhead faellt weg)
+        // und hat einen ftyp-Kopf.
+        const plausible = r && r.bytes && r.samples > 10 &&
+            r.bytes.length > bytes.length * 0.8 && r.bytes.length < bytes.length * 1.1 &&
+            String.fromCharCode(r.bytes[4], r.bytes[5], r.bytes[6], r.bytes[7]) === 'ftyp' &&
+            !_mp4IsFragmented(r.bytes);
+        if (plausible) {
+            outBytes = r.bytes;
+            dbg.remux = { ok: true, samples: r.samples, durationSec: Math.round(r.durationSec), inBytes: bytes.length, outBytes: r.bytes.length };
+        } else {
+            // Rohes fragmentiertes MP4 hochladen bringt nichts - der native Player spielt es nicht.
+            // Lieber den Import als fehlgeschlagen melden (wird als retrybar angezeigt), statt einen
+            // dauerhaft toten Song in der Bibliothek zu hinterlassen.
+            if (!dbg.remux) dbg.remux = { ok: false, reason: 'Ergebnis unplausibel', outBytes: r && r.bytes && r.bytes.length };
+            return { ok: false, reason: 'Remux fehlgeschlagen (' + (dbg.remux.reason || '?') + ') - fragmentiertes MP4 waere nicht abspielbar', detail: dbg };
         }
     }
 
