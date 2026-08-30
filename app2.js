@@ -895,30 +895,41 @@ async function _ytImportOne(item) {
     // sonst taucht der Song abspielbereit in der Liste auf, obwohl auf R2 nichts Brauchbares
     // liegt (fehlgeschlagener/abgeschnittener PUT, Edge noch nicht konsistent). Bis zu 3 PUT-
     // Versuche, dazwischen je eine Verifikations-Schleife.
+    // Probe: PLAIN fetch (kein _apiFetch - der X-Api-Key-Header wuerde einen CORS-Preflight
+    // erzwingen, den die /media-Route nicht beantwortet) und NUR der Range-Header (CORS-
+    // safelisted, kein Preflight). /media ist ohnehin unauthentifiziert.
     const want = outBytes.length;
-    let served = false;
+    let served = false;      // Datei bestaetigt vollstaendig da
+    let gotStatus = false;   // Probe kam ueberhaupt mit einer HTTP-Antwort zurueck
     for (let tryUp = 0; tryUp < 3 && !served; tryUp++) {
         const up = await _apiFetch(`${API_URL}/upload/${fname}`, { method: 'PUT', headers: { 'Content-Type': 'audio/mp4' }, body: outBytes });
-        if (!up.ok) { dbg.verify = { put: tryUp + 1, status: up.status }; await new Promise(r => setTimeout(r, 800)); continue; }
+        if (!up.ok) { dbg.verify = { put: tryUp + 1, putStatus: up.status }; await new Promise(r => setTimeout(r, 800)); continue; }
         try { const ud = await up.json(); if (ud && ud.url) fileUrl = ud.url; } catch (e) {}
         for (let i = 0; i < 6 && !served; i++) {
             if (i) await new Promise(r => setTimeout(r, 400 + i * 600));
             try {
-                const chk = await _apiFetch(verifyUrl, { method: 'GET', headers: { 'Range': 'bytes=0-7', 'Cache-Control': 'no-cache' } });
-                const buf = (chk.status === 200 || chk.status === 206) ? new Uint8Array(await chk.arrayBuffer()) : null;
-                // Gesamtlaenge aus Content-Range ("bytes 0-7/1234567") oder Content-Length lesen.
-                const cr = chk.headers.get('content-range');
-                const total = cr ? parseInt((cr.split('/')[1] || ''), 10)
-                                 : parseInt(chk.headers.get('content-length') || '', 10);
-                const isMp4 = buf && buf.length >= 8 && String.fromCharCode(buf[4], buf[5], buf[6], buf[7]) === 'ftyp';
-                const fullLen = Number.isFinite(total) && Math.abs(total - want) <= 8;
-                dbg.verify = { put: tryUp + 1, attempt: i + 1, status: chk.status, isMp4: !!isMp4, total: total || null, want };
-                if (isMp4 && fullLen) served = true;
+                // (a) Anfang: startet die Datei mit "....ftyp"?
+                const head = await fetch(verifyUrl, { method: 'GET', headers: { 'Range': 'bytes=0-7' } });
+                gotStatus = true;
+                const hb = (head.status === 200 || head.status === 206) ? new Uint8Array(await head.arrayBuffer()) : null;
+                const isMp4 = hb && hb.length >= 8 && String.fromCharCode(hb[4], hb[5], hb[6], hb[7]) === 'ftyp';
+                // (b) Ende: sind die LETZTEN 8 Bytes (absolute Range) da? 206 = Datei ist vollstaendig,
+                //     416 = abgeschnitten. Braucht keinen exponierten Content-Range-Header.
+                let tailOk = false;
+                if (isMp4 && want > 16) {
+                    const tail = await fetch(verifyUrl, { method: 'GET', headers: { 'Range': `bytes=${want - 8}-${want - 1}` } });
+                    tailOk = (tail.status === 206 || tail.status === 200);
+                }
+                dbg.verify = { put: tryUp + 1, attempt: i + 1, headStatus: head.status, isMp4: !!isMp4, tailOk };
+                if (isMp4 && tailOk) served = true;
             } catch (e) { dbg.verify = { put: tryUp + 1, attempt: i + 1, error: e.message }; }
         }
         if (!served) await new Promise(r => setTimeout(r, 800));
     }
-    if (!served) return { ok: false, reason: 'Datei-Upload nicht bestaetigt (' + JSON.stringify(dbg.verify) + ')', detail: dbg };
+    // Nur abbrechen, wenn die Probe eine ECHTE Antwort gab und die schlecht war. Warf sie nur
+    // (Netz/CORS) -> wir wissen nichts ueber die Datei, also lieber registrieren wie frueher.
+    if (!served && gotStatus) return { ok: false, reason: 'Datei-Upload nicht bestaetigt (' + JSON.stringify(dbg.verify) + ')', detail: dbg };
+    if (!served) dbg.verify = Object.assign({ note: 'Probe nicht erreichbar - trotzdem registriert' }, dbg.verify || {});
 
     const reg = await _apiFetch(`${API_URL}/songs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
