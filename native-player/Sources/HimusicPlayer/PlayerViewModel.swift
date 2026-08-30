@@ -155,6 +155,13 @@ final class PlayerViewModel: ObservableObject {
     /// heute an einer schlechten Verbindung scheiterte, soll morgen wieder versucht werden.
     private var failedItemIds: Set<Int> = []
 
+    /// Wie oft ein Song ohne lokale Kopie schon direkt vom Netz neu angestossen wurde. Ein
+    /// frisch importierter Song ist am CDN-Edge noch "kalt" - der erste AVPlayer-Zugriff
+    /// scheitert dann gern, obwohl die Datei in Ordnung ist. Ein paar kurze erneute Anlaeufe
+    /// fangen das ab, bevor der Song als defekt gilt. Pro Warteschlange, wie failedItemIds.
+    private var remoteRetryCount: [Int: Int] = [:]
+    private static let maxRemoteRetries = 3
+
     /// In welche Richtung zuletzt navigiert wurde: +1 vorwaerts, -1 rueckwaerts. Entscheidet,
     /// wohin ein defekter Song uebersprungen wird. Ohne das ging es immer vorwaerts, und wer
     /// rueckwaerts an einem defekten Song vorbeiwollte, wurde jedes Mal wieder nach vorn
@@ -328,6 +335,7 @@ final class PlayerViewModel: ObservableObject {
         // Neue Warteschlange = neuer Anlauf. Ein Song, der beim letzten Mal an einer schlechten
         // Verbindung scheiterte, soll hier wieder eine Chance bekommen statt stumm zu bleiben.
         failedItemIds.removeAll()
+        remoteRetryCount.removeAll()
         consecutiveFailures = 0
         lastNavigationStep = 1
         playCurrent()
@@ -452,6 +460,7 @@ final class PlayerViewModel: ObservableObject {
                     // Ab hier gilt der Song als spielbar - die Fehlerkette ist unterbrochen.
                     self.consecutiveFailures = 0
                     self.failedItemIds.remove(item.id)
+                    self.remoteRetryCount.removeValue(forKey: item.id)
                     // Lief dieser Song gerade als zweiter Versuch ueber die Netzadresse, ist
                     // damit BEWIESEN, dass nur die lokale Kopie kaputt war: der Song selbst
                     // spielt ja. Erst jetzt darf sie weg - und der Cache laedt sie beim
@@ -591,9 +600,22 @@ final class PlayerViewModel: ObservableObject {
                 let hasLocalCopy = await AudioFileCache.shared.hasCachedFile(forId: item.id)
                 guard let self, self.currentItem?.id == item.id else { return }
                 if hasLocalCopy {
+                    // Lokale Kopie war das Problem - einmal ueber die Netzadresse gegenpruefen.
                     self.playCurrent(ignoreLocalCopy: true)
                 } else {
-                    self.reportAndSkip(item, reason: reason)
+                    // Keine lokale Kopie (frischer Import): die Datei ist wahrscheinlich in
+                    // Ordnung, nur am CDN-Edge noch kalt. Ein paar kurze erneute Anlaeufe vom
+                    // Netz, bevor der Song als defekt gilt und uebersprungen + gesperrt wird.
+                    let n = self.remoteRetryCount[item.id, default: 0]
+                    if n < Self.maxRemoteRetries {
+                        self.remoteRetryCount[item.id] = n + 1
+                        self.retriedFromRemoteId = nil   // erlaubt diesem Zweig, erneut zu greifen
+                        try? await Task.sleep(nanoseconds: 1_800_000_000)
+                        guard self.currentItem?.id == item.id else { return }
+                        self.playCurrent()
+                    } else {
+                        self.reportAndSkip(item, reason: reason)
+                    }
                 }
             }
             return

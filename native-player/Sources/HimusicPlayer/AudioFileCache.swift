@@ -174,10 +174,25 @@ actor AudioFileCache {
     private static let minimumPlausibleBytes: Int64 = 16 * 1024
 
     private func download(item: QueueItem, from remote: URL) async {
-        guard let (tmpURL, response) = try? await URLSession.shared.download(from: remote),
-              let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            return
+        // Bis zu 3 Anlaeufe mit wachsendem Abstand: ein frisch importierter Song ist am
+        // CDN-Edge noch nicht gecacht, der erste Zugriff scheitert dort gern voruebergehend.
+        // Ohne Retry blieb so ein Song dauerhaft ohne lokale Kopie (nur gestreamt, und der
+        // erste Stream-Versuch scheiterte am selben kalten Edge) - genau das "spielt erst
+        // nach einer Weile"-Verhalten.
+        var tmpURL: URL?
+        var http: HTTPURLResponse?
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_800_000_000)
+            }
+            if let (u, resp) = try? await URLSession.shared.download(from: remote),
+               let h = resp as? HTTPURLResponse, h.statusCode == 200 {
+                tmpURL = u
+                http = h
+                break
+            }
         }
+        guard let tmpURL, let http else { return }
 
         // Status 200 allein sagt NICHT, dass hier eine brauchbare Audiodatei ankam. Genau
         // darauf hat sich der Cache bisher verlassen - eine HTML-Fehlerseite, eine leere
