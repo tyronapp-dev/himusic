@@ -831,7 +831,9 @@ async function _ytImportOne(item) {
         if (!cand.ok || !cand.url) return { ok: false, reason: (cand.error || 'Extraktion fehlgeschlagen') + (tried.length ? ' (getestet: ' + tried.join(', ') + ')' : ''), detail: dbg };
         if (cand.hasCipher) { tried.push(cand.client); continue; }
         tried.push(cand.client);
-        try { if (_loadImportedYtUrls().has('vid:' + cand.videoId)) return { ok: true, duplicate: true, skipped: true, title: cand.title }; } catch (e) {}
+        // "schon importiert"-Sperre - nur wenn NICHT bewusst erzwungen (item.force, z.B. Re-Import
+        // nach dem Loeschen). Sonst wuerde ein Re-Import still "fertig" melden ohne etwas zu tun.
+        try { if (!item.force && _loadImportedYtUrls().has('vid:' + cand.videoId)) return { ok: true, duplicate: true, skipped: true, title: cand.title }; } catch (e) {}
         if (cand.contentLength && cand.contentLength > _YT_IMPORT_MAX_BYTES) {
             return { ok: false, reason: 'Datei zu gross fuer In-App-Import (' + Math.round(cand.contentLength / 1048576) + ' MB)', detail: dbg };
         }
@@ -6006,6 +6008,18 @@ function _rememberImportedYtUrl(url) {
         localStorage.setItem(YT_IMPORTED_URLS_KEY, JSON.stringify(arr));
     } catch(e) {}
 }
+// Gegenstueck: nimmt eine URL (und ihre vid:<id>-Form) wieder aus der Historie - noetig, wenn ein
+// Song geloescht und bewusst neu importiert wird, sonst blockt die Sperre den Re-Import stumm.
+function _forgetImportedYtUrl(url) {
+    if (!url) return;
+    try {
+        const set = _loadImportedYtUrls();
+        let changed = set.delete(url);
+        const vid = (typeof _ytVideoId === 'function') ? _ytVideoId(url) : null;
+        if (vid && set.delete('vid:' + vid)) changed = true;
+        if (changed) localStorage.setItem(YT_IMPORTED_URLS_KEY, JSON.stringify(Array.from(set)));
+    } catch (e) {}
+}
 
 let _ytQueueState = _loadYtQueue();
 let _ytPollTimer = null;
@@ -6056,13 +6070,16 @@ function _parseYoutubeLinksFromTextarea(raw) {
     return { valid, invalidCount };
 }
 
-function _makeYtQueueItem(url, meta) {
+function _makeYtQueueItem(url, meta, force) {
     const now = Date.now();
     return {
         localId: `ytq_${now}_${Math.random().toString(36).slice(2, 8)}`,
         url, title: (meta && meta.title) || null, thumbnail: (meta && meta.thumbnail) || null,
         queueItemId: null, serverStatus: null, clientState: 'submitting',
         errorMessage: null, createdAt: now, updatedAt: now,
+        // force = bewusstes erneutes Importieren (z.B. nach dem Loeschen des Songs). Umgeht die
+        // "schon importiert"-Sperre in _ytImportOne, die sonst still "fertig" meldet ohne etwas zu tun.
+        force: !!force,
     };
 }
 
@@ -6447,8 +6464,8 @@ function _forceClearYtQueue() {
     _saveAndRenderYtQueue();
 }
 
-async function _enqueueOneLink(url, meta) {
-    const item = _makeYtQueueItem(url, meta);
+async function _enqueueOneLink(url, meta, force) {
+    const item = _makeYtQueueItem(url, meta, force);
     _ytQueueState.push(item);
     _saveAndRenderYtQueue();
 
@@ -6477,7 +6494,7 @@ async function _enqueueYoutubeLinks(urls, meta, opts) {
     // wurden, werden uebersprungen - nuetzlich beim Masseneinfuegen ueberlappender Playlists.
     // opts.force = true (gezielter Einzel-Download aus der Suche) umgeht den Filter: wer bewusst
     // auf EINEN Song "herunterladen" drueckt, will ihn haben, auch wenn die Historie ihn kennt.
-    const force = opts && opts.force;
+    const force = !!(opts && opts.force);
     const importedUrls = force ? new Set() : _loadImportedYtUrls();
     const toEnqueue = urls.filter(u => !importedUrls.has(u));
     const skipped = urls.length - toEnqueue.length;
@@ -6485,12 +6502,15 @@ async function _enqueueYoutubeLinks(urls, meta, opts) {
         window._showToast(`⏭️ ${skipped} bereits importierte${skipped === 1 ? 'r' : ''} Link${skipped === 1 ? '' : 's'} übersprungen`, 3500);
     }
     if (toEnqueue.length === 0) return;
+    // Beim erzwungenen Re-Import die URLs auch aus der lokalen "schon importiert"-Historie
+    // nehmen - sonst greift die vid:-Sperre in _ytImportOne trotzdem und meldet still "fertig".
+    if (force) toEnqueue.forEach(u => _forgetImportedYtUrl(u));
 
     let idx = 0;
     async function lane() {
         while (idx < toEnqueue.length) {
             const url = toEnqueue[idx++];
-            await _enqueueOneLink(url, meta);
+            await _enqueueOneLink(url, meta, force);
             await new Promise(r => setTimeout(r, 50));
         }
     }
@@ -6655,7 +6675,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             ytUrlsInput.value = ''; _updateYtUrlsCount();
             ytBtn.disabled = false; ytBtn.style.opacity = '1';
-            _enqueueYoutubeLinks(valid, {});
+            // Kleiner Batch = der Nutzer fuegt gezielt einzelne Links wieder ein (z.B. nach dem
+            // Loeschen) -> erzwingen, damit die "schon importiert"-Sperre nicht still blockt.
+            // Grosser Batch = Playlist-Dump -> Duplikat-Filter behalten (spart Bandbreite).
+            _enqueueYoutubeLinks(valid, {}, { force: valid.length <= 5 });
         });
     }
 
