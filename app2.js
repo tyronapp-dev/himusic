@@ -880,6 +880,23 @@ async function _ytImportOne(item) {
     const upData = await up.json().catch(() => ({}));
     const fileUrl = upData.url || `${API_URL}/media/${fname}`;
 
+    // Erst registrieren, wenn die Datei WIRKLICH ausgeliefert wird. Sonst taucht der Song in der
+    // Liste auf, bevor R2/Edge ihn servieren, und laesst sich "erst nach einer Weile" abspielen.
+    // Mehrere Versuche mit wachsendem Abstand (~0,4 s bis ~3,4 s, in Summe ~12 s).
+    let served = false;
+    for (let i = 0; i < 6 && !served; i++) {
+        if (i) await new Promise(r => setTimeout(r, 400 + i * 600));
+        try {
+            const chk = await _apiFetch(fileUrl, { method: 'GET', headers: { 'Range': 'bytes=0-1', 'Cache-Control': 'no-cache' } });
+            if (chk.status === 200 || chk.status === 206) {
+                served = true;
+                dbg.verify = { attempt: i + 1, status: chk.status };
+            } else {
+                dbg.verify = { attempt: i + 1, status: chk.status };
+            }
+        } catch (e) { dbg.verify = { attempt: i + 1, error: e.message }; }
+    }
+
     const reg = await _apiFetch(`${API_URL}/songs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -889,7 +906,7 @@ async function _ytImportOne(item) {
     });
     if (!reg.ok) return { ok: false, reason: 'Song anlegen HTTP ' + reg.status };
     const regData = await reg.json().catch(() => ({}));
-    return { ok: true, title: ex.title, client: ex.client, bytes: outBytes.length, remuxed: outBytes !== bytes, duplicate: !!regData.duplicate, videoId: ex.videoId };
+    return { ok: true, title: ex.title, client: ex.client, bytes: outBytes.length, remuxed: outBytes !== bytes, verified: served, duplicate: !!regData.duplicate, videoId: ex.videoId };
 }
 
 // auto=true (Auslauf beim App-Oeffnen): gescheiterte Eintraege werden AUFGEGEBEN. Sonst wuerde
