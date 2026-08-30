@@ -1006,6 +1006,22 @@ async function _ytImportQueue(auto = false) {
     _ytImportRunning = false;
     if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
     if (window._showToast) window._showToast('In-App-Import fertig: ' + ok + ' ok' + (fail ? ', ' + fail + ' fehlgeschlagen' : ''), 5000);
+
+    // In der Huelle: nach neuen Importen die Seite EINMAL neu laden. Der Ton laeuft nativ
+    // (AVPlayer in der Huelle) weiter - ein Webview-Reload stoppt ihn NICHT, die Seite
+    // re-synchronisiert sich danach ueber _applyNativeNowPlaying. Grund: ein frisch
+    // importierter Song wird ueber die reine In-Place-Aktualisierung nicht zuverlaessig
+    // abspielbar (Player-Handoff/_songIndex), ein Neustart loest es. Kein Loop-Risiko: nach
+    // dem Reload sind die Queue-Eintraege 'done', ein erneuter Auto-Lauf findet nichts -> ok=0.
+    if (ok > 0 && window.__himusicNativeShell) {
+        let recent = 0;
+        try { recent = +(sessionStorage.getItem('_ytReloadedAt') || 0); } catch (e) {}
+        if (Date.now() - recent > 20000) {
+            try { sessionStorage.setItem('_ytReloadedAt', String(Date.now())); } catch (e) {}
+            if (window._showToast) window._showToast('Aktualisiere Bibliothek …', 2000);
+            setTimeout(() => { try { location.reload(); } catch (e) {} }, 2500);
+        }
+    }
 }
 window._ytImportQueue = _ytImportQueue;
 
