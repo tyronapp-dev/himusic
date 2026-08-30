@@ -731,6 +731,15 @@ function _ytRemuxToProgressiveMp4(input) {
         p += size;
     }
     if (!sizes.length) throw new Error('keine Samples in moof');
+    // Jede Sample-Byte-Kopie muss exakt so lang sein wie ihr stsz-Eintrag - sonst zeigt eine
+    // trun-Offset-Rechnung ins Leere oder die Quelle war abgeschnitten, und AVFoundation
+    // (praezises Parsen) lehnt die ganze Datei ab statt sie nur am Ende zu verkuerzen.
+    let chunkSum = 0;
+    for (let i = 0; i < sampleChunks.length; i++) {
+        if (sampleChunks[i].length !== sizes[i]) throw new Error('Sample ' + i + ' unvollstaendig (' + sampleChunks[i].length + '/' + sizes[i] + ')');
+        chunkSum += sampleChunks[i].length;
+    }
+    if (chunkSum !== totalBytes) throw new Error('Sample-Summe ' + chunkSum + ' != ' + totalBytes);
 
     const stts = (() => {
         const runs = [];
