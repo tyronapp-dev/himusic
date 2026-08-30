@@ -931,6 +931,17 @@ async function _ytImportOne(item) {
     if (!served && gotStatus) return { ok: false, reason: 'Datei-Upload nicht bestaetigt (' + JSON.stringify(dbg.verify) + ')', detail: dbg };
     if (!served) dbg.verify = Object.assign({ note: 'Probe nicht erreichbar - trotzdem registriert' }, dbg.verify || {});
 
+    // Cloudflare-Edge fuer die frische Datei vorwaermen: der native AVPlayer laeuft in einem
+    // eigenen Prozess, sein ERSTER (kalter) Zugriff auf die noch nicht gecachte Datei ist
+    // langsam/scheitert - dann sperrt der Player den Song fuer die Sitzung. Ein voller GET von
+    // der Seite zieht die Datei durch denselben Edge-POP, den auch der AVPlayer nutzt, sodass
+    // sein Zugriff danach warm ist. Kostet einmalig ~1 Dateigroesse Traffic pro Import.
+    try {
+        const warm = await fetch(verifyUrl, { method: 'GET' });
+        if (warm.status === 200 || warm.status === 206) { const bb = await warm.arrayBuffer(); dbg.warmed = { status: warm.status, bytes: bb.byteLength }; }
+        else dbg.warmed = { status: warm.status };
+    } catch (e) { dbg.warmed = { error: e.message }; }
+
     const reg = await _apiFetch(`${API_URL}/songs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
