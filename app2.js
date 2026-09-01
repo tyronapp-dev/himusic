@@ -665,7 +665,10 @@ function _ytRemuxToProgressiveMp4(input) {
     const trak = findBox(mvS, mvE, ['trak']);
     if (!trak) throw new Error('kein trak');
     const tkhd = findBox(trak[0], trak[1], ['tkhd']);
-    const edts = findBox(trak[0], trak[1], ['edts']); // Edit-List schneidet AAC-Priming - behalten
+    // edts/elst BEWUSST NICHT uebernehmen: eine Edit-List, deren segment_duration nicht exakt
+    // zur neu berechneten Dauer passt, laesst AVPlayer die Wiedergabe VOR dem echten Ende
+    // stoppen ("Song spielt nur teilweise"). Der Preis ist ~1000-2000 AAC-Priming-Samples
+    // (~20-45 ms, praktisch still) am Anfang - deutlich besser als ein abgeschnittener Song.
     const mdia = findBox(trak[0], trak[1], ['mdia']);
     const mdhd = mdia && findBox(mdia[0], mdia[1], ['mdhd']);
     const hdlr = mdia && findBox(mdia[0], mdia[1], ['hdlr']);
@@ -784,10 +787,7 @@ function _ytRemuxToProgressiveMp4(input) {
     (tkhdBox[8] === 1)
         ? (wU32(tkhdBox, 36, 0), wU32(tkhdBox, 40, movieDur))
         : wU32(tkhdBox, 28, movieDur);
-    const trakParts = [tkhdBox];
-    if (edts) trakParts.push(slice(edts));
-    trakParts.push(newMdia);
-    const newTrak = mkBox('trak', ...trakParts);
+    const newTrak = mkBox('trak', tkhdBox, newMdia);
 
     const mvhdBox = slice(mvhd);
     (mvhdBox[8] === 1)
@@ -823,6 +823,68 @@ function _ytRemuxToProgressiveMp4(input) {
     out.set(mdatHeader, o); o += 8;
     for (const c of sampleChunks) { out.set(c, o); o += c.length; }
     return { bytes: out, samples: sizes.length, durationSec: totalMediaDur / mediaTimescale };
+}
+
+// <audio>-Metadaten-Check: laedt die Datei den Container mit plausibler Dauer? Deckt sich mit
+// dem, was auch AVFoundation beim Oeffnen tut. src = Uint8Array/Blob oder URL-String.
+function _probeAudioMeta(src, expectSec) {
+    return new Promise((resolve) => {
+        let url = null, done = false;
+        const a = new Audio();
+        a.muted = true; a.volume = 0; a.preload = 'auto';
+        const cleanup = () => { try { a.removeAttribute('src'); a.load(); } catch (e) {} if (url) { try { URL.revokeObjectURL(url); } catch (e) {} } };
+        const finish = (ok, why, dur) => { if (done) return; done = true; clearTimeout(tmo); cleanup(); resolve({ ok, why: why || '', duration: dur || 0 }); };
+        const tmo = setTimeout(() => finish(false, 'meta-timeout'), 15000);
+        a.addEventListener('error', () => finish(false, 'audio-error ' + (a.error && a.error.code)));
+        const check = () => {
+            if (done) return;
+            const d = a.duration;
+            if (!isFinite(d) || d < 1) return;   // noch nicht bekannt
+            if (expectSec && Math.abs(d - expectSec) / expectSec > 0.25) return finish(false, 'dauer ' + Math.round(d) + 's != ~' + Math.round(expectSec) + 's');
+            finish(true, 'ok', d);
+        };
+        a.addEventListener('loadedmetadata', check);
+        a.addEventListener('durationchange', check);
+        a.addEventListener('canplay', check);
+        try {
+            if (typeof src === 'string') { url = src; a.src = src; }
+            else { const blob = (src instanceof Blob) ? src : new Blob([src], { type: 'audio/mp4' }); url = URL.createObjectURL(blob); a.src = url; }
+            a.load();
+        } catch (e) { finish(false, 'setup ' + e.message); }
+    });
+}
+
+// Prueft, ob eine Audiodatei WIRKLICH bis zum Ende abspielbar ist - mit dem Decoder, den auch
+// der native AVPlayer nutzt (WKWebView haengt auf iOS am selben AVFoundation/CoreMedia-Stack).
+// Zwei Stufen: (1) <audio> laedt den Container mit plausibler Dauer, (2) fuer Dateien < 8 MB
+// zusaetzlich ein VOLLSTAENDIGER decodeAudioData - das dekodiert jedes AAC-Frame und scheitert
+// an einer abgeschnittenen Datei oder kaputten Sample-Tabelle, die <audio> noch durchwinkt.
+// Grosse Dateien (>8 MB ~ >8 min) nur Stufe 1, sonst sprengt das PCM den Speicher.
+// Kein play() -> kein Eingriff in die laufende native Wiedergabe. bytes = Uint8Array/Blob.
+async function _probeAudioPlayable(bytes, expectSec) {
+    const u8 = (bytes instanceof Uint8Array) ? bytes
+        : (bytes instanceof Blob) ? new Uint8Array(await bytes.arrayBuffer()) : null;
+    if (!u8 || u8.length < 16384) return { ok: false, why: 'zu klein', duration: 0 };
+
+    const meta = await _probeAudioMeta(u8, expectSec);
+    if (!meta.ok) return meta;
+
+    if (u8.length > 8 * 1024 * 1024) return { ok: true, why: 'nur-meta (gross)', duration: meta.duration };
+
+    try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return { ok: true, why: 'kein AudioContext - nur meta', duration: meta.duration };
+        const ac = new AC();
+        // decodeAudioData konsumiert den Buffer - Kopie geben.
+        const buf = await ac.decodeAudioData(u8.slice().buffer);
+        try { ac.close(); } catch (e) {}
+        const dd = buf.duration;
+        if (!isFinite(dd) || dd < 1) return { ok: false, why: 'decode-dauer ' + dd, duration: meta.duration };
+        if (Math.abs(dd - meta.duration) > 2) return { ok: false, why: 'decode ' + Math.round(dd) + 's != meta ' + Math.round(meta.duration) + 's (abgeschnitten?)', duration: dd };
+        return { ok: true, why: 'ok (voll dekodiert)', duration: dd };
+    } catch (e) {
+        return { ok: false, why: 'decodeAudioData: ' + (e && e.message || e), duration: meta.duration };
+    }
 }
 
 async function _ytImportOne(item) {
@@ -878,6 +940,12 @@ async function _ytImportOne(item) {
         if (plausible) {
             outBytes = r.bytes;
             dbg.remux = { ok: true, samples: r.samples, durationSec: Math.round(r.durationSec), inBytes: bytes.length, outBytes: r.bytes.length };
+            // Mit dem echten Geraete-Decoder (WKWebView <audio> = dieselbe AVFoundation wie der
+            // native Player) pruefen, dass der Remux laedt UND ans Ende springen kann. Faellt das
+            // durch, ist der Remux fuer genau dieses Video kaputt -> Import scheitern lassen.
+            const probe = await _probeAudioPlayable(outBytes, Math.round(r.durationSec));
+            dbg.remux.probe = probe;
+            if (!probe.ok) return { ok: false, reason: 'Remux nicht abspielbar (' + probe.why + ')', detail: dbg };
         } else {
             // Rohes fragmentiertes MP4 hochladen bringt nichts - der native Player spielt es nicht.
             // Lieber den Import als fehlgeschlagen melden (wird als retrybar angezeigt), statt einen
@@ -931,15 +999,22 @@ async function _ytImportOne(item) {
     if (!served && gotStatus) return { ok: false, reason: 'Datei-Upload nicht bestaetigt (' + JSON.stringify(dbg.verify) + ')', detail: dbg };
     if (!served) dbg.verify = Object.assign({ note: 'Probe nicht erreichbar - trotzdem registriert' }, dbg.verify || {});
 
-    // Cloudflare-Edge fuer die frische Datei vorwaermen: der native AVPlayer laeuft in einem
-    // eigenen Prozess, sein ERSTER (kalter) Zugriff auf die noch nicht gecachte Datei ist
-    // langsam/scheitert - dann sperrt der Player den Song fuer die Sitzung. Ein voller GET von
-    // der Seite zieht die Datei durch denselben Edge-POP, den auch der AVPlayer nutzt, sodass
-    // sein Zugriff danach warm ist. Kostet einmalig ~1 Dateigroesse Traffic pro Import.
+    // Zwei Fliegen mit einem GET: (1) Cloudflare-Edge vorwaermen (der native AVPlayer laeuft in
+    // einem eigenen Prozess, sein erster kalter Zugriff ist sonst langsam/scheitert), (2) die
+    // WIRKLICH AUSGELIEFERTEN Bytes mit dem echten Decoder gegenpruefen. Laedt/seekt das <audio>
+    // damit nicht, ist die R2-Kopie kaputt -> Import scheitern lassen statt toten Song anlegen.
     try {
         const warm = await fetch(verifyUrl, { method: 'GET' });
-        if (warm.status === 200 || warm.status === 206) { const bb = await warm.arrayBuffer(); dbg.warmed = { status: warm.status, bytes: bb.byteLength }; }
-        else dbg.warmed = { status: warm.status };
+        if (warm.status === 200 || warm.status === 206) {
+            const bb = new Uint8Array(await warm.arrayBuffer());
+            dbg.warmed = { status: warm.status, bytes: bb.byteLength };
+            if (Math.abs(bb.length - want) > 8) return { ok: false, reason: 'Ausgelieferte Datei falsche Groesse (' + bb.length + '/' + want + ')', detail: dbg };
+            const probe = await _probeAudioPlayable(bb, ex.lengthSeconds || Math.round((dbg.remux && dbg.remux.durationSec) || 0));
+            dbg.servedProbe = probe;
+            if (!probe.ok) return { ok: false, reason: 'Ausgelieferte Datei nicht abspielbar (' + probe.why + ')', detail: dbg };
+        } else {
+            dbg.warmed = { status: warm.status };
+        }
     } catch (e) { dbg.warmed = { error: e.message }; }
 
     const reg = await _apiFetch(`${API_URL}/songs`, {
