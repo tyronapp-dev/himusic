@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 /// Persistenter Datei-Cache fuer Audiodateien, damit AVPlayer offline aus dem lokalen
 /// Dateisystem liest statt zu streamen - erst das erlaubt echte Hintergrund-Wiedergabe
@@ -26,6 +27,18 @@ actor AudioFileCache {
     private var downloadQueue: [QueueItem] = []
     private var currentlyDownloadingId: Int?
     private var currentlyPlayingId: Int?
+    private var inFlightNow: Set<Int> = []   // laeuft gerade ein fetchNow() fuer diese id?
+
+    /// Eigene Session mit knappen Timeouts: ein haengender Download darf die Wiedergabe nicht
+    /// minutenlang blockieren (beginPlayback wartet auf fetchNow).
+    private lazy var dlSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 25
+        cfg.timeoutIntervalForResource = 90
+        cfg.waitsForConnectivity = false
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg)
+    }()
 
     private init() {
         // BEWUSST "Application Support" und nicht "Caches": iOS raeumt das Caches-Verzeichnis
@@ -150,6 +163,29 @@ actor AudioFileCache {
         for item in items { ensureCached(item: item) }
     }
 
+    /// Sofort-Download MIT PRIORITAET: laedt direkt (nicht hinten in die 1-parallel-Queue),
+    /// mit den Retries + strikter Vollstaendigkeitspruefung aus download(). Gibt die lokale
+    /// URL zurueck, wenn danach eine gueltige Datei liegt - sonst nil (Aufrufer streamt dann).
+    /// Genau der Weg fuer "gerade importiert" / "gerade angetippt": danach spielt beginPlayback
+    /// von Platte statt die noch kalte Remote-Datei zu streamen.
+    func fetchNow(item: QueueItem) async -> URL? {
+        if let existing = localFileURL(forId: item.id) { return existing }
+        guard let remote = item.fileURL else { return nil }
+        if inFlightNow.contains(item.id) {
+            // Laeuft schon - kurz warten und nachsehen, kein zweiter Download.
+            for _ in 0..<40 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if let u = localFileURL(forId: item.id) { return u }
+                if !inFlightNow.contains(item.id) { break }
+            }
+            return localFileURL(forId: item.id)
+        }
+        inFlightNow.insert(item.id)
+        await download(item: item, from: remote)
+        inFlightNow.remove(item.id)
+        return localFileURL(forId: item.id)
+    }
+
     private func processQueueIfNeeded() {
         guard currentlyDownloadingId == nil, !downloadQueue.isEmpty else { return }
         let item = downloadQueue.removeFirst()
@@ -185,7 +221,7 @@ actor AudioFileCache {
             if attempt > 0 {
                 try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_800_000_000)
             }
-            if let (u, resp) = try? await URLSession.shared.download(from: remote),
+            if let (u, resp) = try? await dlSession.download(from: remote),
                let h = resp as? HTTPURLResponse, h.statusCode == 200 {
                 tmpURL = u
                 http = h
@@ -214,17 +250,26 @@ actor AudioFileCache {
             || contentType.hasPrefix("application/json")
             || contentType.hasPrefix("application/xml")
 
-        // Nur pruefen, wenn der Server eine Laenge genannt hat: fehlt sie (chunked), ist das
-        // kein Fehlersignal, sondern schlicht keine Information.
-        let announced = http.expectedContentLength
-        let complete = announced <= 0 || downloadedBytes >= announced
+        // Kopf-Signatur: echte m4a beginnt mit "....ftyp", mp3 mit "ID3" oder einem MPEG-Sync
+        // (0xFF Ex). Faengt Fehlerseiten und am Anfang abgeschnittene Dateien ab.
+        let head: Data = {
+            guard let fh = try? FileHandle(forReadingFrom: tmpURL) else { return Data() }
+            defer { try? fh.close() }
+            return (try? fh.read(upToCount: 12)) ?? Data()
+        }()
+        let hb = [UInt8](head)
+        let looksM4A = hb.count >= 8 && hb[4] == 0x66 && hb[5] == 0x74 && hb[6] == 0x79 && hb[7] == 0x70
+        let looksMP3 = hb.count >= 3 && ((hb[0] == 0x49 && hb[1] == 0x44 && hb[2] == 0x33) || (hb[0] == 0xFF && (hb[1] & 0xE0) == 0xE0))
+        let goodHeader = looksM4A || looksMP3
 
-        guard !istFehlerseite, downloadedBytes >= Self.minimumPlausibleBytes, complete else {
+        guard !istFehlerseite, goodHeader, downloadedBytes >= Self.minimumPlausibleBytes else {
             try? FileManager.default.removeItem(at: tmpURL)
             return
         }
 
-        let ext = remote.pathExtension.isEmpty ? "mp3" : remote.pathExtension
+        // Erst an den endgueltigen Ort mit RICHTIGER Endung verschieben - dann kann AVURLAsset
+        // die Datei ueberhaupt als MP4/MP3 erkennen (der URLSession-Tempname endet auf .tmp).
+        let ext = remote.pathExtension.isEmpty ? "m4a" : remote.pathExtension
         let dest = cacheDir.appendingPathComponent("\(item.id).\(ext)")
         try? FileManager.default.removeItem(at: dest)
         do {
@@ -232,6 +277,33 @@ actor AudioFileCache {
         } catch {
             return
         }
+
+        // VOLLSTAENDIGKEIT (Kern gegen "spielt nur teilweise"): entweder die heruntergeladene
+        // Byte-Zahl deckt die wahre Groesse (Content-Length, sonst Range-Probe), ODER die Datei
+        // laesst sich als komplette Audiospur mit finiter Dauer > 1 s oeffnen. Trifft keins zu,
+        // war der Download unterwegs abgeschnitten -> NICHT cachen (der Player wuerde die lokale
+        // Kopie sonst immer vorziehen und mittendrin abbrechen).
+        var trueSize = http.expectedContentLength
+        if trueSize <= 0 {
+            var probe = URLRequest(url: remote)
+            probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+            if let (_, presp) = try? await dlSession.data(for: probe),
+               let ph = presp as? HTTPURLResponse,
+               let cr = ph.value(forHTTPHeaderField: "Content-Range"),
+               let total = cr.split(separator: "/").last.flatMap({ Int64($0.trimmingCharacters(in: .whitespaces)) }) {
+                trueSize = total
+            }
+        }
+        var complete = trueSize > 0 && downloadedBytes >= trueSize
+        if !complete {
+            let dur = ((try? await AVURLAsset(url: dest).load(.duration)) ?? .zero).seconds
+            complete = dur.isFinite && dur > 1
+        }
+        guard complete else {
+            try? FileManager.default.removeItem(at: dest)
+            return
+        }
+
         let attrs = try? FileManager.default.attributesOfItem(atPath: dest.path)
         let size = (attrs?[.size] as? Int64) ?? 0
         index[item.id] = Entry(id: item.id, ext: ext, sizeBytes: size, lastAccessed: Date())

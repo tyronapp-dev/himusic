@@ -1026,6 +1026,19 @@ async function _ytImportOne(item) {
     });
     if (!reg.ok) return { ok: false, reason: 'Song anlegen HTTP ' + reg.status };
     const regData = await reg.json().catch(() => ({}));
+
+    // Den frisch importierten Song SOFORT mit Prioritaet in den nativen Datei-Cache holen -
+    // dann spielt der erste Antipper von Platte statt die noch kalte Datei zu streamen (das
+    // war die eigentliche "spielt mal, mal nicht"-Ursache). Nur wenn wir eine echte Song-ID
+    // vom Server haben; sonst holt beginPlayback/fetchNow sie beim ersten Tap ohnehin.
+    try {
+        const sid = regData && (regData.id || regData.songId || regData.song_id);
+        const nb = _nativeBridge();
+        if (nb && Number.isInteger(sid) && sid > 0) {
+            nb.postMessage(JSON.stringify({ cmd: 'cacheNow', item: { id: sid, t: ex.title || 'YouTube Import', a: 'Unbekannt', u: fileUrl, c: null, s: null } }));
+        }
+    } catch (e) {}
+
     return { ok: true, title: ex.title, client: ex.client, bytes: outBytes.length, remuxed: outBytes !== bytes, verified: served, duplicate: !!regData.duplicate, videoId: ex.videoId };
 }
 

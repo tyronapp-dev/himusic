@@ -302,6 +302,10 @@ final class PlayerViewModel: ObservableObject {
             // aktuelle Warteschlangenposition (prefetchUpcoming) den nativen Cache, und ein im
             // Web als "offline" markierter Song spielte nativ trotzdem ueber Netz weiter.
             case "ensureCached": if let item = command.item { Task { await AudioFileCache.shared.ensureCached(item: item) } }
+            // Frisch importierter Song: SOFORT mit Prioritaet in den lokalen Cache holen (nicht
+            // hinten in die 1-parallel-Vorlade-Queue), damit der erste Antipper von Platte
+            // spielt statt die noch kalte Datei zu streamen.
+            case "cacheNow": if let item = command.item { Task { _ = await AudioFileCache.shared.fetchNow(item: item) } }
             case "haptic": playHapticTick()
             default: break
             }
@@ -390,8 +394,20 @@ final class PlayerViewModel: ObservableObject {
     ) async {
         let cache = AudioFileCache.shared
         await cache.markCurrentlyPlaying(id: item.id)
-        let localURL = ignoreLocalCopy ? nil : await cache.localFileURL(forId: item.id)
+        var localURL = ignoreLocalCopy ? nil : await cache.localFileURL(forId: item.id)
         guard token == playbackToken else { return }
+
+        // Kein lokaler File, aber Netz, und NICHT der "ohne-lokale-Kopie"-Zweitversuch:
+        // JETZT herunterladen und von Platte spielen. Eine frisch hochgeladene Datei zu
+        // STREAMEN ist unzuverlaessig (kalter CDN-Edge; AVURLAssetPreferPreciseDurationAndTimingKey
+        // erzwingt einen Full-File-Scan vor dem ersten Ton) - genau die Ursache fuer
+        // "spielt mal, mal nicht, nach Neustart anders". fetchNow() hat eigene Timeouts,
+        // haengt also nicht unbegrenzt; klappt es nicht, faellt es unten auf Streaming zurueck.
+        if localURL == nil, !ignoreLocalCopy, hasNetwork, item.fileURL != nil {
+            localURL = await cache.fetchNow(item: item)
+            guard token == playbackToken else { return }
+        }
+
         // Ohne abspielbare Adresse ist der Eintrag defekt. Frueher endete das hier in einem
         // stillen return: die Oberflaeche zeigte weiter einen Song, der nie loslief, und ein
         // Tipp auf Play tat nichts. Jetzt wird er wie jeder andere Fehlschlag behandelt.
@@ -399,8 +415,9 @@ final class PlayerViewModel: ObservableObject {
             handlePlaybackFailure(for: item, reason: "Keine abspielbare Datei hinterlegt")
             return
         }
-        if localURL == nil {
-            await cache.ensureCached(item: item)
+        let playingRemote = (localURL == nil)
+        if playingRemote {
+            await cache.ensureCached(item: item)   // Hintergrund-Nachzug fuer den naechsten Versuch
             guard token == playbackToken else { return }
         }
 
@@ -418,7 +435,13 @@ final class PlayerViewModel: ObservableObject {
         // seekt zwar exakt relativ zur INTERNEN Zeitbasis des Assets - aber ohne praezise
         // Initialisierung ist genau diese Zeitbasis selbst nur approximativ, macht "exaktes"
         // Seeking dadurch zunichte (das gemeldete "Rueckwaerts-Skip landet ungenau").
-        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        // Praezise Dauer/Timing nur bei LOKALEN Dateien (schneller Platten-Scan). Beim seltenen
+        // Remote-Fallback wuerde derselbe Full-File-Scan ueber Netz die Wiedergabe verzoegern
+        // oder kippen lassen - dann lieber ungefaehres Timing als gar keinen Ton.
+        let assetOptions: [String: Any] = playingRemote
+            ? [:]
+            : [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+        let asset = AVURLAsset(url: url, options: assetOptions)
         let playerItem = AVPlayerItem(asset: asset)
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = NotificationCenter.default.addObserver(
