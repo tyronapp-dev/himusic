@@ -286,7 +286,7 @@ final class PlayerViewModel: ObservableObject {
             // Transport aus der Web-Oberflaeche: IMMER echter Songwechsel. Die Seite darf
             // nicht selbst aus playbackQueue/playbackHistory rechnen - die veralten bei
             // jedem nativen Auto-Skip im Hintergrund und lieferten dadurch falsche Songs.
-            case "next": next()
+            case "next": next(userInitiated: true)
             case "prev": previousTrack()
             case "seekBy": seek(byDelta: command.delta ?? 0)
             // Scrub-Leiste im grossen Web-Player loslassen - absolute Zielposition statt
@@ -364,14 +364,14 @@ final class PlayerViewModel: ObservableObject {
 
     // MARK: - Wiedergabe-Steuerung
 
-    func playCurrent(ignoreLocalCopy: Bool = false) {
+    func playCurrent(ignoreLocalCopy: Bool = false, userInitiated: Bool = false) {
         guard let item = currentItem else { return }
         playbackToken += 1
         let token = playbackToken
         // Vorlade-Fenster wandert mit der Wiedergabe mit - sonst waere nach den ersten
         // 15 Songs nichts mehr vorgeladen (siehe prefetchUpcoming).
         prefetchUpcoming()
-        Task { await beginPlayback(item, token: token, ignoreLocalCopy: ignoreLocalCopy) }
+        Task { await beginPlayback(item, token: token, ignoreLocalCopy: ignoreLocalCopy, userInitiated: userInitiated) }
     }
 
     /// Loest zuerst gegen AudioFileCache auf. Liegt der Song schon lokal, spielt er
@@ -390,7 +390,8 @@ final class PlayerViewModel: ObservableObject {
     /// handlePlaybackFailure. Die lokale Datei wird dabei ausdruecklich NICHT geloescht,
     /// sondern erst, wenn dieser Versuch beweist, dass es ohne sie geht.
     private func beginPlayback(
-        _ item: QueueItem, token: Int, autoplay: Bool = true, ignoreLocalCopy: Bool = false
+        _ item: QueueItem, token: Int, autoplay: Bool = true, ignoreLocalCopy: Bool = false,
+        userInitiated: Bool = false
     ) async {
         let cache = AudioFileCache.shared
         await cache.markCurrentlyPlaying(id: item.id)
@@ -403,7 +404,15 @@ final class PlayerViewModel: ObservableObject {
         // erzwingt einen Full-File-Scan vor dem ersten Ton) - genau die Ursache fuer
         // "spielt mal, mal nicht, nach Neustart anders". fetchNow() hat eigene Timeouts,
         // haengt also nicht unbegrenzt; klappt es nicht, faellt es unten auf Streaming zurueck.
-        if localURL == nil, !ignoreLocalCopy, hasNetwork, item.fileURL != nil {
+        //
+        // NICHT fuer userInitiated (Knopf-/Lockscreen-Skip): das machte genau diesen Fall -
+        // zu einem noch nicht gecachten Song weiterschalten - spuerbar langsam, weil jeder
+        // Skip erst die komplette Datei herunterlud, bevor ueberhaupt Ton kam ("Skip dauert
+        // ewig"). Bei einem manuellen Skip ist sofortiger Ton wichtiger als die Absicherung
+        // gegen einen seltenen kalten CDN-Edge - hier wird direkt gestreamt und im Hintergrund
+        // nachgecacht (Zweig "playingRemote" unten), genau wie beim automatischen Auto-Skip
+        // schon bisher als Fallback vorgesehen war, falls fetchNow() fehlschlaegt.
+        if localURL == nil, !ignoreLocalCopy, hasNetwork, item.fileURL != nil, !userInitiated {
             localURL = await cache.fetchNow(item: item)
             guard token == playbackToken else { return }
         }
@@ -449,7 +458,10 @@ final class PlayerViewModel: ObservableObject {
             object: playerItem,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.next() }
+            // Auto-Skip beim Songende: bewusst NICHT userInitiated - hier soll die bestehende
+            // "erst laden, dann spielen"-Absicherung gegen einen kalten CDN-Edge bleiben, weil
+            // kein Nutzer da ist, der einen kurzen Ruckler tolerieren wuerde.
+            Task { @MainActor in self?.next(userInitiated: false) }
         }
 
         // Abbruch MITTEN im Song (Datei bricht ab, Verbindung stirbt beim Streamen). Das ist
@@ -688,12 +700,15 @@ final class PlayerViewModel: ObservableObject {
         pendingSeekSeconds = nil
     }
 
-    func next() {
+    /// userInitiated steuert nur, ob beginPlayback() auf eine kalte, noch nicht gecachte Datei
+    /// warten darf (siehe dort) - true fuer Knopf-/Lockscreen-Skip (Antippen soll sofort Ton
+    /// geben), false fuer den automatischen Skip am Songende (siehe endObserver oben).
+    func next(userInitiated: Bool = true) {
         guard currentIndex + 1 < queue.count else { return }
         lastNavigationStep = 1
         forgetPendingSeek()
         currentIndex += 1
-        playCurrent()
+        playCurrent(userInitiated: userInitiated)
     }
 
     /// "Als Naechstes spielen" aus dem Rechts-Swipe der Songliste. Bewusst EINFUEGEN statt
@@ -909,7 +924,7 @@ final class PlayerViewModel: ObservableObject {
             return .success
         }
         center.nextTrackCommand.addTarget { [weak self] _ in
-            self?.next()
+            self?.next(userInitiated: true)
             return .success
         }
         center.previousTrackCommand.addTarget { [weak self] _ in

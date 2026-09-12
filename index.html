@@ -235,6 +235,29 @@
                 </div>
 
                 <div class="settings-section" style="margin-top: 30px;">
+                    <h3 class="section-title">Sender & Vibe Mixe</h3>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin: -8px 0 10px;">Ein neu erstellter Sender/Mix nimmt eine zufällige Auswahl aus den passendsten Songs - nicht immer dieselben. Über den "+50"-Knopf im Sender/Mix selbst kommen später die nächstpassenden dazu.</p>
+                    <div class="settings-list">
+                        <div class="settings-row" style="display: block;">
+                            <div class="settings-row-info" style="display: flex; justify-content: space-between; align-items: center;">
+                                <h4>Auswahl-Topf</h4>
+                                <span id="station-pool-value-label" style="color: var(--accent); font-weight: 600; font-size: 15px;">100</span>
+                            </div>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:2px 0 10px;">Wie viele der passendsten Songs überhaupt in Frage kommen</p>
+                            <input type="range" id="station-pool-slider" min="30" max="300" step="10" value="100" style="width: 100%; accent-color: var(--accent);">
+                        </div>
+                        <div class="settings-row" style="display: block;">
+                            <div class="settings-row-info" style="display: flex; justify-content: space-between; align-items: center;">
+                                <h4>Startgröße</h4>
+                                <span id="station-initial-value-label" style="color: var(--accent); font-weight: 600; font-size: 15px;">75</span>
+                            </div>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:2px 0 10px;">Wie viele davon zufällig beim Erstellen genommen werden</p>
+                            <input type="range" id="station-initial-slider" min="10" max="200" step="5" value="75" style="width: 100%; accent-color: var(--accent);">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-section" style="margin-top: 30px;">
                     <h3 class="section-title">Übersprungene Songs</h3>
                     <p style="font-size: 13px; color: var(--text-secondary); margin: -8px 0 10px;">Jeder Song, den der Player nicht abspielen konnte, landet hier mit Grund und Uhrzeit — auch der, den du im Hintergrund nur kurz vorbeihuschen gesehen hast. „(offline)" heißt: kein Netz und der Song war nicht heruntergeladen.</p>
                     <div class="settings-list">
@@ -348,6 +371,10 @@
                     <button id="btn-pld-search" class="mix-btn">
                         <span class="icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></span>
                         Suchen
+                    </button>
+                    <button id="btn-pld-expand" class="mix-btn" hidden title="Naechstpassende 50 Songs dazuholen">
+                        <span class="icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></span>
+                        +50
                     </button>
                 </div>
 

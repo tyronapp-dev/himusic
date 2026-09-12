@@ -156,14 +156,24 @@ function _esc(s) {
 // (MAIN_VIBE_MARKER, siehe _parseVibes/_extractMainVibes weiter oben), dieser Cache wird bei
 // jedem fetchSongsFromDatabase() aus den Server-Daten neu aufgebaut. Ueberlebt damit Reinstall
 // und synct geraeteuebergreifend, weil vibes ohnehin schon ganz normal ueber PUT /songs/:id geht.
+// In-Memory-Cache statt bei JEDEM Aufruf neu JSON.parse(localStorage) zu machen - _getMainVibes
+// wird pro Sender-Erstellung einmal PRO KANDIDATENSONG aufgerufen (siehe _buildStationSongs),
+// bei einer grossen Bibliothek also hunderte Male hintereinander. Ohne Cache parst das denselben,
+// mit der Zeit wachsenden localStorage-Blob jedes Mal neu - spuerbar traege beim Sender-Erstellen
+// und beim Oeffnen der Songs-Liste, wenn nebenbei noch der Hintergrund-Cache aktiv ist.
+let _mainVibesCache = null;
+function _loadMainVibesMap() {
+    if (_mainVibesCache) return _mainVibesCache;
+    try { _mainVibesCache = JSON.parse(localStorage.getItem('himusic_main_vibes') || '{}'); }
+    catch(e) { _mainVibesCache = {}; }
+    return _mainVibesCache;
+}
 function _getMainVibes(songId) {
-    try {
-        const map = JSON.parse(localStorage.getItem('himusic_main_vibes') || '{}');
-        return Array.isArray(map[songId]) ? map[songId] : [];
-    } catch(e) { return []; }
+    const map = _loadMainVibesMap();
+    return Array.isArray(map[songId]) ? map[songId] : [];
 }
 function _setMainVibes(songId, vibesArr) {
-    const map = JSON.parse(localStorage.getItem('himusic_main_vibes') || '{}');
+    const map = _loadMainVibesMap();
     if (vibesArr.length === 0) delete map[songId]; else map[songId] = vibesArr;
     localStorage.setItem('himusic_main_vibes', JSON.stringify(map));
 }
@@ -240,6 +250,20 @@ function _buildStationSongs(song) {
     }
     return stationSongs;
 }
+
+// Einstellbare Groesse fuer Sender/Vibe-Mixe (Einstellungen -> "Sender & Vibe Mixe"): "pool" =
+// wie viele der passendsten Songs ueberhaupt in Frage kommen, "initial" = wie viele davon beim
+// Erstellen zufaellig genommen werden. Bewusst zufaellig aus dem Topf statt immer die exakt
+// gleichen Top-N - sonst waere ein Sender bei 500 passenden Songs jedes Mal identisch.
+function _getStationSizeSettings() {
+    const pool = parseInt(localStorage.getItem('himusic_station_pool') || '100', 10);
+    const initial = parseInt(localStorage.getItem('himusic_station_initial') || '75', 10);
+    return {
+        pool: Number.isFinite(pool) && pool > 0 ? pool : 100,
+        initial: Number.isFinite(initial) && initial > 0 ? initial : 75,
+    };
+}
+window._getStationSizeSettings = _getStationSizeSettings;
 
 // Kurzer haptischer Tick. In der Huelle nativ ueber die Bruecke (UIImpactFeedbackGenerator) -
 // iOS gibt Web-Apps KEINE Vibrations-API, navigator.vibrate() existiert dort schlicht nicht,
@@ -2478,39 +2502,38 @@ let _bgCacheActive = false;
 
         if (_bgCacheActive) return;
         _bgCacheActive = true;
-        // Nur 1 Spur: läuft jetzt IMMER automatisch (nicht mehr an den Offline-Schalter gekoppelt),
-        // daher bewusst gedrosselt statt 3 parallel – bei 2000+ Songs sonst sofort mehrere GB
-        // Bandbreite/Speicher am Stück. So tröpfelt der Download im Hintergrund über längere Zeit.
-        const IDLE_PARALLEL = 1;
+        // War fest auf 1 Spur, komplett angehalten waehrend irgendwas spielte - bei einer
+        // Bibliothek mit hunderten Songs und jemandem, der taeglich Musik hoert, kam das
+        // praktisch nie ueber ein paar Dutzend Songs hinaus ("nie fertig offline", Nutzer musste
+        // den manuellen 'Jetzt herunterladen'-Knopf immer wieder selbst druecken). Jetzt zwei
+        // Drosselstufen statt hartem Stopp: waehrend aktiv abgespielt wird bleibt es bei 1 Spur
+        // (dem Song nicht die Bandbreite streitig machen), sonst laufen mehrere Spuren parallel,
+        // damit eine Sitzung die Bibliothek wirklich durchschafft. Bewusst unter dem manuellen
+        // Knopf (12 parallel) - der ist eine explizite Einmal-Aktion, das hier laeuft nebenbei.
+        const PARALLEL_WHILE_PLAYING = 1;
+        const PARALLEL_IDLE = 3;
 
-        async function processNext() {
-            if (_bgCacheQueue.length === 0) {
-                if (_bgActiveCount === 0) _bgCacheActive = false;
-                return;
-            }
-            if (_bgActiveCount >= IDLE_PARALLEL) return;
-
+        function currentLimit() {
             const player = document.getElementById('main-audio-player');
-            if (player && !player.paused) { 
-                setTimeout(processNext, 3000); 
-                return; 
+            return (player && !player.paused) ? PARALLEL_WHILE_PLAYING : PARALLEL_IDLE;
+        }
+
+        async function lane() {
+            while (_bgCacheQueue.length > 0) {
+                if (_bgActiveCount >= currentLimit()) { await new Promise(r => setTimeout(r, 1000)); continue; }
+                _bgActiveCount++;
+                const url = _bgCacheQueue.shift();
+                await downloadToLocal(url, '').catch(() => {});
+                _nativeEnsureCached(url);
+                window._refreshOfflineLabel?.();
+                _bgActiveCount--;
+                await new Promise(r => setTimeout(r, 100));
             }
-
-            _bgActiveCount++;
-            const url = _bgCacheQueue.shift();
-            
-            await downloadToLocal(url, '').catch(() => {});
-            _nativeEnsureCached(url);
-            window._refreshOfflineLabel?.();
-
-            _bgActiveCount--;
-            // Sobald fertig, sofort den nächsten starten:
-            setTimeout(processNext, 100); 
         }
 
         setTimeout(() => {
-            // Alle Spuren gleichzeitig anwerfen
-            for(let i=0; i<IDLE_PARALLEL; i++) processNext();
+            const lanes = Array.from({ length: PARALLEL_IDLE }, () => lane());
+            Promise.all(lanes).finally(() => { _bgCacheActive = false; });
         }, 5000);
     }
 
@@ -2825,7 +2848,13 @@ let _bgCacheActive = false;
         // am Songanfang oder wirkte gar nicht. In der Huelle ist audioPlayer.duration immer
         // leer (inertes <audio>), die Dauer kommt dort ueber _applyNativeProgress herein.
         const handleScrub = (e) => {
-            let duration = audioPlayer.duration || window.currentSongDuration;
+            // Dritter Fallback auf die DB-Dauer (window.currentSongData.duration, gesetzt in
+            // _applyNativeNowPlaying): window.currentSongDuration wird erst durch den ERSTEN
+            // Sekunden-Push des nativen Players gesetzt. Direkt nach einem App-Kaltstart/Reload
+            // ist das kurz leer, bevor der erste Tick ankommt - Ziehen auf der Leiste tat in
+            // diesem Fenster einfach nichts (dieser Fallback hat sofort eine brauchbare Dauer,
+            // sobald die Bibliothek geladen ist, ohne auf den nativen Tick warten zu muessen).
+            let duration = audioPlayer.duration || window.currentSongDuration || window.currentSongData?.duration;
             if (!duration || !isFinite(duration) || duration <= 0) return null;
             const rect = progressContainer.getBoundingClientRect();
             if (!rect.width) return null;
@@ -3421,7 +3450,16 @@ let _bgCacheActive = false;
 
     window.createStationForSong = function(song) {
         if (!song || !song.title) { _showToast('⚠️ Song nicht gefunden – Sender nicht erstellt'); return; }
-        const stationSongs = _buildStationSongs(song);
+        const ranked = _buildStationSongs(song);
+        // Nicht mehr ALLE passenden Songs auf einmal, sondern ein Topf der besten (Einstellungen
+        // -> "Sender & Vibe Mixe" -> "Auswahl-Topf"), davon eine zufaellige Auswahl (-> "Startgroesse")
+        // - sonst besteht ein Sender bei einer grossen Bibliothek aus hunderten Liedern und spielt
+        // trotzdem jedes Mal in derselben Reihenfolge dieselben zuerst. "+50" im Sender selbst holt
+        // spaeter die naechstpassenden aus demselben, ueber sourceSongId jederzeit frisch
+        // nachgebauten Topf nach.
+        const sizes = _getStationSizeSettings();
+        const pool = ranked.slice(0, sizes.pool);
+        const stationSongs = pool.length > sizes.initial ? _shuffle([...pool]).slice(0, sizes.initial) : pool;
         // songIds statt der vollen Song-Objekte - wie Vibe-Mixe es schon immer machten.
         // Vorher landete pro Song das komplette Objekt inklusive cover_data in localStorage;
         // eingebettete Cover sind data:-URIs von teils >100 KB, womit schon wenige Dutzend
@@ -3432,6 +3470,7 @@ let _bgCacheActive = false;
             id: 'station_' + Date.now(),
             name: "Sender: " + song.title,
             cover_data: song.cover_data || song.coverUrl || '',
+            sourceSongId: song.id, // fuer den "+50"-Knopf: Topf jederzeit frisch aus _buildStationSongs nachbaubar
             songIds: stationSongs.map(s => s.id),
             expires: Date.now() + (24 * 60 * 60 * 1000),
             pinned: false
@@ -3439,7 +3478,7 @@ let _bgCacheActive = false;
         const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]');
         savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
         if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
-        _showToast(`Sender erstellt – ${stationSongs.length} Lieder`);
+        _showToast(`Sender erstellt – ${stationSongs.length} von ${ranked.length} passenden Liedern`);
         // Direkt in den neuen Sender springen - man will nach dem Erstellen sehen, was drin
         // gelandet ist, statt ihn auf der Startseite erst wiederfinden zu muessen.
         if (typeof window.openPlaylistDetails === 'function') window.openPlaylistDetails(newStation.id, newStation.name);
@@ -4261,7 +4300,10 @@ async function createNewPlaylistProcess() {
     // laengst getaggt sind. Reihenfolge folgt weiter den gespeicherten songIds (sonst wuerde
     // sich der Mix bei jedem Oeffnen neu mischen); Songs, die neu ins Kriterium passen,
     // haengen hinten an. Aeltere Mixe ohne criteria-Feld bleiben unveraendert.
-    function _resolveMixSongs(mix) {
+    // unbounded=true gibt ALLE aktuell passenden Songs zurueck, ungedeckelt - nur fuer den
+    // "+50"-Knopf gedacht (braucht den vollen Kandidatentopf, um daraus welche nachzuziehen),
+    // NIE zum Anzeigen/Abspielen benutzen.
+    function _resolveMixSongs(mix, opts) {
         const all = window.globalSongsData || [];
         const c = mix.criteria;
         if (!c || !all.length) return null;
@@ -4272,8 +4314,17 @@ async function createNewPlaylistProcess() {
         if (c.excludedVibes && c.excludedVibes.length > 0) {
             matched = matched.filter(s => !c.excludedVibes.some(v => _parseVibes(s.vibes).includes(v)));
         }
-        const order = new Map((mix.songIds || []).map((id, i) => [id, i]));
-        return matched.sort((a, b) => (order.has(a.id) ? order.get(a.id) : Infinity) - (order.has(b.id) ? order.get(b.id) : Infinity));
+        if (opts && opts.unbounded) return matched;
+        // Gedeckelt auf die beim Erstellen (bzw. per "+50" erweiterte) gespeicherte Auswahl -
+        // sonst waere "nur die besten 75 von 500" wirkungslos, weil hier sonst IMMER alle gerade
+        // passenden Songs zurueckkaemen. Songs, die aus dem Kriterium rausgefallen sind (z.B. Vibe
+        // entfernt), fliegen trotzdem automatisch raus, weil sie in "matched" fehlen.
+        if (mix.songIds && mix.songIds.length > 0) {
+            const matchedIds = new Set(matched.map(s => s.id));
+            return mix.songIds.filter(id => matchedIds.has(id)).map(id => window._songIndex?.get(id)).filter(Boolean);
+        }
+        // Sicherheitsnetz fuer den (eigentlich nicht mehr vorkommenden) Fall ganz ohne songIds.
+        return matched;
     }
 
     // Vibe-Mixe speichern nur songIds (siehe btn-create-vibe-mix), Sender seit 13.08.2026 auch;
@@ -4284,6 +4335,41 @@ async function createNewPlaylistProcess() {
         return item.songIds ? item.songIds.map(id => window._songIndex?.get(id)).filter(Boolean) : (item.songs || []).filter(Boolean);
     }
     window._getStationLikeSongs = _getStationLikeSongs;
+
+    // "+50"-Knopf im Sender/Mix: zieht die naechstpassenden nach, die noch nicht drin sind.
+    // Sender: Topf jederzeit frisch aus dem Ausgangssong nachgebaut (sourceSongId), damit auch
+    // inzwischen neu getaggte Songs mit reinkommen koennen. Vibe-Mix: alle aktuell passenden
+    // (unbounded), abzueglich der schon enthaltenen. Kein Kandidat mehr uebrig -> Toast statt
+    // stillem Nichtstun.
+    function _expandStationLikeItem(type, id) {
+        const list = _getStationLikeList(type);
+        const item = list.find(x => x.id === id);
+        if (!item) return;
+        const currentIds = new Set(item.songIds || []);
+        let candidatePool = [];
+        if (type === 'mix' && item.criteria) {
+            candidatePool = _resolveMixSongs(item, { unbounded: true }) || [];
+        } else if (item.sourceSongId != null) {
+            const src = window._songIndex?.get(item.sourceSongId);
+            candidatePool = src ? _buildStationSongs(src) : [];
+        } else {
+            // Aelterer Sender ohne sourceSongId (vor dieser Aenderung erstellt): kein Topf zum
+            // Nachbauen vorhanden, Erweitern hier nicht moeglich.
+            _showToast('Dieser Sender ist zu alt für "+50" - neu erstellen, um das zu bekommen.', 3500);
+            return;
+        }
+        const remaining = candidatePool.filter(s => !currentIds.has(s.id));
+        if (remaining.length === 0) { _showToast('Keine weiteren passenden Songs übrig'); return; }
+        const ADD_STEP = 50;
+        const toAdd = remaining.length > ADD_STEP ? _shuffle([...remaining]).slice(0, ADD_STEP) : remaining;
+        item.songIds = [...(item.songIds || []), ...toAdd.map(s => s.id)];
+        _saveStationLikeList(type, list);
+        _showToast(`+${toAdd.length} Songs dazu (${item.songIds.length} gesamt)`);
+        if (typeof window.openPlaylistDetails === 'function' && window.currentOpenPlaylistId === id) {
+            window.openPlaylistDetails(id, item.name, true);
+        }
+    }
+    window._expandStationLikeItem = _expandStationLikeItem;
     function _openStationContextMenu(type, id) {
         window.currentContextStationType = type; window.currentContextStationId = id;
         const item = _getStationLikeList(type).find(x => x.id === id);
@@ -4442,17 +4528,25 @@ async function createNewPlaylistProcess() {
         if (excludedVibes.length > 0) { matchedSongs = matchedSongs.filter(song => !excludedVibes.some(v => song.vibes && song.vibes.includes(v))); }
         if (matchedSongs.length === 0) return alert('Keine passenden Songs gefunden.');
 
-        const mixName = 'Vibe Mix: ' + (isNoVibe ? 'Ohne Vibe' : selectedVibes.join(', ')) + (excludedVibes.length > 0 ? ` (ohne ${excludedVibes.join(', ')})` : ''); const shuffledIds = _shuffle([...matchedSongs]).map(s => s.id);
+        // Wie bei Sendern: nicht automatisch ALLE Treffer, sondern eine zufaellige Auswahl aus
+        // einem einstellbaren Topf (Einstellungen -> "Sender & Vibe Mixe") - "+50" im Mix selbst
+        // zieht spaeter weitere zufaellige aus den restlichen Treffern nach.
+        const sizes = _getStationSizeSettings();
+        const pool = matchedSongs.length > sizes.pool ? _shuffle([...matchedSongs]).slice(0, sizes.pool) : matchedSongs;
+        const chosen = pool.length > sizes.initial ? _shuffle([...pool]).slice(0, sizes.initial) : pool;
+
+        const mixName = 'Vibe Mix: ' + (isNoVibe ? 'Ohne Vibe' : selectedVibes.join(', ')) + (excludedVibes.length > 0 ? ` (ohne ${excludedVibes.join(', ')})` : ''); const shuffledIds = chosen.map(s => s.id);
         // criteria mitspeichern, damit der Mix eine LEBENDE Auswahl bleibt statt einer
         // eingefrorenen Liste: taggt man Songs nach, wertet _resolveMixSongs() neu aus -
         // ein "Ohne Vibe"-Mix verliert dadurch genau die Songs, die inzwischen Vibes haben,
-        // und ist irgendwann leer. songIds bleibt zusaetzlich erhalten und gibt die
-        // Reihenfolge vor, damit sich ein Mix nicht bei jedem Oeffnen neu mischt.
+        // und ist irgendwann leer. songIds bleibt zusaetzlich erhalten, gibt die Reihenfolge vor
+        // UND deckelt jetzt zusaetzlich die Auswahl (siehe _resolveMixSongs), damit sich ein Mix
+        // nicht bei jedem Oeffnen neu mischt und nicht automatisch auf alle Treffer anwaechst.
         const newMix = { id: 'temp_' + Date.now(), name: mixName, cover_data: matchedSongs[0].cover_data || '', songIds: shuffledIds, criteria: { selectedVibes, excludedVibes, onlyMain: !!onlyMain, isNoVibe }, expires: Date.now() + 86400000, pinned: false };
         const mixes = JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'); mixes.unshift(newMix); localStorage.setItem('heatbox_vibe_mixes', JSON.stringify(mixes));
-        
+
         document.getElementById('vibe-mix-overlay')?.classList.remove('active'); window.renderHomeSections();
-        const songCount = shuffledIds.length; _showToast(`🎵 Vibe Mix erstellt – ${songCount} ${songCount === 1 ? 'Lied' : 'Lieder'}`, 3000);
+        const songCount = shuffledIds.length; _showToast(`🎵 Vibe Mix erstellt – ${songCount} von ${matchedSongs.length} passenden ${songCount === 1 ? 'Lied' : 'Liedern'}`, 3000);
     });
 
     // Longpress-Kontextmenü für Sender- und Vibe-Mix-Karten (siehe _openStationContextMenu oben).
@@ -4542,6 +4636,15 @@ async function createNewPlaylistProcess() {
             window.currentPlaylistSongs = validItems.map(item => item.songs); playlistDetailsSongsContainer.innerHTML = '';
             let currentCount = window.currentPlaylistSongs.length; let currentDur = 0; window.currentPlaylistSongs.forEach(s => { if(s.duration) currentDur += s.duration; });
             let freshStatText = `${currentCount} Songs`; if (currentDur > 0) freshStatText += ` • ${formatDuration(currentDur)}`; document.getElementById('detail-playlist-stats').innerText = freshStatText;
+
+            // "+50"-Knopf: nur bei Sender/Vibe-Mix sichtbar (isTemp), nicht bei normalen Playlists.
+            // onclick statt addEventListener, weil openPlaylistDetails bei jedem Oeffnen erneut
+            // laeuft - mit addEventListener wuerden sich Handler mit jedem Aufruf aufstapeln.
+            const expandBtn = document.getElementById('btn-pld-expand');
+            if (expandBtn) {
+                expandBtn.hidden = !isTemp;
+                expandBtn.onclick = isTemp ? () => window._expandStationLikeItem(isStation ? 'station' : 'mix', playlistId) : null;
+            }
 
             if (validItems.length === 0) { playlistDetailsSongsContainer.innerHTML = '<div style="text-align:center; padding: 40px 20px; color: var(--text-secondary);">Diese Playlist ist leer.</div>'; return; }
 
@@ -4645,6 +4748,31 @@ async function createNewPlaylistProcess() {
             if (boostLabel) boostLabel.innerText = pct + ' %';
             window.setBoostLevel(pct / 100);
         });
+    }
+
+    // Sender/Vibemix-Groesse (Settings) - siehe _getStationSizeSettings.
+    {
+        const s = _getStationSizeSettings();
+        const poolSlider = document.getElementById('station-pool-slider');
+        const poolLabel = document.getElementById('station-pool-value-label');
+        const initialSlider = document.getElementById('station-initial-slider');
+        const initialLabel = document.getElementById('station-initial-value-label');
+        if (poolSlider) {
+            poolSlider.value = s.pool; if (poolLabel) poolLabel.innerText = String(s.pool);
+            poolSlider.addEventListener('input', (e) => {
+                const v = parseInt(e.target.value, 10) || 100;
+                if (poolLabel) poolLabel.innerText = String(v);
+                localStorage.setItem('himusic_station_pool', String(v));
+            });
+        }
+        if (initialSlider) {
+            initialSlider.value = s.initial; if (initialLabel) initialLabel.innerText = String(s.initial);
+            initialSlider.addEventListener('input', (e) => {
+                const v = parseInt(e.target.value, 10) || 75;
+                if (initialLabel) initialLabel.innerText = String(v);
+                localStorage.setItem('himusic_station_initial', String(v));
+            });
+        }
     }
 
     // Shuffle/Repeat ueberleben jetzt einen Neustart - vorher zwei reine In-Memory-Flags,
@@ -5052,6 +5180,11 @@ async function createNewPlaylistProcess() {
         };
         document.addEventListener('visibilitychange', _maybeAutoImport);
         setTimeout(_maybeAutoImport, 5000);
+        // Auf window, damit _enqueueOneLink direkt nach dem Einreihen anstossen kann - vorher
+        // feuerte der Auto-Import nur bei App-Wechsel in den Vordergrund, nicht wenn man bei
+        // bereits offener App einen Link einfuegt. Genau das war der Grund, warum "jetzt
+        // importieren" fast immer manuell gedrueckt werden musste.
+        window._maybeAutoImport = _maybeAutoImport;
     }
     // Beim Start einmal fuellen, damit die Liste nicht leer wirkt, wenn die Einstellungen
     // geoeffnet werden, ohne dass zwischendurch etwas uebersprungen wurde.
@@ -6627,6 +6760,10 @@ async function _enqueueOneLink(url, meta, force) {
         item.updatedAt = Date.now();
         _saveAndRenderYtQueue();
         _ensureYtPollLoop();
+        // Direkt anstossen statt auf den naechsten App-Vordergrund-Wechsel zu warten (siehe
+        // window._maybeAutoImport oben) - genau das war der Grund fuer "muss immer manuell
+        // importieren druecken", wenn man bei bereits offener App einen Link eingefuegt hat.
+        if (typeof window._maybeAutoImport === 'function') window._maybeAutoImport();
     } catch (e) {
         // Die Warteschlangen-Route selbst ist gerade nicht erreichbar (nicht "kein Watcher",
         // sondern der POST schlug fehl) - direkt auf Cloud-Fallback wechseln.
