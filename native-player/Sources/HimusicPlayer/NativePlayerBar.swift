@@ -43,7 +43,7 @@ struct NativePlayerBar: View {
                         .font(.system(size: 19))
                         .frame(width: 26)
                 }
-                Button(action: player.next) {
+                Button(action: { player.next() }) {
                     Image(systemName: "forward.fill").font(.system(size: 15))
                 }
             }
