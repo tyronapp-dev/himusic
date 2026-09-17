@@ -2,12 +2,6 @@
 .env
 .DS_Store
 
-# Lokaler YouTube-Import-Watcher: yt-dlp.exe/ffmpeg.exe sind grosse Binaerdateien,
-# die sich jeder einmalig selbst herunterlaedt (siehe local-import-watcher/README.md)
-local-import-watcher/yt-dlp.exe
-local-import-watcher/ffmpeg.exe
-local-import-watcher/ffprobe.exe
-local-import-watcher/watcher.log
 # Claude-Code-Arbeitsdateien: Laufzeit-Locks, lokale Permissions (enthalten
 # alte Rechner-/Arbeitgeberpfade) und Agenten-Gedaechtnis - nicht ins oeffentliche Repo.
 .claude/

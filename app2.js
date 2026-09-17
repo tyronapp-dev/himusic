@@ -534,7 +534,7 @@ window._ytSpikeTest = async function () {
     // Nutzer nichts tippen (und iOS mangelt nichts).
     let vorschlag = '';
     try {
-        const q = (typeof _ytQueueState !== 'undefined' && _ytQueueState || []).find(it => it && it.url && !['done','fallback_done'].includes(it.clientState));
+        const q = (typeof _ytQueueState !== 'undefined' && _ytQueueState || []).find(it => it && it.url && it.clientState !== 'done');
         if (q) vorschlag = q.url;
     } catch (e) {}
     const input = prompt('YouTube-URL oder Video-ID:', vorschlag);
@@ -1076,9 +1076,7 @@ async function _ytImportQueue(auto = false) {
         if (window._showToast) window._showToast('In-App-Import nur in der App-Huelle moeglich', 3000);
         return;
     }
-    const terminal = auto
-        ? ['done', 'fallback_done', 'failed', 'fallback_failed']
-        : ['done', 'fallback_done'];
+    const terminal = auto ? ['done', 'failed'] : ['done'];
     let items = (typeof _ytQueueState !== 'undefined' ? _ytQueueState : []).filter(
         it => it && it.url && !terminal.includes(it.clientState)
     );
@@ -1098,7 +1096,6 @@ async function _ytImportQueue(auto = false) {
             item.clientState = 'done'; item.updatedAt = Date.now();
             _rememberImportedYtUrl(item.url);
             if (res.videoId) { try { _rememberImportedYtUrl('vid:' + res.videoId); } catch (e) {} }
-            if (item.queueItemId) { try { await _apiFetch(`${API_URL}/youtube-queue/${item.queueItemId}`, { method: 'DELETE' }); } catch (e) {} }
         } else {
             fail++;
             lastFail = { title: item.title || item.url, reason: res.reason, detail: res.detail || null };
@@ -1687,13 +1684,6 @@ function _setAccentColor(color) {
     document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
 }
 
-function updatePlayerBackground(color1, color2) {
-    const bg = document.querySelector('.dynamic-bg');
-    if (!bg) return;
-    bg.style.backgroundImage = `radial-gradient(at 0% 10%, ${color1}66 0px, transparent 60%), radial-gradient(at 100% 20%, ${color2}44 0px, transparent 60%), radial-gradient(at 50% 100%, rgba(0, 0, 0, 1) 0px, transparent 100%)`;
-    _setAccentColor(color1);
-}
-
 function formatDuration(totalSeconds) {
     if (!totalSeconds) return "0min";
     const h = Math.floor(totalSeconds / 3600);
@@ -1886,11 +1876,6 @@ async function searchSongMetaItunes(title, artist, localDurationSec = 0, retryCo
         }
         return null;
     }
-}
-
-async function fetchCoverFromSpotify(title, artist) {
-    const meta = await searchSongMetaSpotify(title, artist);
-    return (meta && !meta.rateLimited && meta.cover) ? meta.cover : null;
 }
 
 async function fetchCoverFromiTunes(title, artist) {
@@ -3131,8 +3116,8 @@ let _bgCacheActive = false;
     let _fetchSongsSeq = 0;
     async function fetchSongsFromDatabase(silent = false) {
         if (!songsContainer) return;
-        // Bei mehreren gleichzeitig fertigen YouTube-Imports feuert _cacheFreshYtSongs mehrfach
-        // hintereinander GET /songs ab. Ohne Sequenz-Schutz konnte eine spaeter gestartete, aber
+        // Import-Ende, Hintergrund-Sync und Sichtbarkeitswechsel feuern GET /songs mehrfach kurz
+        // hintereinander ab. Ohne Sequenz-Schutz konnte eine spaeter gestartete, aber
         // schneller zurueckkommende Antwort von einer AELTEREN, langsameren Antwort ueberschrieben
         // werden, sobald die zuletzt eintraf - der frisch importierte Song verschwand dann wieder
         // aus globalSongsData, obwohl er laengst in der Cloud lag. Nur die zuletzt GESTARTETE
@@ -5172,7 +5157,7 @@ async function createNewPlaylistProcess() {
             if (document.visibilityState !== 'visible') return;
             if (Date.now() - _lastAutoImport < 90000) return;
             const pending = (typeof _ytQueueState !== 'undefined' ? _ytQueueState : []).some(
-                it => it && it.url && !['done', 'fallback_done', 'failed', 'fallback_failed'].includes(it.clientState)
+                it => it && it.url && !['done', 'failed'].includes(it.clientState)
             );
             if (!pending) return;
             _lastAutoImport = Date.now();
@@ -5180,7 +5165,7 @@ async function createNewPlaylistProcess() {
         };
         document.addEventListener('visibilitychange', _maybeAutoImport);
         setTimeout(_maybeAutoImport, 5000);
-        // Auf window, damit _enqueueOneLink direkt nach dem Einreihen anstossen kann - vorher
+        // Auf window, damit _enqueueYoutubeLinks direkt nach dem Einreihen anstossen kann - vorher
         // feuerte der Auto-Import nur bei App-Wechsel in den Vordergrund, nicht wenn man bei
         // bereits offener App einen Link einfuegt. Genau das war der Grund, warum "jetzt
         // importieren" fast immer manuell gedrueckt werden musste.
@@ -6230,38 +6215,14 @@ setTimeout(processBackgroundSync, 3000);
 // ==========================================
 // 4. YOUTUBE IMPORT
 // ==========================================
-// Primärweg: /youtube-queue – ein lokales Hilfsprogramm auf dem eigenen PC (Heim-IP, siehe
-// local-import-watcher/) holt sich die Warteschlange und lädt herunter. Grund: GitHub-Actions-
-// Runner-IPs werden von YouTube zunehmend als Bot geblockt (verifiziert: mehrere Videos
-// scheiterten dort komplett, trotz PO-Token + TLS-Impersonation), die eigene Heim-IP hatte im
-// Test keinen einzigen Block. Fällt automatisch auf /dispatch-import (GitHub Actions) zurück,
-// falls der Worker die neue Route noch nicht kennt (z.B. vor einem Deploy) oder kein Watcher läuft.
-// Ein YouTube-Import läuft asynchron auf einem entfernten Watcher/Runner – die Datei landet erst
-// nach ca. 1-2 Min in der DB. Damit sie danach ohne manuellen Offline-Modus-Schalter direkt lokal
-// verfügbar ist (Anforderung: YouTube-Downloads sollen automatisch offline-fähig sein), pollt diese
-// Funktion kurz auf neue Songs mit einem YouTube-Import-Marker im file_url und cached sie sofort.
-function _isYoutubeImportedUrl(fileUrl) {
-    return !!fileUrl && (fileUrl.includes('_local_yt') || fileUrl.includes('/yt/'));
-}
-
+// Der Import läuft vollständig auf dem Gerät: _ytImportQueue/_ytImportOne (oben) holen die
+// Audiospur über den VISIONOS-InnerTube-Client, remuxen sie und laden sie hoch. Es gibt keinen
+// entfernten Arbeiter mehr - die Warteschlange hier ist reine Gerätezustandsverwaltung.
+//
 // --- WARTESCHLANGE: persistenter Status statt flüchtiger Textzeile ---
-// Jeder eingereichte Link bekommt einen Eintrag mit echtem Status (server-seitig ab jetzt via
-// PATCH /youtube-queue/:id gepflegt: pending/processing/done/failed), der in localStorage
-// überlebt und in Settings dauerhaft sichtbar bleibt.
+// Jeder eingereichte Link bekommt einen Eintrag mit Status, der in localStorage überlebt und in
+// Settings dauerhaft sichtbar bleibt.
 const YT_QUEUE_KEY = 'himusic_yt_queue';
-const YT_ENQUEUE_CONCURRENCY = 6; // war 3 ("wie CONCURRENT im Watcher"). Der Watcher kann aber nur Eintraege
-                                  // holen, die schon IN der Warteschlange stehen - stand das Einreihen selbst
-                                  // im Weg, liefen seine Bahnen anfangs leer. Jetzt liegt ein 18er-Stapel in
-                                  // unter einer Sekunde komplett bereit.
-const YT_QUEUE_POLL_MS = 3000; // Status-Poll gegen /youtube-queue (kleine Antwort) - war 6000. Halbiert die
-                               // Zeit, bis ein fertiger Song bemerkt und auf der Seite angezeigt wird.
-const YT_FRESH_SAFETY_MS = 15000; // Sicherheitsnetz: falls der Watcher-PATCH "done" mal verloren geht, trotzdem
-                                  // direkt in /songs nachsehen - aber nur, wenn wirklich etwas "processing" ist
-                                  // (sonst würde die grosse /songs-Antwort unnötig oft geladen).
-const YT_LIVENESS_WINDOW_MS = 30000; // war 100000. Ein laufender Watcher meldet den ersten Eintrag binnen ~10s als
-                                     // "processing" (Poll alle 2s, PATCH VOR dem Download) - 30s reichen also sicher,
-                                     // und OHNE Watcher startet der Cloud-Fallback jetzt nach 30s statt erst nach 100s.
-const YT_STALL_TIMEOUT_MS = 5 * 60 * 1000; // ein Eintrag hängt >5 Min in "processing" -> Watcher vermutlich abgestürzt
 const YT_TERMINAL_PRUNE_MS = 10 * 60 * 1000; // fertige Einträge nach 10 Min aus der Ansicht entfernen
 
 // Dauerhafte URL-Historie (anders als _ytQueueState oben: DIE wird 10 Min nach Fertigstellung
@@ -6299,39 +6260,28 @@ function _forgetImportedYtUrl(url) {
     } catch (e) {}
 }
 
-let _ytQueueState = _loadYtQueue();
-let _ytPollTimer = null;
-let _ytLastLivenessAt = 0;   // wann zuletzt IRGENDEIN Eintrag (nicht nur eigene) als "processing" beobachtet wurde
-let _ytFirstEnqueueAt = 0;   // Start des aktuellen Lebendigkeits-Beobachtungsfensters
-let _ytFallbackDecided = false; // verhindert, die globale "kein Watcher"-Entscheidung mehrfach im selben Fenster zu treffen
-let _ytLastFreshCheckAt = 0; // wann zuletzt (als Sicherheitsnetz) direkt in /songs nach neuen Songs gesehen wurde
+// Zustände aus der Zeit des Cloud-Fallbacks liegen noch in der localStorage-Warteschlange auf
+// Geräten, die vorher liefen. `fallback_done` MUSS auf `done` abgebildet werden - sonst gilt der
+// Eintrag als unerledigt und der In-App-Import lädt einen längst vorhandenen Song erneut.
+// Muss VOR _ytQueueState stehen: die Zuweisung dort ruft _loadYtQueue() sofort auf, und eine
+// erst danach deklarierte const läge in der temporalen Todeszone - der ReferenceError landete im
+// catch und die Warteschlange käme still leer zurück.
+const _YT_LEGACY_STATES = { fallback_done: 'done', fallback_failed: 'failed', fallback_pending: 'queued', submitting: 'queued' };
 
 function _loadYtQueue() {
     try {
         const items = JSON.parse(localStorage.getItem(YT_QUEUE_KEY) || '[]');
-        // Eintrag hing beim letzten Neuladen mitten im ersten POST fest - wir können nicht sicher
-        // wissen, ob der Request angekommen ist, also klar als fehlgeschlagen markieren statt
-        // stumm für immer bei "Wird eingereiht..." hängen zu bleiben (seltener Randfall).
-        items.forEach(item => { if (item.clientState === 'submitting') { item.clientState = 'failed'; item.errorMessage = 'Sitzung unterbrochen - bitte erneut einfügen'; } });
+        items.forEach(item => {
+            const mapped = _YT_LEGACY_STATES[item.clientState];
+            if (mapped) item.clientState = mapped;
+        });
         return items;
     } catch (e) { return []; }
 }
+
+let _ytQueueState = _loadYtQueue();
 function _saveYtQueue(items) { try { localStorage.setItem(YT_QUEUE_KEY, JSON.stringify(items)); } catch (e) {} }
 function _saveAndRenderYtQueue() { _saveYtQueue(_ytQueueState); renderYtQueueList(); }
-
-function _cacheFreshYtSongs(fresh) {
-    fresh.forEach(s => { if (window.hbLocal) window.hbLocal.downloadToLocal(s.file_url, s.title); });
-    if (typeof window.fetchSongsFromDatabase === 'function') window.fetchSongsFromDatabase(true);
-    // Kurze Rueckmeldung, sobald ein Import wirklich in der Bibliothek angekommen ist - der
-    // Import laeuft asynchron, ohne das merkt man den Abschluss sonst gar nicht.
-    if (typeof window._showToast === 'function' && fresh.length > 0) {
-        window._showToast(fresh.length === 1 ? `✓ Importiert: ${fresh[0].title}` : `✓ ${fresh.length} Songs importiert`);
-    }
-}
-
-// _pollForFreshYtSongs wurde am 18.08.2026 entfernt und durch _watchForFallbackResults()
-// ersetzt: ein gemeinsamer Beobachter fuer alle laufenden Fallbacks statt einer blockierenden
-// 10-Minuten-Schleife pro Eintrag, die das Ausloesen der uebrigen Eintraege aufhielt.
 
 function _parseYoutubeLinksFromTextarea(raw) {
     const lines = (raw || '').split('\n').map(l => l.trim()).filter(Boolean);
@@ -6353,8 +6303,7 @@ function _makeYtQueueItem(url, meta, force) {
     return {
         localId: `ytq_${now}_${Math.random().toString(36).slice(2, 8)}`,
         url, title: (meta && meta.title) || null, thumbnail: (meta && meta.thumbnail) || null,
-        queueItemId: null, serverStatus: null, clientState: 'submitting',
-        errorMessage: null, createdAt: now, updatedAt: now,
+        clientState: 'queued', errorMessage: null, createdAt: now, updatedAt: now,
         // force = bewusstes erneutes Importieren (z.B. nach dem Loeschen des Songs). Umgeht die
         // "schon importiert"-Sperre in _ytImportOne, die sonst still "fertig" meldet ohne etwas zu tun.
         force: !!force,
@@ -6363,14 +6312,10 @@ function _makeYtQueueItem(url, meta, force) {
 
 function _ytStatusLabel(item) {
     switch (item.clientState) {
-        case 'submitting': return { icon: '⏳', text: 'Wird eingereiht...' };
         case 'queued': return { icon: '⏳', text: 'Wartet' };
         case 'processing': return { icon: '⬇️', text: 'Lädt herunter' };
         case 'done': return { icon: '✅', text: 'Fertig' };
         case 'failed': return { icon: '❌', text: item.errorMessage ? `Fehlgeschlagen: ${item.errorMessage}` : 'Fehlgeschlagen' };
-        case 'fallback_pending': return { icon: '☁️', text: 'Cloud-Fallback läuft...' };
-        case 'fallback_done': return { icon: '✅', text: 'Fertig (Cloud)' };
-        case 'fallback_failed': return { icon: '❌', text: item.errorMessage ? `Cloud-Fallback fehlgeschlagen: ${item.errorMessage}` : 'Cloud-Fallback fehlgeschlagen' };
         default: return { icon: '·', text: item.clientState };
     }
 }
@@ -6389,10 +6334,7 @@ function renderYtQueueList() {
 
     const counts = { queued: 0, processing: 0, done: 0, failed: 0 };
     items.forEach(item => {
-        if (item.clientState === 'submitting' || item.clientState === 'queued') counts.queued++;
-        else if (item.clientState === 'processing' || item.clientState === 'fallback_pending') counts.processing++;
-        else if (item.clientState === 'done' || item.clientState === 'fallback_done') counts.done++;
-        else if (item.clientState === 'failed' || item.clientState === 'fallback_failed') counts.failed++;
+        if (counts[item.clientState] !== undefined) counts[item.clientState]++;
     });
     if (summaryEl) {
         summaryEl.style.display = 'block';
@@ -6402,7 +6344,7 @@ function renderYtQueueList() {
     listEl.innerHTML = items.slice().reverse().map(item => {
         const { icon, text } = _ytStatusLabel(item);
         const title = item.title || item.url;
-        const canRetry = item.clientState === 'failed' || item.clientState === 'fallback_failed';
+        const canRetry = item.clientState === 'failed';
         const retryBtn = canRetry
             ? `<button class="yt-queue-retry-btn" data-localid="${_esc(item.localId)}" style="background:none;border:1px solid rgba(255,255,255,0.25);color:#fff;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;margin-left:8px;flex-shrink:0;">Wiederholen</button>`
             : '';
@@ -6428,350 +6370,43 @@ function _pruneTerminalYtItems() {
     const now = Date.now();
     const before = _ytQueueState.length;
     _ytQueueState = _ytQueueState.filter(item => {
-        const isTerminalDone = item.clientState === 'done' || item.clientState === 'fallback_done';
+        const isTerminalDone = item.clientState === 'done';
         return !(isTerminalDone && (now - item.updatedAt) > YT_TERMINAL_PRUNE_MS);
     });
     if (_ytQueueState.length !== before) _saveAndRenderYtQueue();
 }
 
-function _ensureYtPollLoop() {
-    if (_ytPollTimer) return;
-    _ytFirstEnqueueAt = Date.now();
-    _ytLastLivenessAt = 0;
-    _ytFallbackDecided = false;
-    _ytLastFreshCheckAt = 0;
-    _ytPollTimer = setInterval(_pollYtQueueTick, YT_QUEUE_POLL_MS);
-    _pollYtQueueTick();
-}
-
-async function _handleNewlyDoneYtItems() {
-    try {
-        const res = await _apiFetch(`${API_URL}/songs`);
-        if (!res.ok) return;
-        const songs = await res.json();
-        const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
-        const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
-        if (fresh.length > 0) _cacheFreshYtSongs(fresh);
-    } catch (e) {}
-}
-
-async function _resolveVanishedYtItem(item) {
-    // Eintrag ist aus /youtube-queue verschwunden, ohne dass wir "done" gesehen haben - deckt
-    // v.a. den Übergang ab, falls irgendwo noch ein alter Watcher läuft, der Einträge weiterhin
-    // nach der Verarbeitung blind löscht statt den Status zu setzen.
-    if (item._resolvingVanish) return;
-    item._resolvingVanish = true;
-    try {
-        const res = await _apiFetch(`${API_URL}/songs`);
-        if (res.ok) {
-            const songs = await res.json();
-            const knownIds = new Set((window.globalSongsData || []).map(s => s.id));
-            const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
-            if (fresh.length > 0) {
-                _cacheFreshYtSongs(fresh);
-                item.clientState = 'done';
-                item.updatedAt = Date.now();
-                _rememberImportedYtUrl(item.url);
-                _saveAndRenderYtQueue();
-                return;
-            }
-        }
-    } catch (e) {}
-    item.clientState = 'failed';
-    item.errorMessage = 'Aus der Warteschlange verschwunden ohne Ergebnis';
-    item.updatedAt = Date.now();
+// Wiederholen heisst: Eintrag zurueck auf "wartet" und den In-App-Import erneut anstossen.
+function _requeueYtItems(items) {
+    if (items.length === 0) return;
+    items.forEach(item => { item.clientState = 'queued'; item.errorMessage = null; item.updatedAt = Date.now(); });
     _saveAndRenderYtQueue();
-}
-
-async function _pollYtQueueTick() {
-    const trackedQueued = _ytQueueState.filter(item => item.clientState === 'queued' || item.clientState === 'processing');
-    if (trackedQueued.length === 0) {
-        _pruneTerminalYtItems();
-        if (_ytPollTimer) { clearInterval(_ytPollTimer); _ytPollTimer = null; }
-        return;
-    }
-
-    let serverItems = null;
-    try {
-        const res = await _apiFetch(`${API_URL}/youtube-queue`);
-        if (res.ok) serverItems = await res.json();
-    } catch (e) {}
-
-    let sawNewlyDone = false;
-    if (serverItems) {
-        const byId = new Map(serverItems.map(s => [s.id, s]));
-        // Globales Lebendigkeits-Signal: sobald IRGENDEIN Eintrag (nicht nur die eigenen) als
-        // "processing" beobachtet wird, läuft ein Watcher - die Warteschlange bleibt dann
-        // geduldig, statt nach starren 2 Minuten fälschlich "kein Watcher aktiv" anzunehmen (der
-        // eigentliche Bug bei einem großen Stapel: der Watcher hatte oft nur noch viele Songs vor
-        // sich, kein Ausfall).
-        if (serverItems.some(s => s.status === 'processing')) _ytLastLivenessAt = Date.now();
-
-        for (const item of trackedQueued) {
-            if (!item.queueItemId) continue;
-            const server = byId.get(item.queueItemId);
-            if (!server) { _resolveVanishedYtItem(item); continue; }
-            item.serverStatus = server.status;
-            if (server.status === 'processing' && item.clientState !== 'processing') {
-                item.clientState = 'processing'; item.updatedAt = Date.now();
-            } else if (server.status === 'done') {
-                item.clientState = 'done'; item.updatedAt = Date.now(); sawNewlyDone = true; _rememberImportedYtUrl(item.url);
-            } else if (server.status === 'failed') {
-                item.clientState = 'failed'; item.errorMessage = server.error_message || 'Unbekannter Fehler'; item.updatedAt = Date.now();
-            }
-        }
-    }
-    // Neu fertige Songs sofort holen und rendern. Zusätzlich als Sicherheitsnetz: wenn ein Eintrag
-    // schon "processing" ist (die Datei landet also gerade/demnächst in der DB) und der Watcher-PATCH
-    // "done" mal verloren ginge, trotzdem periodisch direkt in /songs nachsehen - so erscheint der Song
-    // auch dann in Sekunden, statt bis zum 5-Min-Stall-Timeout auf "Lädt herunter" hängen zu bleiben.
-    const someProcessing = trackedQueued.some(item => item.clientState === 'processing');
-    const nowFresh = Date.now();
-    if (sawNewlyDone || (someProcessing && (nowFresh - _ytLastFreshCheckAt) > YT_FRESH_SAFETY_MS)) {
-        _ytLastFreshCheckAt = nowFresh;
-        await _handleNewlyDoneYtItems();
-    }
-
-    // Einzelner Eintrag hängt zu lange in "processing" - Watcher vermutlich mittendrin
-    // abgestürzt. Nur DIESEN einen Eintrag auf Cloud-Fallback umstellen, nicht die ganze Liste.
-    const now = Date.now();
-    trackedQueued.forEach(item => {
-        if (item.clientState === 'processing' && (now - item.updatedAt) > YT_STALL_TIMEOUT_MS) _dispatchYtFallback(item);
-    });
-
-    // Globale "kein Watcher aktiv"-Erkennung: seit dem ersten eigenen Eintrag dieser Session ist
-    // das Lebendigkeits-Fenster abgelaufen, OHNE dass irgendwo "processing" beobachtet wurde ->
-    // EINMALIG alle noch wartenden eigenen Einträge gemeinsam auf Cloud-Fallback umstellen.
-    const windowExpired = _ytFirstEnqueueAt && (now - _ytFirstEnqueueAt) > YT_LIVENESS_WINDOW_MS;
-    if (!_ytFallbackDecided && _ytLastLivenessAt === 0 && windowExpired) {
-        _ytFallbackDecided = true;
-        _dispatchYtFallbackBatch(_ytQueueState.filter(item => item.clientState === 'queued'));
-    }
-
-    _saveAndRenderYtQueue();
-    _pruneTerminalYtItems();
-}
-
-// NUR ausloesen, nicht auf das Ergebnis warten.
-//
-// Vorher steckte beides in einer Funktion: der POST (Sekundenbruchteile) und danach
-// _pollForFreshYtSongs, das bis zu 40x15s = 10 MINUTEN blockiert. Weil
-// _dispatchYtFallbackBatch mit sechs Bahnen laeuft und jede Bahn auf ihren Eintrag wartete,
-// wurde ab dem siebten Song ueberhaupt erst nach bis zu zehn Minuten ausgeloest - und gar
-// nicht mehr, sobald die App vorher geschlossen wurde. Genau das Bild: einer laedt, der Rest
-// bleibt liegen.
-//
-// Der Import laeuft nach dem POST serverseitig weiter (GitHub Actions), die App muss dafuer
-// nicht offen bleiben. Warten ist also reine Anzeigesache und gehoert nicht in den Ausloeser.
-async function _dispatchYtFallbackOnly(item) {
-    item.clientState = 'fallback_pending';
-    item.errorMessage = null;
-    item.updatedAt = Date.now();
-    try {
-        const res = await _apiFetch(`${API_URL}/dispatch-import`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ youtube_url: item.url, queue_id: item.queueItemId || undefined }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        // Der Worker gibt die youtube_queue-Zeilen-ID zurueck (legt sie neu an, falls wir noch
-        // keine hatten). Ab jetzt kann die GitHub-Action ihr Ergebnis GENAU diesem Eintrag
-        // zuordnen (POST /internal/queue-status setzt die Zeile auf done/failed), statt dass der
-        // Client nur nach Anzahl neuer Songs raten muss - das war die Ursache dafuer, dass bei
-        // 3 gleichzeitigen Downloads regelmaessig einer auf "Cloud-Fallback laeuft" haengenblieb.
-        const data = await res.json().catch(() => ({}));
-        const returnedId = data && (data.queue_id || data.job_id);
-        if (returnedId && !item.queueItemId) item.queueItemId = returnedId;
-        // BEWUSST NICHT hier _rememberImportedYtUrl: der Fallback ist nur ANGESTOSSEN, der Song
-        // ist noch lange nicht da. Ihn jetzt als "importiert" zu merken hiess wochenlang: jeder
-        // erneute Einreih-Versuch derselben URL wurde stumm uebersprungen, obwohl nie ein Song
-        // ankam. Gemerkt wird erst bei BESTAETIGTER Ankunft (_pollYtQueueTick server=done,
-        // _watchForFallbackResults, _ytImportOne-Erfolg).
-        return true;
-    } catch (e) {
-        item.clientState = 'fallback_failed';
-        item.errorMessage = e.message;
-        return false;
-    } finally {
-        item.updatedAt = Date.now();
-    }
-}
-
-// Ein einziger Beobachter fuer ALLE laufenden Cloud-Fallbacks statt einer 10-Minuten-Schleife
-// pro Eintrag. Hakt pro neu aufgetauchtem Import-Song einen wartenden Eintrag ab (aeltester
-// zuerst). Die Zuordnung Song->Eintrag ist dabei bewusst unscharf - welcher der parallel
-// laufenden Runner welchen Song fertigstellt, ist von aussen nicht erkennbar. Die ANZAHL
-// stimmt, und darauf kommt es an. Vorher meldeten alle wartenden Eintraege gleichzeitig
-// "fertig", sobald irgendein Song ankam, weil jede Schleife dieselbe Bedingung sah.
-// "starting" waehrend des ersten (await-behafteten) Abgleichs, danach die echte Interval-ID -
-// beides gilt als "laeuft schon" fuer die Wiedereintritts-Sperre oben.
-let _ytFallbackWatchId = null;
-async function _watchForFallbackResults() {
-    if (_ytFallbackWatchId) return;
-    _ytFallbackWatchId = 'starting';
-    let elapsed = 0;
-
-    // Bewusst per frischem /songs-Abruf statt window.globalSongsData: dieselbe Funktion wird
-    // auch beim Seitenladen wieder aufgerufen, um verwaiste fallback_pending-Eintraege
-    // uebernommen aus einer VORHERIGEN Sitzung weiter zu beobachten (siehe Aufruf unten am
-    // Dateiende). In dem Moment ist globalSongsData oft noch leer/veraltet, weil die
-    // Bibliothek gerade erst laedt - ein leeres knownIds haette dann JEDEN laengst
-    // importierten YouTube-Song als "gerade neu fertig" gezaehlt und wahllos Eintraege als
-    // erledigt markiert, unabhaengig davon, ob sie das wirklich sind.
-    async function fetchKnownIds() {
-        try {
-            const res = await _apiFetch(`${API_URL}/songs`);
-            if (res.ok) return new Set((await res.json()).map(s => s.id));
-        } catch (e) {}
-        return new Set((window.globalSongsData || []).map(s => s.id));
-    }
-    const knownIds = await fetchKnownIds();
-
-    async function tick() {
-        const waiting = _ytQueueState.filter(i => i.clientState === 'fallback_pending');
-        if (waiting.length === 0 || elapsed > 600) {
-            clearInterval(_ytFallbackWatchId); _ytFallbackWatchId = null;
-            // Nach zehn Minuten ohne Ergebnis: als fehlgeschlagen markieren, damit die
-            // Eintraege nicht ewig auf "laeuft" stehen bleiben (und per Wiederholen-Knopf
-            // erneut versucht werden koennen).
-            if (elapsed > 600 && waiting.length > 0) {
-                waiting.forEach(i => { i.clientState = 'fallback_failed'; i.errorMessage = 'Nicht angekommen'; i.updatedAt = Date.now(); });
-                _saveAndRenderYtQueue();
-            }
-            return;
-        }
-        // IDENTITAETSBASIERT zuerst: seit die GitHub-Action ihr Ergebnis pro youtube_queue-Zeile
-        // zurueckmeldet (status 'done'/'failed', siehe /internal/queue-status im Worker), lassen
-        // sich Eintraege mit bekannter queueItemId EXAKT aufloesen - kein Raten nach Anzahl mehr.
-        // Der Zaehl-Weg darunter bleibt als Netz fuer Eintraege ohne ID (z.B. Dispatch aus einer
-        // aelteren App-Version, oder Worker-Route noch nicht deployt).
-        try {
-            const qr = await _apiFetch(`${API_URL}/youtube-queue`);
-            if (qr.ok) {
-                const rows = new Map((await qr.json()).map(r => [r.id, r]));
-                let changed = false;
-                for (const it of waiting) {
-                    if (!it.queueItemId) continue;
-                    const row = rows.get(it.queueItemId);
-                    if (!row) continue;
-                    if (row.status === 'done') { it.clientState = 'fallback_done'; it.updatedAt = Date.now(); changed = true; }
-                    else if (row.status === 'failed') { it.clientState = 'fallback_failed'; it.errorMessage = row.error_message || 'Import fehlgeschlagen'; it.updatedAt = Date.now(); changed = true; }
-                }
-                if (changed) { _saveAndRenderYtQueue(); _handleNewlyDoneYtItems(); }
-            }
-        } catch (e) {}
-
-        const waitingNow = _ytQueueState.filter(i => i.clientState === 'fallback_pending');
-        if (waitingNow.length === 0) return;
-        try {
-            const res = await _apiFetch(`${API_URL}/songs`);
-            if (!res.ok) return;
-            const songs = await res.json();
-            const fresh = songs.filter(s => !knownIds.has(s.id) && _isYoutubeImportedUrl(s.file_url));
-            if (fresh.length === 0) return;
-            fresh.forEach(s => knownIds.add(s.id));
-            _cacheFreshYtSongs(fresh);
-            waitingNow.slice(0, fresh.length).forEach(i => { i.clientState = 'fallback_done'; i.updatedAt = Date.now(); });
-            _saveAndRenderYtQueue();
-        } catch (e) {}
-    }
-
-    // Sofort einmal pruefen statt erst nach 15s zu warten - deckt genau den Fall ab, in dem der
-    // Song laengst fertig in der Bibliothek liegt (z.B. Import lief serverseitig zu Ende,
-    // waehrend die App geschlossen war) und nur die Anzeige noch "laeuft" sagt.
-    await tick();
-    if (_ytFallbackWatchId === null) return; // tick() hat oben schon aufgeraeumt (nichts mehr wartend)
-    _ytFallbackWatchId = setInterval(() => { elapsed += 15; tick(); }, 15000);
-}
-
-async function _dispatchYtFallback(item) {
-    _saveAndRenderYtQueue();
-    await _dispatchYtFallbackOnly(item);
-    _saveAndRenderYtQueue();
-    _watchForFallbackResults();
-}
-
-// Feuert _dispatchYtFallback für viele Einträge auf einmal, gedrosselt über dieselben Bahnen
-// wie beim Einreihen - sonst würde z.B. "kein Watcher aktiv" bei einem 500er-Stapel alle 500
-// gleichzeitig auf den GitHub-Actions-Fallback umstellen (bis zu 500 parallele 8-Job-Workflows
-// plus 500 gleichzeitige 2-Minuten-Poller gegen den Worker).
-async function _dispatchYtFallbackBatch(items) {
-    if (!items || items.length === 0) return;
-    let idx = 0;
-    // Bahnen loesen jetzt nur noch aus (ein POST je Eintrag) - ein Stapel ist damit in
-    // Sekunden komplett angestossen statt ueber viele Minuten verteilt. Ab hier laeuft alles
-    // serverseitig weiter, auch wenn die App gleich danach geschlossen wird.
-    async function lane() {
-        while (idx < items.length) {
-            const item = items[idx++];
-            await _dispatchYtFallbackOnly(item);
-            _saveAndRenderYtQueue();
-            await new Promise(r => setTimeout(r, 200));
-        }
-    }
-    const lanes = Array.from({ length: Math.min(YT_ENQUEUE_CONCURRENCY, items.length) }, () => lane());
-    await Promise.all(lanes);
-    _saveAndRenderYtQueue();
-    _watchForFallbackResults();
+    _ytImportQueue();
 }
 
 function _retryYtQueueItem(localId) {
     const item = _ytQueueState.find(i => i.localId === localId);
-    if (!item) return;
-    _dispatchYtFallback(item);
+    if (item) _requeueYtItems([item]);
 }
 
 function _retryAllFailedYt() {
-    const items = _ytQueueState.filter(item => item.clientState === 'failed' || item.clientState === 'fallback_failed');
-    _dispatchYtFallbackBatch(items);
+    _requeueYtItems(_ytQueueState.filter(item => item.clientState === 'failed'));
 }
 
 function _clearYtQueue() {
-    _ytQueueState = _ytQueueState.filter(item => !['done', 'fallback_done', 'failed', 'fallback_failed'].includes(item.clientState));
+    _ytQueueState = _ytQueueState.filter(item => !['done', 'failed'].includes(item.clientState));
     _saveAndRenderYtQueue();
 }
 
-// Absichtlich getrennt von _clearYtQueue(): die entfernt nie Eintraege, die noch aktiv
-// laufen koennten (queued/processing/fallback_pending), genau richtig im Normalfall. Manche
-// bleiben aber dauerhaft auf "Cloud-Fallback laeuft" haengen, obwohl der Song laengst in der
-// DB steht - der GitHub-Actions-Pfad schreibt direkt per /internal/register, ohne den
-// youtube_queue-Status je auf "done" zu setzen (siehe _dispatchYtFallback-Kommentar). Diese
-// Funktion ist der bewusste manuelle Override dafuer - der Nutzer bestaetigt selbst, dass die
-// Songs schon da sind, bevor er sie aufruft.
+// Absichtlich getrennt von _clearYtQueue(): die entfernt nie Eintraege, die noch laufen koennten
+// (queued/processing). Bleibt doch einmal einer haengen - etwa weil die App mitten im Import
+// geschlossen wurde -, ist das hier der bewusste manuelle Override.
 function _forceClearYtQueue() {
     _ytQueueState = [];
     _saveAndRenderYtQueue();
 }
 
-async function _enqueueOneLink(url, meta, force) {
-    const item = _makeYtQueueItem(url, meta, force);
-    _ytQueueState.push(item);
-    _saveAndRenderYtQueue();
-
-    try {
-        const res = await _apiFetch(`${API_URL}/youtube-queue`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ youtube_url: url }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json().catch(() => ({}));
-        item.queueItemId = data.id || null;
-        item.serverStatus = 'pending';
-        item.clientState = 'queued';
-        item.updatedAt = Date.now();
-        _saveAndRenderYtQueue();
-        _ensureYtPollLoop();
-        // Direkt anstossen statt auf den naechsten App-Vordergrund-Wechsel zu warten (siehe
-        // window._maybeAutoImport oben) - genau das war der Grund fuer "muss immer manuell
-        // importieren druecken", wenn man bei bereits offener App einen Link eingefuegt hat.
-        if (typeof window._maybeAutoImport === 'function') window._maybeAutoImport();
-    } catch (e) {
-        // Die Warteschlangen-Route selbst ist gerade nicht erreichbar (nicht "kein Watcher",
-        // sondern der POST schlug fehl) - direkt auf Cloud-Fallback wechseln.
-        _dispatchYtFallback(item);
-    }
-}
-
-async function _enqueueYoutubeLinks(urls, meta, opts) {
+function _enqueueYoutubeLinks(urls, meta, opts) {
     // Schnell-Check VOR dem Einreihen: URLs, die laut lokaler Historie schon fertig importiert
     // wurden, werden uebersprungen - nuetzlich beim Masseneinfuegen ueberlappender Playlists.
     // opts.force = true (gezielter Einzel-Download aus der Suche) umgeht den Filter: wer bewusst
@@ -6788,25 +6423,19 @@ async function _enqueueYoutubeLinks(urls, meta, opts) {
     // nehmen - sonst greift die vid:-Sperre in _ytImportOne trotzdem und meldet still "fertig".
     if (force) toEnqueue.forEach(u => _forgetImportedYtUrl(u));
 
-    let idx = 0;
-    async function lane() {
-        while (idx < toEnqueue.length) {
-            const url = toEnqueue[idx++];
-            await _enqueueOneLink(url, meta, force);
-            await new Promise(r => setTimeout(r, 50));
-        }
-    }
-    const lanes = Array.from({ length: Math.min(YT_ENQUEUE_CONCURRENCY, toEnqueue.length) }, () => lane());
-    await Promise.all(lanes);
+    toEnqueue.forEach(url => _ytQueueState.push(_makeYtQueueItem(url, meta, force)));
+    _saveAndRenderYtQueue();
+    // Direkt anstossen statt auf den naechsten App-Vordergrund-Wechsel zu warten - genau das war
+    // der Grund fuer "muss immer manuell importieren druecken", wenn man bei bereits offener App
+    // einen Link einfuegt.
+    if (typeof window._maybeAutoImport === 'function') window._maybeAutoImport();
 }
 
+// Beim Start aufraeumen: laengst fertige Eintraege verschwinden aus der Ansicht. Frueher erledigte
+// das die Poll-Schleife; die gibt es nicht mehr, und ohne diesen Aufruf bliebe jeder fertige
+// Eintrag bis zum manuellen Leeren stehen.
+_pruneTerminalYtItems();
 renderYtQueueList();
-if (_ytQueueState.some(item => item.clientState === 'queued' || item.clientState === 'processing')) _ensureYtPollLoop();
-// Verwaiste Cloud-Fallback-Eintraege aus einer vorherigen Sitzung: der Beobachter dafuer lief
-// als reines In-Memory-setInterval und stirbt beim Schliessen/Neuladen der App mit. Ohne diesen
-// Aufruf blieb ein Eintrag fuer immer auf "Cloud-Fallback laeuft" stehen, selbst wenn der Song
-// laengst importiert war - siehe _watchForFallbackResults() fuer den Sofort-Check beim Start.
-if (_ytQueueState.some(item => item.clientState === 'fallback_pending')) _watchForFallbackResults();
 
 // ── YouTube-Vorschau-Player (Play/Pause/Spulen) für die Suchergebnisse ──────────
 // Nutzt die offizielle YouTube-IFrame-Player-API in einem unsichtbaren 1x1-Player: kein eigener

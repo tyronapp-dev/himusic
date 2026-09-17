@@ -102,4 +102,5 @@ Consequences).
 1. (Optional, niedrige Priorität) Private-Repo-Migration aus ADR-005 nachholen, falls zusätzliche
    Verteidigungsebene gewünscht.
 2. (Empfohlen) Cloudflare Rate-Limiting-Regel auf `POST /auth/login` einrichten.
-3. `local-import-watcher/.env` mit dem neuen `API_KEY` aktualisieren (manueller User-Schritt).
+3. ~~`local-import-watcher/.env` mit dem neuen `API_KEY` aktualisieren (manueller User-Schritt).~~
+   Hinfällig seit 2026-09-17: der lokale Watcher wurde entfernt (siehe ADR-009).

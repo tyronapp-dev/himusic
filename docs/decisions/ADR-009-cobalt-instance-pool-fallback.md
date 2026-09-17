@@ -1,7 +1,11 @@
 # ADR-009: Cobalt-Instanz-Pool als erster Versuch vor yt-dlp+Cookies
 
 ## Status
-Accepted
+Superseded (2026-09-17) — beide hier beschriebenen Extraktions-Pfade
+(`src/extractor_worker.py`, `local-import-watcher/watch.js`) wurden samt Cobalt-Pool
+entfernt. Der Import läuft seit 2026-08-30 vollständig in der App über den
+VISIONOS-InnerTube-Client, der ohne Cookies, PO-Token und ohne fremde Instanzen auskommt.
+Dieses ADR bleibt als Aufzeichnung der damaligen Entscheidung stehen.
 
 ## Date
 2026-07-26

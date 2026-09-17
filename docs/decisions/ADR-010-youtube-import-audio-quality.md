@@ -1,7 +1,11 @@
 # ADR-010: Höhere Audio-Qualität beim YouTube-Import (Cobalt-Bitrate + yt-dlp-Format-Fix)
 
 ## Status
-Accepted
+Superseded (2026-09-17) — die beiden hier optimierten Pfade (Cobalt-Bitrate,
+yt-dlp-Formatwahl) existieren nicht mehr, siehe ADR-009. Der In-App-Import wählt die
+Audiospur direkt aus YouTubes `adaptiveFormats` (`_ytPickAudio` in `app2.js`) und
+transkodiert nie — die Qualitätsfrage stellt sich dort anders. Dieses ADR bleibt als
+Aufzeichnung der damaligen Entscheidung stehen.
 
 ## Date
 2026-07-26

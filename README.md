@@ -61,14 +61,15 @@ python -m http.server 8080
 
 ## Architektur im Überblick
 
-- **Frontend**: eine einzelne `app2.js` (~3500 Zeilen), `style2.css`, `index.html`/`login.html` —
+- **Frontend**: eine einzelne `app2.js` (~6700 Zeilen), `style2.css`, `index.html`/`login.html` —
   keine Frameworks, kein Build-Step.
 - **Backend**: ein Cloudflare Worker (`https://himusic-api.tyron-app.workers.dev`) mit
   Cloudflare D1 (Datenbank) und R2 (Objektspeicher für Audio/Cover). Der Worker-Quellcode liegt
   nur im Cloudflare-Dashboard, nicht in diesem Repo.
-- **YouTube-Import**: läuft primär über einen lokalen Watcher (`local-import-watcher/`, auf
-  einem eigenen PC/Server, da YouTube Rechenzentrums-IPs zunehmend blockt) mit GitHub Actions
-  (`.github/workflows/audio-worker.yml`) als Fallback.
+- **YouTube-Import**: läuft vollständig auf dem Gerät in der nativen Hülle — die App holt die
+  Audiospur selbst über YouTubes InnerTube-API (VISIONOS-Client), baut sie in ein abspielbares
+  MP4 um und prüft sie vor dem Anlegen des Songs. Kein Server-Dienst, kein Watcher, keine
+  GitHub Actions mehr beteiligt (Details in [CLAUDE.md](CLAUDE.md)).
 - **Hosting**: aktuell GitHub Pages direkt aus diesem Repo (siehe Sicherheitshinweis unten —
   diese Doku wird aktualisiert, sobald der geplante Umzug auf Cloudflare Pages abgeschlossen ist).
 
@@ -87,5 +88,5 @@ Bitte nicht davon ausgehen, dass die App vollständig abgesichert ist, bis diese
 
 ## Unterprojekte
 
-- [local-import-watcher/](local-import-watcher/) — lokales Hilfsprogramm für den primären
-  YouTube-Import-Weg, eigene README dort.
+- [native-player/](native-player/) — native iOS-Begleit-App (Hintergrund-Wiedergabe,
+  Control-Center, Datei-Cache), eigene README dort.
