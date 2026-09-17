@@ -75,7 +75,9 @@ async function ladeDatei(fileUrl, zielDatei, key) {
 
 async function main() {
     if (!ZIEL) {
-        console.error('Zielordner fehlt.\n  node tools/backup-cloud.js "D:/himusic-backup"');
+        console.error('Zielordner fehlt. Je nachdem, wo das Terminal steht:');
+        console.error('  im Projektordner:  node tools/backup-cloud.js "D:/himusic-backup"');
+        console.error('  im tools-Ordner:   node backup-cloud.js "D:/himusic-backup"');
         process.exit(1);
     }
     const key = schluesselLesen();
