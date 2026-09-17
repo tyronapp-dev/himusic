@@ -516,11 +516,31 @@ function _ytPickAudio(streamingData) {
 
 // Gibt ein Diagnose-Objekt zurueck - im Spike bewusst NICHT schon der fertige Import,
 // erst pruefen was ueberhaupt ankommt.
+// Uebersetzt die gesammelten Client-Antworten in eine Ursache im Klartext. Ohne das lautet jeder
+// Fehlschlag gleich ("kein Client lieferte OK"), egal ob genau DIESES eine Video gesperrt ist
+// oder ob der Import als Ganzes gebrochen ist, weil YouTube die fest verdrahteten Angaben in
+// _YT_CLIENTS nicht mehr akzeptiert. Das ist der Unterschied zwischen "anderes Video nehmen" und
+// "Client-Angaben aktualisieren" - und ohne die Unterscheidung sucht man beim naechsten Bruch
+// wieder von vorn.
+function _ytDiagnose(attempts) {
+    const list = attempts || [];
+    if (list.length === 0) return 'keine Antwort von YouTube - Netz oder native Bruecke pruefen';
+    if (list.every(a => a.error)) return 'kein Client kam ueberhaupt durch (Netz/Bruecke)';
+    const status = list.map(a => a.playability).filter(Boolean);
+    if (status.length > 0 && status.every(s => s === 'LOGIN_REQUIRED')) {
+        return 'YouTube stuft die Anfragen als Bot ein - meist sind die Angaben in _YT_CLIENTS veraltet (Wartung: siehe CLAUDE.md, Abschnitt YouTube Import)';
+    }
+    if (status.some(s => s === 'UNPLAYABLE' || s === 'AGE_VERIFICATION_REQUIRED')) {
+        return 'dieses Video ist gesperrt oder altersbeschraenkt - andere Videos sollten weiterhin gehen';
+    }
+    return 'kein Client lieferte abspielbare Daten';
+}
+
 async function _ytExtract(input, opts) {
     const videoId = _ytVideoId(input);
     if (!videoId) return { ok: false, error: 'keine Video-ID erkannt' };
     const pr = await _ytPlayerResponse(videoId, opts && opts.skipClients);
-    if (!pr.ok) return { ok: false, videoId, error: 'kein Client lieferte OK + streamingData', attempts: pr.attempts };
+    if (!pr.ok) return { ok: false, videoId, error: _ytDiagnose(pr.attempts), attempts: pr.attempts };
     const vd = pr.json.videoDetails || {};
     const fmt = _ytPickAudio(pr.json.streamingData);
     if (!fmt) return { ok: false, videoId, client: pr.client, error: 'keine Audio-Formate', attempts: pr.attempts };
@@ -5215,10 +5235,92 @@ async function createNewPlaylistProcess() {
     // geoeffnet werden, ohne dass zwischendurch etwas uebersprungen wurde.
     if (typeof window._renderSkipLog === 'function') window._renderSkipLog();
 
+    // Was in ein Backup gehoert: alles, was NUR hier im Browser existiert und sich nicht aus dem
+    // Server zurueckholen laesst - Sender, Vibe-Mixe, noch nicht synchronisierte Tag-Aenderungen.
+    // Die frueher gesicherten vier Werte (Zustand, Mixe, Sender, Farbe) waren nur ein Bruchteil
+    // davon, und einen Weg zurueck gab es ueberhaupt nicht.
+    //
+    // Bewusst NICHT enthalten:
+    //  - himusic_api_key / himusic_auth: der Master-Schluessel fuer die gesamte API. Eine
+    //    Backup-Datei landet im Download-Ordner und wandert von dort in die Cloud - dort hat er
+    //    nichts verloren.
+    //  - heatbox_playlists_snapshot / heatbox_ps_snapshot: reine Server-Zwischenspeicher, die beim
+    //    naechsten Laden von selbst wiederkommen.
+    //  - himusic_yt_queue: fluechtige Arbeitsliste.
+    //
+    // ACHTUNG: Songs, Playlists und die Audiodateien liegen serverseitig (D1/R2) und sind hier
+    // NICHT enthalten. Dafuer gibt es tools/backup-cloud.js.
+    const BACKUP_KEYS = [
+        'heatbox_state', 'heatbox_stations', 'heatbox_vibe_mixes', 'heatbox_pending_edits',
+        'heatbox_theme_color', 'heatbox_last_playlist', 'heatbox_crossfade',
+        'himusic_main_vibes', 'himusic_skip_log', 'himusic_sync_giveup',
+        'himusic_yt_imported_urls', 'himusic_imported_files_manifest',
+        'himusic_station_pool', 'himusic_station_initial',
+        'himusic_repeat', 'himusic_shuffle', 'himusic_offline', 'himusic_native_player_enabled',
+    ];
+
     document.getElementById('btn-backup-download')?.addEventListener('click', () => {
-        const backupData = { state: JSON.parse(localStorage.getItem('heatbox_state') || '{}'), mixes: JSON.parse(localStorage.getItem('heatbox_vibe_mixes') || '[]'), stations: JSON.parse(localStorage.getItem('heatbox_stations') || '[]'), theme: localStorage.getItem('heatbox_theme_color') || '#fa233b', timestamp: new Date().toISOString() };
-        const blob = new Blob([JSON.stringify(backupData, null, 2)], {type: 'application/json'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `HeaTBox_Backup_${new Date().toISOString().split('T')[0]}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        const keys = {};
+        BACKUP_KEYS.forEach(k => {
+            // Roh als Zeichenkette sichern statt zu parsen: nicht jeder Wert ist JSON (Farbe,
+            // Schalterstellungen), und beim Zurueckschreiben muss ohnehin exakt derselbe Text
+            // wieder herauskommen.
+            const v = localStorage.getItem(k);
+            if (v !== null) keys[k] = v;
+        });
+        const anzahl = Object.keys(keys).length;
+        const blob = new Blob([JSON.stringify({ format: 'himusic-backup', version: 2, timestamp: new Date().toISOString(), keys }, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob); const a = document.createElement('a');
+        a.href = url; a.download = `Himusic_Backup_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        _showToast(`Backup erstellt (${anzahl} Einträge) – Songs und Dateien sind NICHT enthalten`, 5000);
     });
+
+    const restoreRow = document.getElementById('btn-backup-restore');
+    const restoreInput = document.getElementById('backup-restore-input');
+    if (restoreRow && restoreInput) {
+        restoreRow.addEventListener('click', () => restoreInput.click());
+        restoreInput.addEventListener('change', () => {
+            const datei = restoreInput.files && restoreInput.files[0];
+            if (!datei) return;
+            const leser = new FileReader();
+            leser.onload = () => {
+                let daten = null;
+                try { daten = JSON.parse(String(leser.result)); } catch (e) {}
+                if (!daten || typeof daten !== 'object') { _showToast('⚠️ Keine lesbare Backup-Datei'); restoreInput.value = ''; return; }
+
+                // Neues Format und zusaetzlich das alte von vor dem 17.09.2026 - eine bereits
+                // gezogene Sicherung soll nicht wertlos werden, nur weil das Format gewachsen ist.
+                let keys = null;
+                if (daten.format === 'himusic-backup' && daten.keys && typeof daten.keys === 'object') {
+                    keys = daten.keys;
+                } else if (daten.state || daten.mixes || daten.stations || daten.theme) {
+                    keys = {};
+                    if (daten.state !== undefined)    keys['heatbox_state']       = JSON.stringify(daten.state);
+                    if (daten.mixes !== undefined)    keys['heatbox_vibe_mixes']  = JSON.stringify(daten.mixes);
+                    if (daten.stations !== undefined) keys['heatbox_stations']    = JSON.stringify(daten.stations);
+                    if (daten.theme !== undefined)    keys['heatbox_theme_color'] = String(daten.theme);
+                }
+                if (!keys) { _showToast('⚠️ Datei ist kein Himusic-Backup'); restoreInput.value = ''; return; }
+
+                // NUR bekannte Schluessel zurueckschreiben. Eine manipulierte Datei koennte sonst
+                // beliebige Werte in den Speicher legen - allen voran einen untergeschobenen
+                // himusic_api_key, der jede spaetere Anfrage auf einen fremden Server lenkt.
+                const namen = Object.keys(keys).filter(k => BACKUP_KEYS.includes(k));
+                if (namen.length === 0) { _showToast('⚠️ Backup enthält nichts Wiederherstellbares'); restoreInput.value = ''; return; }
+
+                const stand = daten.timestamp ? new Date(daten.timestamp).toLocaleString('de-DE') : 'unbekannt';
+                if (!confirm(`Backup vom ${stand} einspielen?\n\n${namen.length} Einträge werden zurückgeschrieben und überschreiben die aktuellen Sender, Vibe-Mixe und Einstellungen.\n\nSongs und Audiodateien sind nicht betroffen.`)) { restoreInput.value = ''; return; }
+
+                let zurueck = 0;
+                namen.forEach(k => { try { localStorage.setItem(k, String(keys[k])); zurueck++; } catch (e) {} });
+                restoreInput.value = '';
+                _showToast(`${zurueck} Einträge wiederhergestellt – Seite wird neu geladen …`, 3000);
+                setTimeout(() => { try { location.reload(); } catch (e) {} }, 1500);
+            };
+            leser.readAsText(datei);
+        });
+    }
 
     document.getElementById('btn-carplay')?.addEventListener('click', () => { alert("🚗 Apple CarPlay & Android Auto bereit!\n\nVerbinde dein Handy einfach per Kabel oder Bluetooth mit deinem Auto. Da HeaTBox jetzt die native Media-Schnittstelle nutzt, werden Songs, Cover und die Steuerung automatisch auf dein Auto-Display übertragen!"); });
 

@@ -1,5 +1,6 @@
 
 .env
+tools/.env
 .DS_Store
 
 # Claude-Code-Arbeitsdateien: Laufzeit-Locks, lokale Permissions (enthalten

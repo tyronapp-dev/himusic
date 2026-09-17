@@ -80,6 +80,12 @@ Limits: 20 MB per file (`_YT_IMPORT_MAX_BYTES`), 20 songs per run (`_YT_IMPORT_R
 
 The queue is **local only** (`himusic_yt_queue` in localStorage): device state, not a server job list. `himusic_yt_imported_urls` holds the "already imported" history that keeps overlapping playlist dumps from re-downloading the same video.
 
+**Wartung — dieser Weg bricht irgendwann, das ist eingeplant.** `_YT_CLIENTS` enthält fest verdrahtete Angaben (`clientVersion`, `osVersion`, User-Agent), und `_ytVisitorData` zieht `visitorData` per Regex aus einer echten watch-Seite. YouTube kann beides jederzeit ändern. `_ytDiagnose()` unterscheidet deshalb im Fehlertext zwei Fälle, damit man nicht jedes Mal neu sucht:
+- „YouTube stuft die Anfragen als Bot ein" (alle Clients `LOGIN_REQUIRED`) → **systemischer Bruch**: die Client-Angaben sind veraltet. Aktuelle `clientVersion` findet man in den Client-Listen der yt-dlp-Quellen (`yt_dlp/extractor/youtube/_base.py`, `INNERTUBE_CLIENTS`) oder durch Mitlesen einer echten Anfrage. Danach nur die Werte in `_YT_CLIENTS` ersetzen — die Logik drumherum bleibt.
+- „dieses Video ist gesperrt oder altersbeschränkt" → **einzelnes Video**, kein Handlungsbedarf am Code.
+
+Schlägt gar nichts mehr an, hilft der Testknopf in den Einstellungen (`window._ytSpikeTest`): er zeigt pro Client HTTP-Status und Playability-Grund im Diagnosekasten.
+
 **Removed on 2026-09-17:** the earlier server-side import paths — `POST /youtube-queue` polled by `local-import-watcher/watch.js` on a home IP, and the `POST /dispatch-import` → `repository_dispatch` → GitHub Actions fallback (Cobalt instance pool + yt-dlp + `YOUTUBE_COOKIES`). The cookie path had been failing continuously since those cookies expired, and the client-side liveness check kept auto-firing it after 30 s without a watcher. [ADR-009](docs/decisions/ADR-009-cobalt-instance-pool-fallback.md) and [ADR-010](docs/decisions/ADR-010-youtube-import-audio-quality.md) describe that removed pipeline and are marked superseded. The Cloudflare Worker still carries the now-unused `/youtube-queue` and `/dispatch-import` routes and the `GH_PAT` secret — its source is not in this repo.
 
 ### Background metadata sync
@@ -120,9 +126,22 @@ als JSON-String, maximal 25 Einträge.
 **Nie eine `blob:`-URL übergeben.** Offline gecachte Songs spielt die PWA aus IndexedDB
 über `blob:` — solche URLs existieren nur im Browser, der native AVPlayer kann sie nicht
 lesen (solche Songs wären stumm geblieben). `remoteUrl()` schlägt deshalb immer die
-Netz-Adresse nach, notfalls über `window._songIndex`. Folge: gecachte Songs werden nativ
-**gestreamt**. Echtes Offline-Abspielen im Hintergrund braucht einen eigenen nativen
-Datei-Cache — bewusst offen.
+Netz-Adresse nach, notfalls über `window._songIndex`.
+
+**Offline im Hintergrund funktioniert** — die Hülle hat einen **eigenen** nativen Dateicache
+(`AudioFileCache.swift`), unabhängig von der IndexedDB der PWA. `beginPlayback()`
+(`PlayerViewModel.swift`) löst **zuerst** gegen diesen Cache auf (`localFileURL(forId:)`) und
+spielt von Platte; gestreamt wird nur, wenn keine lokale Kopie existiert. Befüllt wird er
+proaktiv über `ensureCachedQueue()` beim Queue-Wechsel und über `ensureCached`/`cacheNow`
+aus dem Web-Code (`_nativeEnsureCached`, u.a. im Hintergrund-Cache-Durchlauf und direkt nach
+einem YouTube-Import).
+
+Folge: Es gibt **zwei getrennte Caches** für dieselben Dateien — IndexedDB für die PWA im
+Vordergrund, der native Dateicache für die Hülle. Das kostet Speicher doppelt, ist aber
+Absicht: der AVPlayer kommt an die IndexedDB nicht heran.
+
+> Bis ~08/2026 stand hier, echtes Offline im Hintergrund sei „bewusst offen". Das war seit
+> ADR-011/013 überholt und wurde am 17.09.2026 gegen den tatsächlichen Code korrigiert.
 
 **Release-Schleife:**
 1. Änderung unter `native-player/` committen und pushen → `.github/workflows/build-native-player.yml`
