@@ -26,7 +26,20 @@ const fs = require('fs');
 const path = require('path');
 
 const API = 'https://api.cloudflare.com/client/v4';
-const TOKEN = (process.env.CF_API_TOKEN || '').trim();
+
+// Token bevorzugt aus tools/.env statt aus der Befehlszeile. Grund: alles, was in einem Terminal
+// oder Chat getippt wird, landet in Verlaeufen und Sitzungs-Mitschriften und ist dort dauerhaft
+// nicht mehr einzufangen. Eine gitignorierte Datei bleibt lokal.
+function tokenLesen() {
+    const envDatei = path.join(__dirname, '.env');
+    if (fs.existsSync(envDatei)) {
+        const treffer = fs.readFileSync(envDatei, 'utf8').match(/^\s*CF_API_TOKEN\s*=\s*(.+)$/m);
+        if (treffer) return treffer[1].trim().replace(/^["']|["']$/g, '');
+    }
+    return (process.env.CF_API_TOKEN || '').trim();
+}
+
+const TOKEN = tokenLesen();
 const NAME = process.argv[2] || null;
 const ZIEL = process.argv[3] || path.join(process.env.USERPROFILE || process.env.HOME || '.', 'himusic-worker-backup');
 
@@ -50,8 +63,9 @@ async function cf(pfad, alsText = false) {
 
 async function main() {
     if (!TOKEN) {
-        console.error('Kein Token. So:');
-        console.error('  CF_API_TOKEN=... node tools/fetch-worker.js');
+        console.error('Kein Token. Bevorzugt in tools/.env hinterlegen (gitignoriert, bleibt lokal):');
+        console.error('  CF_API_TOKEN=dein-token');
+        console.error('Alternativ: CF_API_TOKEN=... node tools/fetch-worker.js');
         console.error('Anlegen unter Cloudflare -> My Profile -> API Tokens, Recht: Account | Workers Scripts | Read');
         process.exit(1);
     }

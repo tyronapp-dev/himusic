@@ -67,15 +67,23 @@ im Cloudflare-Dashboard. Wird sie überschrieben oder das Konto gesperrt, ist si
 dem Gedächtnis nachgebaut werden. Dieses Skript zieht sie heraus, wiederholbar.
 
 ```bash
+# einmalig: Token hinterlegen (tools/.env ist gitignoriert)
+echo "CF_API_TOKEN=dein-token" >> tools/.env
+
 # Worker des Kontos auflisten
-CF_API_TOKEN=... node tools/fetch-worker.js
+node tools/fetch-worker.js
 
 # einen bestimmten sichern
-CF_API_TOKEN=... node tools/fetch-worker.js himusic-api "D:/worker-backup"
+node tools/fetch-worker.js himusic-api "D:/worker-backup"
 ```
 
 Token anlegen: Cloudflare → My Profile → API Tokens → Create Token. Es genügt **Lesen**:
-`Account | Workers Scripts | Read`. Das Skript schreibt nichts nach Cloudflare zurück.
+`Account | Workers Scripts | Read`. Das Skript schreibt nichts nach Cloudflare zurück. Sinnvoll
+sind außerdem eine kurze Gültigkeitsdauer und die Beschränkung auf das eine Konto.
+
+> **Token nirgends eintippen, wo er mitgeschrieben wird** — nicht in einen Chat, nicht in eine
+> Befehlszeile mit Verlauf. Beides landet dauerhaft in Mitschriften. `tools/.env` bleibt lokal und
+> ist von Git ausgeschlossen.
 
 > **Das Ergebnis gehört nicht in dieses Repo.** `tyronapp-dev/himusic` ist öffentlich, der Worker
 > enthält die Zugriffslogik. Standardziel ist deshalb ein Ordner außerhalb — von dort in ein
