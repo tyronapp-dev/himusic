@@ -1238,6 +1238,12 @@ window._applyNativeNowPlaying = function(payload) {
     if (istSongwechsel) {
         window._durationIsFromNative = false;
         window.currentSongDuration = (song && song.duration) ? song.duration : 0;
+        // MUSS hier stehen, nicht erst im zweiten istSongwechsel-Block weiter unten: der
+        // payload.d-Block direkt darunter kann _flushPendingScrub() noch in DIESEM Aufruf
+        // ausloesen. Stuende die Loeschung erst spaeter, wuerde ein fuer den VORIGEN Song
+        // zurueckgehaltener Sprung faelschlich mit der Dauer des NEUEN Songs berechnet und
+        // abgesetzt, bevor er ueberhaupt geloescht wird - im Test genau so beobachtet.
+        window._pendingScrubPercent = null;
     }
 
     // Gemessene Dauer, sobald die Huelle sie kennt (0 = steht noch nicht fest). Sie hat immer
@@ -1246,6 +1252,10 @@ window._applyNativeNowPlaying = function(payload) {
     if (payload.d && payload.d > 0) {
         window.currentSongDuration = payload.d;
         window._durationIsFromNative = true;
+        // Ein waehrend der Ungewissheit zurueckgehaltener Zeitleisten-Sprung (siehe
+        // _flushPendingScrub) darf jetzt nachgeholt werden - erst jetzt steht die echte Dauer
+        // fuer DIESEN Song fest.
+        window._flushPendingScrub?.();
     }
 
     if (istSongwechsel) {
@@ -1274,6 +1284,10 @@ window._applyNativeNowPlaying = function(payload) {
 // angekommen und die Sperre faellt sofort (nicht erst nach Ablauf der Frist).
 window._seekTargetSeconds = null;
 window._seekGuardUntil = 0;
+// Siehe _flushPendingScrub (initApp): Prozent-Position eines Zeitleisten-Sprungs, der auf die
+// erste verlaessliche Dauer wartet. Explizit auf null statt undefined - die Pruefung dort lautet
+// "!== null" und wuerde bei undefined faelschlich einen ausstehenden Sprung annehmen.
+window._pendingScrubPercent = null;
 
 window._applyNativeProgress = function(current, duration) {
     // Echte Songdauer vom nativen Player. Sie hat IMMER Vorrang vor dem Datenbankwert und
@@ -1281,8 +1295,13 @@ window._applyNativeProgress = function(current, duration) {
     // _applyNativeNowPlaying): der Player misst die Datei, die Datenbank hat nur, was beim
     // Import in den Metadaten stand. Weicht das ab, springt die Zeitleiste systematisch daneben.
     if (duration && isFinite(duration) && duration > 0) {
+        const warVorherUnbekannt = !window._durationIsFromNative;
         window.currentSongDuration = duration;
         window._durationIsFromNative = true;
+        // Trifft der erste echte Tick hier ein statt ueber _applyNativeNowPlaying (z.B. wenn
+        // der grosse Player schon offen ist, bevor der Songwechsel-Push durch war) - derselbe
+        // Nachholbedarf wie dort.
+        if (warVorherUnbekannt) window._flushPendingScrub?.();
     }
 
     if (window._seekTargetSeconds !== null) {
@@ -2891,6 +2910,9 @@ let _bgCacheActive = false;
             // ist das kurz leer, bevor der erste Tick ankommt - Ziehen auf der Leiste tat in
             // diesem Fenster einfach nichts (dieser Fallback hat sofort eine brauchbare Dauer,
             // sobald die Bibliothek geladen ist, ohne auf den nativen Tick warten zu muessen).
+            // NUR fuer die Anzeige waehrend des Ziehens gedacht - fuer den tatsaechlichen Sprung
+            // beim Loslassen zaehlt _durationIstVerlaesslich() weiter unten, die DB-Naeherung
+            // wird dafuer NICHT mehr genutzt (siehe seekTo).
             let duration = audioPlayer.duration || window.currentSongDuration || window.currentSongData?.duration;
             if (!duration || !isFinite(duration) || duration <= 0) return null;
             const rect = progressContainer.getBoundingClientRect();
@@ -2901,14 +2923,25 @@ let _bgCacheActive = false;
             percent = Math.max(0, Math.min(1, percent));
             const newTime = percent * duration;
             updateTimeUI(newTime, duration);
-            return newTime;
+            return { time: newTime, percent };
         };
+
+        // Ist die aktuell bekannte Dauer verlaesslich genug, um einen ABSOLUTEN Sprung darauf zu
+        // berechnen? Im Browser/PWA ja immer (audioPlayer.duration ist die echte, dekodierte
+        // Laenge). In der Huelle erst, sobald der native Player seine gemessene Dauer gemeldet
+        // hat (_durationIsFromNative) - vorher ist window.currentSongDuration nur der
+        // Datenbank-Naeherungswert (bei YouTube-Importen: YouTubes auf ganze Sekunden gerundete
+        // lengthSeconds, nicht die tatsaechliche Laenge der remuxten Datei). Rechnete man die
+        // Tipp-Position gegen diesen Naeherungswert um UND sprang direkt, landete der Sprung
+        // systematisch neben der beruehrten Stelle - kleiner, aber jedes Mal falscher Versatz,
+        // genau je nachdem ob der erste native Tick bei diesem Tipp schon da war oder nicht.
+        const _durationIstVerlaesslich = () => !!audioPlayer.duration || !!window._durationIsFromNative;
+
         // Beim Loslassen: in der Huelle absolut ueber die Bruecke springen (das lokale
         // <audio> ist dort inert - ein currentTime-Schubs daran bewegte den echten
         // AVPlayer nicht, die Anzeige sprang deshalb kurz zur gezogenen Stelle und dann
         // beim naechsten Sekunden-Push (_applyNativeProgress) wieder zurueck).
-        const seekTo = (seconds) => {
-            if (seconds === null) return;
+        const _commitNativeSeek = (seconds) => {
             const b = _nativeBridge();
             if (b) {
                 // Bis der Sprung nativ greift, haben die Sekunden-Pushes noch den alten Stand
@@ -2920,22 +2953,51 @@ let _bgCacheActive = false;
             }
             audioPlayer.currentTime = seconds;
         };
+
+        // seconds wird nur genutzt, wenn die Dauer schon verlaesslich ist. Sonst wird NUR die
+        // Prozent-Position gemerkt (window._pendingScrubPercent) und der Sprung nachgeholt,
+        // sobald _flushPendingScrub() (siehe _applyNativeNowPlaying/_applyNativeProgress) die
+        // echte Dauer bekommt - meist binnen des naechsten Sekundentakts, aber dann IMMER an der
+        // tatsaechlich beruehrten Stelle statt "ungefaehr".
+        const seekTo = (seconds, percent) => {
+            if (seconds === null) return;
+            if (_nativeBridge() && !_durationIstVerlaesslich()) {
+                window._pendingScrubPercent = percent;
+                return;
+            }
+            _commitNativeSeek(seconds);
+        };
+        // Auf window, weil _applyNativeNowPlaying/_applyNativeProgress ausserhalb dieses
+        // initApp-Scopes liegen (gleiches Muster wie window.updateTimeUI oben). Wird aufgerufen,
+        // sobald die Dauer fuer den AKTUELLEN Song zum ersten Mal verlaesslich feststeht.
+        window._flushPendingScrub = function() {
+            if (window._pendingScrubPercent === null) return;
+            const duration = window.currentSongDuration;
+            if (!duration || !isFinite(duration) || duration <= 0) return;
+            const seconds = window._pendingScrubPercent * duration;
+            window._pendingScrubPercent = null;
+            _commitNativeSeek(seconds);
+        };
         // Letzte Position aus dem Ziehen. Bei touchcancel liefert iOS keine verlaesslichen
         // Koordinaten mehr - dann gilt die zuletzt gesehene Stelle, statt den Sprung
         // wegzuwerfen. Der Finger war ja dort.
         let lastScrubSeconds = null;
+        let lastScrubPercent = null;
 
         const trackScrub = (e) => {
-            const t = handleScrub(e);
-            if (t !== null) lastScrubSeconds = t;
-            return t;
+            const r = handleScrub(e);
+            if (r !== null) { lastScrubSeconds = r.time; lastScrubPercent = r.percent; }
+            return r;
         };
         const endScrub = (e) => {
             if (!isDraggingTime) return;
             isDraggingTime = false;
-            const ziel = trackScrub(e);
-            seekTo(ziel !== null ? ziel : lastScrubSeconds);
+            const r = trackScrub(e);
+            const seconds = r !== null ? r.time : lastScrubSeconds;
+            const percent  = r !== null ? r.percent : lastScrubPercent;
+            seekTo(seconds, percent);
             lastScrubSeconds = null;
+            lastScrubPercent = null;
         };
         // stopPropagation ueberall: der Grossplayer hat einen eigenen Wisch-Handler (Schliessen
         // nach unten). Ohne das bekam er jedes Ziehen auf der Leiste mit ab. Bis eben hing dort
