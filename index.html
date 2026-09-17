@@ -848,8 +848,18 @@
 
     <audio id="main-audio-player" playsinline webkit-playsinline x-webkit-airplay="allow" preload="auto"></audio>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+<!-- Feste Version + integrity-Hash: beide Skripte laufen mit vollem DOM-Zugriff und koennten
+     damit den API-Schluessel aus localStorage lesen. Ohne Hash haette ein veraendertes
+     CDN-Release freie Hand; mit Hash weigert sich der Browser, abweichende Bytes auszufuehren.
+     sortablejs stand vorher auf @latest - jedes kuenftige Release waere ungeprueft gelaufen.
+     Beim Aktualisieren MUSS der Hash neu erzeugt werden:
+     curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"
+            integrity="sha384-JpTt7qxVx1X/pHeYiCfqFdKRu2HF1MBGr1kEXtbNIGwwryGWMbbW78onU3bdkAHZ"
+            crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.7/Sortable.min.js"
+            integrity="sha384-DgmC6Xe2bSN2WjTDXzWYbUbxyhNP+NNkGDR/g78pCXV7E7rcVTGxVg0uIVCUUcBc"
+            crossorigin="anonymous"></script>
     <script src="config.js"></script> 
     <script type="module" src="app2.js"></script>
     

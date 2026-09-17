@@ -1,7 +1,7 @@
 // Himusic Cloud - Service Worker v1.0
 // Komplett optimiert für das neue Cloudflare / Firebase Setup
 
-const CACHE_NAME  = 'himusic-app-shell-v1.81';
+const CACHE_NAME  = 'himusic-app-shell-v1.82';
 const COVER_CACHE = 'himusic-covers-v1';
 const AUDIO_CACHE = 'himusic-audio-v1';
 
@@ -19,7 +19,9 @@ const APP_SHELL = [
     './icon-180.png',
     './icon-192.png',
     './icon-512.png',
-    'https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js'
+    // Muss exakt der URL in index.html entsprechen, sonst cacht der Worker eine Datei, die
+    // nie angefragt wird (stand auf 1.15.0, die Seite lud @latest).
+    'https://cdn.jsdelivr.net/npm/sortablejs@1.15.7/Sortable.min.js'
 ];
 
 // ──────────────────────────────────────────────────────────

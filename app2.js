@@ -150,6 +150,17 @@ function _esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Fuer Cover-URLs, die in style="background-image:url('…')" INNERHALB eines innerHTML-Strings
+// landen. _esc() genuegt dort NICHT: es macht aus ' ein &#39;, das der HTML-Parser im Attribut
+// wieder zu ' aufloest - die CSS-Zeichenkette waere beendet und das Attribut verlassbar. Deshalb
+// die Zeichen entfernen, mit denen man dort ausbrechen kann. Echte Cover-Quellen (mzstatic-,
+// scdn-, ytimg-URLs, eigene data:-URLs aus dem Canvas) enthalten keines davon.
+// Nur noetig beim Weg ueber innerHTML - wo direkt element.style.backgroundImage gesetzt wird,
+// parst niemand HTML und es gibt nichts auszubrechen.
+function _cssUrl(u) {
+    return String(u ?? '').replace(/["'()\\<>\s]/g, '');
+}
+
 // Hauptvibes markieren, welche Vibes eines Songs die STÄRKSTEN/wichtigsten sind (z.B. bei einem
 // Song, der zu mehreren Stimmungen passt). Schneller lokaler Cache in localStorage (songId ->
 // Vibe-Liste) - die eigentliche Persistenz laeuft ueber den "*"-Marker im vibes-Feld selbst
@@ -2480,6 +2491,21 @@ let _bgCacheActive = false;
     let _bgCacheQueue = [];
     let _bgActiveCount = 0;
 
+    // _refreshOfflineLabel liest jedes Mal die komplette IndexedDB-Schluesselliste und filtert
+    // die ganze Bibliothek - fuer eine blosse Zahl im Knopftext. Der Hintergrund-Cache rief das
+    // PRO SONG auf, bei tausenden Songs also tausende Vollabfragen auf dem Hauptthread, parallel
+    // zur Wiedergabe. Hier deshalb gedrosselt; am Ende des Durchlaufs folgt ein garantierter
+    // Aufruf, damit die Zahl am Schluss trotzdem stimmt. Die direkten Aufrufer (Knopfdruck,
+    // Sichtbarkeitswechsel) nutzen weiterhin window._refreshOfflineLabel und bleiben sofort.
+    let _offlineLabelTimer = null;
+    function _refreshOfflineLabelThrottled() {
+        if (_offlineLabelTimer) return;
+        _offlineLabelTimer = setTimeout(() => {
+            _offlineLabelTimer = null;
+            window._refreshOfflineLabel?.();
+        }, 2000);
+    }
+
     function startBackgroundCacheQueue(songs) {
         const newUrls = songs.filter(s => s.file_url).map(s => s.file_url);
         const existing = new Set(_bgCacheQueue);
@@ -2510,7 +2536,7 @@ let _bgCacheActive = false;
                 const url = _bgCacheQueue.shift();
                 await downloadToLocal(url, '').catch(() => {});
                 _nativeEnsureCached(url);
-                window._refreshOfflineLabel?.();
+                _refreshOfflineLabelThrottled();
                 _bgActiveCount--;
                 await new Promise(r => setTimeout(r, 100));
             }
@@ -2518,7 +2544,13 @@ let _bgCacheActive = false;
 
         setTimeout(() => {
             const lanes = Array.from({ length: PARALLEL_IDLE }, () => lane());
-            Promise.all(lanes).finally(() => { _bgCacheActive = false; });
+            Promise.all(lanes).finally(() => {
+                _bgCacheActive = false;
+                // Garantierter Abschluss-Aufruf: der gedrosselte Zaehler oben kann sonst mit einem
+                // veralteten Stand stehenbleiben, wenn der letzte Song in die Drosselpause faellt.
+                if (_offlineLabelTimer) { clearTimeout(_offlineLabelTimer); _offlineLabelTimer = null; }
+                window._refreshOfflineLabel?.();
+            });
         }, 5000);
     }
 
@@ -3174,7 +3206,7 @@ let _bgCacheActive = false;
         const hasVibes = _parseVibes(song.vibes).length > 0;
         const noVibesDotHtml = hasVibes ? '' : '<span class="no-vibes-dot"></span>';
         let coverHtml = '';
-        if (song.cover_data && song.cover_data.length > 10) { coverHtml = `<div class="song-cover" style="background-image: url('${song.cover_data}'); background-size: cover; background-position: center; border-radius: 6px;">${noVibesDotHtml}</div>`; }
+        if (song.cover_data && song.cover_data.length > 10) { coverHtml = `<div class="song-cover" style="background-image: url('${_cssUrl(song.cover_data)}'); background-size: cover; background-position: center; border-radius: 6px;">${noVibesDotHtml}</div>`; }
         else { const hue = Math.floor(Math.random() * 360); coverHtml = `<div class="song-cover" style="background: hsl(${hue}, 70%, 50%); display:flex; justify-content:center; align-items:center; border-radius: 6px;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="2"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>${noVibesDotHtml}</div>`; }
 
         songDiv.innerHTML = `
@@ -4066,7 +4098,15 @@ let _bgCacheActive = false;
             if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
             if (typeof window.updateAppStats === 'function') window.updateAppStats();
             _renderPlaylistsUI(playlists, allPlaylistSongs);
-        } catch (error) { } finally { _fetchPlaylistsRunning = false; }
+        } catch (error) {
+            // Vorher wurde der Fehler vollstaendig verschluckt: schlug die Aktualisierung fehl,
+            // blieb kommentarlos der oben gerenderte Zwischenspeicher-Stand stehen - von aussen
+            // nicht unterscheidbar, ob die Liste aktuell oder tagealt ist. Sichtbar gemeldet wird
+            // nur bei einer bewusst angestossenen Aktualisierung (force), sonst wuerde jeder
+            // automatische Lauf ohne Netz eine Meldung werfen.
+            console.warn('[playlists] Aktualisierung fehlgeschlagen:', error);
+            if (force) _showToast('⚠️ Playlists nicht aktualisiert – Stand aus dem Zwischenspeicher', 3000);
+        } finally { _fetchPlaylistsRunning = false; }
     };
 
     function _renderPlaylistsUI(playlists, allPlaylistSongs) {
@@ -4081,7 +4121,7 @@ let _bgCacheActive = false;
             else {
                 playlists.forEach(playlist => {
                     const pDiv = document.createElement('div'); pDiv.className = 'song-item'; pDiv.dataset.id = playlist.id;
-                    let bgStyle = playlist.cover_data && playlist.cover_data.length > 10 ? `background-image: url('${playlist.cover_data}'); background-size: cover; background-position: center;` : `background: hsl(${Math.floor(Math.random() * 360)}, 40%, 30%); display:flex; justify-content:center; align-items:center;`;
+                    let bgStyle = playlist.cover_data && playlist.cover_data.length > 10 ? `background-image: url('${_cssUrl(playlist.cover_data)}'); background-size: cover; background-position: center;` : `background: hsl(${Math.floor(Math.random() * 360)}, 40%, 30%); display:flex; justify-content:center; align-items:center;`;
                     let innerSvg = playlist.cover_data && playlist.cover_data.length > 10 ? '' : `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>`;
 
                     let coverHtml = `<div class="song-cover" style="${bgStyle} border-radius: 6px;">${innerSvg}</div>`;
@@ -4369,7 +4409,7 @@ async function createNewPlaylistProcess() {
             const rp = window.globalPlaylistsData.find(p => p.id == recentId);
             if (rp) {
                 recentContainer.innerHTML = ''; const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = rp.id; 
-                const bgImage = rp.cover_data && rp.cover_data.length > 10 ? `url('${rp.cover_data}')` : '';
+                const bgImage = rp.cover_data && rp.cover_data.length > 10 ? `url('${_cssUrl(rp.cover_data)}')` : '';
                 card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};"><button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(rp.name)}</div>`;
                 const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => window.togglePlaylistPlayback(e, rp.id));
                 card.addEventListener('click', () => window.openPlaylistDetails(rp.id, rp.name)); recentContainer.appendChild(card);
@@ -4390,7 +4430,7 @@ async function createNewPlaylistProcess() {
             else {
                 mixContainer.innerHTML = '';
                 mixes.forEach(mix => {
-                    const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = mix.id; const bgImage = mix.cover_data && mix.cover_data.length > 10 ? `url('${mix.cover_data}')` : '';
+                    const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = mix.id; const bgImage = mix.cover_data && mix.cover_data.length > 10 ? `url('${_cssUrl(mix.cover_data)}')` : '';
                     const pinBadge = mix.pinned ? '<div class="pin-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg></div>' : '';
                     card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};">${pinBadge}<button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(mix.name)}</div>`;
                     const playBtn = card.querySelector('.cover-play-btn'); if (playBtn) playBtn.addEventListener('click', (e) => { const shuffled = _shuffle([..._getStationLikeSongs(mix)]); window.togglePlaylistPlayback(e, mix.id, shuffled); });
@@ -4409,7 +4449,7 @@ async function createNewPlaylistProcess() {
             else {
                 stationsContainer.innerHTML = '';
                 stations.forEach(station => {
-                    const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = station.id; const bgImage = station.cover_data && station.cover_data.length > 10 ? `url('${station.cover_data}')` : '';
+                    const card = document.createElement('div'); card.className = 'station-card'; card.dataset.id = station.id; const bgImage = station.cover_data && station.cover_data.length > 10 ? `url('${_cssUrl(station.cover_data)}')` : '';
                     const pinBadge = station.pinned ? '<div class="pin-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg></div>' : '';
                     card.innerHTML = `<div class="station-cover" style="background-image: ${bgImage};">${pinBadge}<button class="cover-play-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button></div><div class="station-title">${_esc(station.name)}</div>`;
                     // _getStationLikeSongs deckt beide Formate ab: neue Sender speichern songIds,
