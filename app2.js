@@ -489,8 +489,13 @@ async function _ytPlayerResponse(videoId, skipClients) {
         try {
             let { res, json } = await callClient(c, false);
             let status = json && json.playabilityStatus && json.playabilityStatus.status;
-            // VISIONOS mit abgelaufenem/geflaggtem visitorData -> einmal frisch holen, neu versuchen.
-            if (c.needsVisitor && status === 'LOGIN_REQUIRED') {
+            // VISIONOS mit abgelaufenem/geflaggtem visitorData -> frisch holen, neu versuchen.
+            // Bis zu zwei erzwungene Neuversuche statt nur einem: ein druckfrisch gescrapptes
+            // visitorData wird gerade beim ALLERERSTEN Import einer Session ueberdurchschnittlich
+            // oft selbst wieder als Bot geflaggt (siehe Vorwaermung weiter unten in initApp) - ein
+            // einzelner Neuversuch traf da oft wieder denselben Zustand. Kostet im Erfolgsfall
+            // nichts zusaetzlich (die Schleife bricht sofort ab, sobald OK kommt).
+            for (let versuch = 0; c.needsVisitor && status === 'LOGIN_REQUIRED' && versuch < 2; versuch++) {
                 ({ res, json } = await callClient(c, true));
                 status = json && json.playabilityStatus && json.playabilityStatus.status;
             }
@@ -5265,6 +5270,23 @@ async function createNewPlaylistProcess() {
                 } catch (e2) { done(false); }
             }
         });
+
+        // VisitorData-Vorwaermung: "im Player-Request muss ein visitorData aus einer ECHTEN
+        // watch-Seite stehen - ein frisch gebootstripptes visitorData wird als Bot geflaggt"
+        // (siehe Kommentar bei _YT_CLIENTS). Genau das traf bisher JEDEN ersten Import einer
+        // Session: _ytVisitor.data startet leer, das allererste _ytPlayerResponse musste also
+        // live scrapen UND im selben Atemzug damit die sensible Player-Anfrage stellen - dieser
+        // druckfrische Wert wurde ueberdurchschnittlich oft abgelehnt (LOGIN_REQUIRED). Ein
+        // zweiter/dritter manueller Druck auf "jetzt importieren" half nur zufaellig, weil dann
+        // schon einmal ein Wert im Cache lag. Hier wird der Scrape deshalb schon beim Oeffnen der
+        // App angestossen, still im Hintergrund - bis der Nutzer tatsaechlich einen Link einfuegt
+        // und importiert, ist der Wert dann keine Millisekunden, sondern Sekunden bis Minuten alt.
+        // Nur in der Huelle sinnvoll (_ytVisitorData geht ausschliesslich ueber die native
+        // Bruecke); Fehlschlag wird bewusst verschluckt - der naechste echte Importversuch holt
+        // es ohnehin ganz normal nach, das hier ist nur ein Vorsprung, keine Voraussetzung.
+        if (window.__himusicNativeShell && typeof _ytVisitorData === 'function') {
+            setTimeout(() => { _ytVisitorData().catch(() => {}); }, 1500);
+        }
 
         // Phase 1: In-App-Import. Knopf sichtbar machen + verdrahten, plus automatisch
         // anstossen, wenn himusic geoeffnet/sichtbar wird und etwas in der Warteschlange
