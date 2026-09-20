@@ -354,8 +354,14 @@ function _bytesToB64(bytes) {
 }
 
 async function _nativeExtractAudio(file) {
-    const b = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicMedia;
-    if (!b) throw new Error('himusicMedia-Bruecke fehlt (nur in der App-Huelle, neue IPA noetig)');
+    // Laeuft ueber himusicHttp statt einem eigenen Kanal - ein separat registrierter
+    // "himusicMedia"-Kanal war am echten Geraet nicht erreichbar (window.webkit.messageHandlers.
+    // himusicMedia blieb undefined, trotz identischer Registrierung wie bei himusicHttp und
+    // gruenem CI-Build; Ursache ohne Device-Debugger nicht geklaert). himusicHttp ist der
+    // einzige Kanal, der auf einem echten Geraet nachweislich funktioniert (YouTube-Import
+    // laeuft darueber) - _ytExtract/_nativeHttp nutzen genau dieselbe Bruecke.
+    const b = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicHttp;
+    if (!b) throw new Error('himusicHttp-Bruecke fehlt (nur in der App-Huelle, neue IPA noetig)');
     if (file.size > _VIDEO_EXTRACT_MAX_BYTES) {
         throw new Error(`Video zu gross fuer Audio-Extraktion (${Math.round(file.size / 1048576)} MB, Grenze ${_VIDEO_EXTRACT_MAX_BYTES / 1048576} MB) - bitte kuerzeres/komprimiertes Video waehlen`);
     }

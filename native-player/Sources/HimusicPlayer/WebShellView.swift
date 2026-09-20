@@ -76,12 +76,14 @@ struct WebShellView: UIViewRepresentable {
         // der dumme Kanal. Streng auf YouTube-/Google-Video-Hosts begrenzt (siehe Coordinator),
         // damit daraus kein offener Proxy wird.
         controller.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "himusicHttp")
-
-        // Request/Response-Kanal fuer die native Audio-Extraktion (siehe AudioExtractor.swift):
-        // JS schickt ein per Datei-Auswahl geladenes Video als Base64 rein, bekommt die
-        // extrahierte Audiospur als Base64 zurueck. Rein lokal, keine Netzwerkanfrage - anders
-        // als himusicHttp braucht dieser Kanal also keine Host-Allowlist.
-        controller.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "himusicMedia")
+        // Die Audio-Extraktion (AudioExtractor.swift) laeuft UEBER DENSELBEN Kanal, per
+        // cmd:"extractAudio" statt einer url (siehe didReceive unten) - bewusst kein eigener
+        // zweiter addScriptMessageHandler-Kanal. Ein frueher Versuch mit einem separaten
+        // "himusicMedia"-Kanal war am Geraet nicht erreichbar (window.webkit.messageHandlers.
+        // himusicMedia blieb undefined, Ursache nie geklaert - ohne Device-Debugger von hier aus
+        // nicht diagnostizierbar). himusicHttp ist der einzige Kanal, der auf einem echten
+        // Geraet nachweislich funktioniert (YouTube-Import laeuft darueber) - daran haengen
+        // spart die ganze Unsicherheit, ob ein zweiter Kanal ueberhaupt zuverlaessig registriert.
 
         // Marker fuer app2.js: laeuft die Seite in der Huelle, geht Wiedergabe immer
         // nativ - unabhaengig vom Schalter in den Einstellungen, der nur den alten
@@ -298,17 +300,20 @@ struct WebShellView: UIViewRepresentable {
             }
         }
 
-        // MARK: - himusicHttp: Request/Response fuer die YouTube-Extraktion (siehe makeUIView)
+        // MARK: - himusicHttp: Request/Response fuer YouTube-Extraktion UND Audio-Extraktion
+        // (cmd:"extractAudio", siehe handleMediaMessage) - ein Kanal, zwei Zwecke, siehe makeUIView.
 
         func userContentController(
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage,
             replyHandler: @escaping (Any?, String?) -> Void
         ) {
-            guard message.name == "himusicHttp" || message.name == "himusicMedia" else {
-                replyHandler(nil, "unbekannter Kanal"); return
-            }
-            if message.name == "himusicMedia" {
+            guard message.name == "himusicHttp" else { replyHandler(nil, "unbekannter Kanal"); return }
+            // Audio-Extraktion (AudioExtractor.swift) laeuft ueber denselben Kanal wie die
+            // YouTube-Anfragen, unterschieden per cmd statt einer eigenen Kanal-Registrierung
+            // (siehe Kommentar bei makeUIView) - deshalb hier VOR der url-Pruefung abzweigen,
+            // eine Extraktionsanfrage hat keine url.
+            if let body = message.body as? [String: Any], body["cmd"] as? String == "extractAudio" {
                 handleMediaMessage(message, replyHandler: replyHandler)
                 return
             }
