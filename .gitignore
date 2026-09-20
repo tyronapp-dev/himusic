@@ -1,6 +1,10 @@
 
 .env
 tools/.env
+# Breiter als nur "tools/.env": ein falsch benanntes tools/.env.txt (Editor haengt die Endung
+# gern automatisch an) stand einmal unversioniert und ungeschuetzt im Arbeitsverzeichnis, weil
+# die schmale Regel oben nur den exakten Namen traf - .env* deckt jede Variante ab.
+tools/.env*
 .DS_Store
 
 # Claude-Code-Arbeitsdateien: Laufzeit-Locks, lokale Permissions (enthalten

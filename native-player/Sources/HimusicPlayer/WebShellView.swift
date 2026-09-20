@@ -77,6 +77,12 @@ struct WebShellView: UIViewRepresentable {
         // damit daraus kein offener Proxy wird.
         controller.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "himusicHttp")
 
+        // Request/Response-Kanal fuer die native Audio-Extraktion (siehe AudioExtractor.swift):
+        // JS schickt ein per Datei-Auswahl geladenes Video als Base64 rein, bekommt die
+        // extrahierte Audiospur als Base64 zurueck. Rein lokal, keine Netzwerkanfrage - anders
+        // als himusicHttp braucht dieser Kanal also keine Host-Allowlist.
+        controller.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "himusicMedia")
+
         // Marker fuer app2.js: laeuft die Seite in der Huelle, geht Wiedergabe immer
         // nativ - unabhaengig vom Schalter in den Einstellungen, der nur den alten
         // Weg aus Safari betraf. atDocumentStart, damit er vor app2.js gesetzt ist.
@@ -299,7 +305,13 @@ struct WebShellView: UIViewRepresentable {
             didReceive message: WKScriptMessage,
             replyHandler: @escaping (Any?, String?) -> Void
         ) {
-            guard message.name == "himusicHttp" else { replyHandler(nil, "unbekannter Kanal"); return }
+            guard message.name == "himusicHttp" || message.name == "himusicMedia" else {
+                replyHandler(nil, "unbekannter Kanal"); return
+            }
+            if message.name == "himusicMedia" {
+                handleMediaMessage(message, replyHandler: replyHandler)
+                return
+            }
             guard let body = message.body as? [String: Any],
                   let urlStr = body["url"] as? String,
                   let url = URL(string: urlStr) else {
@@ -344,6 +356,38 @@ struct WebShellView: UIViewRepresentable {
                 DispatchQueue.main.async { replyHandler(reply, nil) }
             }
             task.resume()
+        }
+
+        // MARK: - himusicMedia: Audio-Extraktion aus einer per Datei-Auswahl geladenen Video-
+        // /Audiodatei (siehe AudioExtractor.swift). JS schickt einmalig die kompletten Bytes als
+        // Base64 - kein Streaming/Chunking, daher die Groessengrenze in AudioExtractor selbst.
+        private func handleMediaMessage(
+            _ message: WKScriptMessage,
+            replyHandler: @escaping (Any?, String?) -> Void
+        ) {
+            guard let body = message.body as? [String: Any],
+                  let cmd = body["cmd"] as? String, cmd == "extractAudio",
+                  let dataBase64 = body["dataBase64"] as? String,
+                  let inputData = Data(base64Encoded: dataBase64) else {
+                replyHandler(["ok": false, "error": "ungueltige Anfrage"], nil); return
+            }
+            let ext = (body["extension"] as? String) ?? ""
+
+            Task {
+                do {
+                    let result = try await AudioExtractor.extractAudio(from: inputData, suggestedExtension: ext)
+                    let reply: [String: Any] = [
+                        "ok": true,
+                        "dataBase64": result.data.base64EncodedString(),
+                        "durationSeconds": result.durationSeconds,
+                        "byteLength": result.data.count
+                    ]
+                    await MainActor.run { replyHandler(reply, nil) }
+                } catch {
+                    let reply: [String: Any] = ["ok": false, "error": error.localizedDescription]
+                    await MainActor.run { replyHandler(reply, nil) }
+                }
+            }
         }
 
         /// Behebt "App zeigt trotz frisch ausgeliefertem Code den alten Stand" (siehe Session

@@ -88,3 +88,23 @@ sind außerdem eine kurze Gültigkeitsdauer und die Beschränkung auf das eine K
 > **Das Ergebnis gehört nicht in dieses Repo.** `tyronapp-dev/himusic` ist öffentlich, der Worker
 > enthält die Zugriffslogik. Standardziel ist deshalb ein Ordner außerhalb — von dort in ein
 > **privates** Repo committen.
+
+---
+
+## rotate-api-key.js — API_KEY erneuern, ohne den Wert je zu sehen
+
+Setzt einen neuen, zufälligen Wert für `API_KEY` im Worker. Sinnvoll, wenn der bisherige Wert
+irgendwo sichtbar geworden ist (z. B. versehentlich in einen Chat oder ein Terminal-Log getippt)
+und deshalb als kompromittiert gilt.
+
+```bash
+node tools/rotate-api-key.js
+```
+
+Braucht `CF_API_TOKEN` in `tools/.env` mit `Account | Workers Scripts | Edit` (nicht nur Lesen,
+wie bei `fetch-worker.js` — hier wird tatsächlich geschrieben).
+
+Der neue Wert wird **im Skript erzeugt und nirgends ausgegeben** — nicht im Terminal, nicht in
+einer Datei. Du musst ihn nie selbst sehen oder abtippen: `POST /auth/login` gibt ihn beim
+nächsten Einloggen automatisch zurück. Auf dem Gerät reicht danach ein einmaliges Aus- und
+wieder Einloggen mit dem `LOGIN_PASSWORD`.

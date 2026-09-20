@@ -330,6 +330,42 @@ async function _nativeHttp(method, url, opts) {
     if (!res || !res.ok) throw new Error('nativer HTTP-Fehler: ' + ((res && res.error) || 'unbekannt'));
     return res; // { ok, status, headers:{lowercased}, bodyBase64, bodyLength }
 }
+
+// ── AUDIO-EXTRAKTION AUS VIDEO (Foto-/Datei-Import) ────────────────────────────
+// Ziel: waehlt der Nutzer ein Video (Photo-Library/Dateien), landet nicht das ganze Video als
+// "Song" in der Bibliothek, sondern nur seine Audiospur. AVFoundation macht die eigentliche
+// Arbeit nativ (WebShellView.swift/AudioExtractor.swift) - anders als beim YouTube-Import gibt
+// es hier kein eigenes JS-Remuxing, weil beliebige Videoformate (HEVC/.mov, H.264/.mp4, ...)
+// vom iPhone kommen koennen, nicht nur YouTubes eine bekannte Form.
+
+// Deckt sich mit AudioExtractor.maxInputBytes (Swift) - hier vorab pruefen, damit ein zu grosses
+// Video nicht erst komplett eingelesen/base64-codiert wird, bevor die Bruecke es ohnehin ablehnt.
+const _VIDEO_EXTRACT_MAX_BYTES = 300 * 1024 * 1024;
+
+// Encoded ein grosses Uint8Array in Bloecken zu Base64 - String.fromCharCode.apply(null, bytes)
+// direkt auf ein 100+ MB grosses Array gesprengt den Call-Stack, deshalb in 32-KB-Haeppchen.
+function _bytesToB64(bytes) {
+    const CHUNK = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
+}
+
+async function _nativeExtractAudio(file) {
+    const b = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicMedia;
+    if (!b) throw new Error('himusicMedia-Bruecke fehlt (nur in der App-Huelle, neue IPA noetig)');
+    if (file.size > _VIDEO_EXTRACT_MAX_BYTES) {
+        throw new Error(`Video zu gross fuer Audio-Extraktion (${Math.round(file.size / 1048576)} MB, Grenze ${_VIDEO_EXTRACT_MAX_BYTES / 1048576} MB) - bitte kuerzeres/komprimiertes Video waehlen`);
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const dataBase64 = _bytesToB64(bytes);
+    const ext = (file.name.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const res = await b.postMessage({ cmd: 'extractAudio', dataBase64, extension: ext });
+    if (!res || !res.ok) throw new Error('Audio-Extraktion fehlgeschlagen: ' + ((res && res.error) || 'unbekannt'));
+    return { bytes: _b64ToBytes(res.dataBase64), durationSeconds: res.durationSeconds || 0 };
+}
 function _b64ToBytes(b64) {
     const bin = atob(b64 || ''); const n = bin.length; const out = new Uint8Array(n);
     for (let i = 0; i < n; i++) out[i] = bin.charCodeAt(i);
@@ -6100,8 +6136,16 @@ async function _runFileImportBatch(toUpload) {
     // SERVER beim Registrieren (POST /songs): er liest die Inhalts-Prüfsumme (ETag), die Cloudflare
     // beim Upload über die BYTES berechnet hat, vergleicht sie mit der Haupt-DB und verwirft
     // Duplikate ({duplicate:true} + Datei wird im Zwischenlager sofort gelöscht).
+    // Video statt Audio ausgewaehlt (Photo-Library/Dateien) - erkennbar an MIME-Typ ODER
+    // Endung, weil iOS beim Datei-Picker den MIME-Typ nicht immer zuverlaessig mitliefert.
+    const _isVideoFile = (file) => {
+        if (file.type && file.type.startsWith('video/')) return true;
+        const ext = (file.name.split('.').pop() || '').toLowerCase();
+        return ['mp4', 'mov', 'm4v', '3gp', 'avi'].includes(ext);
+    };
+
     const CONCURRENT = 5;
-    let done = 0, dupes = 0, failed = 0, uploadedBytes = 0;
+    let done = 0, dupes = 0, failed = 0, uploadedBytes = 0, lastFailReason = null;
     const totalBytes = toUpload.reduce((a, x) => a + x.file.size, 0);
     const t0 = Date.now();
     const fmtMB = (b) => (b / 1048576).toFixed(0);
@@ -6118,12 +6162,33 @@ async function _runFileImportBatch(toUpload) {
     updateProgress();
 
     async function uploadOne(file, title, attempt = 1) {
-        const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+        // Bei einem Video wird NICHT die Datei selbst hochgeladen (waere ein Vielfaches an
+        // Speicher/Bandbreite fuer etwas, das niemand so abspielen will), sondern nur ihre
+        // Audiospur - extrahiert nativ (AVFoundation, siehe AudioExtractor.swift), weil ein
+        // beliebiges Videoformat vom iPhone (HEVC/.mov, H.264/.mp4, ...) in JS zuverlaessig
+        // zu zerlegen kein vertretbarer Aufwand waere. Nur in der Huelle moeglich - im reinen
+        // Browser gibt es die Bruecke nicht, der Import scheitert dort mit klarer Fehlermeldung
+        // statt das Video roh hochzuladen.
+        let uploadBlob = file;
+        let uploadContentType = file.type || 'audio/mpeg';
+        let uploadNameHint = file.name;
+        let realDuration = 0;
         try {
+            if (_isVideoFile(file)) {
+                setStatus(`🎬 Extrahiere Audio aus „${title}" …`);
+                const extracted = await _nativeExtractAudio(file);
+                uploadBlob = new Blob([extracted.bytes], { type: 'audio/mp4' });
+                uploadNameHint = file.name.replace(/\.[^/.]+$/, '') + '.m4a';
+                uploadContentType = 'audio/mp4';
+                realDuration = extracted.durationSeconds;
+                updateProgress();
+            }
+
+            const safeFilename = `fast_${Date.now()}_${Math.random().toString(36).slice(2,7)}_${uploadNameHint.replace(/[^a-zA-Z0-9.]/g, '_')}`;
             const uploadRes = await _apiFetch(`${API_URL}/upload/${safeFilename}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': file.type || 'audio/mpeg' },
-                body: file,
+                headers: { 'Content-Type': uploadContentType },
+                body: uploadBlob,
                 signal: _mkTimeout(180000) // fängt hängende Verbindungen ab, damit der Pool nie festfriert
             });
             if (!uploadRes.ok) throw new Error('upload failed');
@@ -6134,7 +6199,7 @@ async function _runFileImportBatch(toUpload) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     title, artist: "Unbekannt", cover_data: "",
-                    file_url: uploadData.url, file_size: file.size, duration: 0, vibes: []
+                    file_url: uploadData.url, file_size: uploadBlob.size, duration: realDuration, vibes: []
                 }),
                 signal: _mkTimeout(30000)
             });
@@ -6157,6 +6222,7 @@ async function _runFileImportBatch(toUpload) {
         } catch(err) {
             if (attempt < 3) { await new Promise(r => setTimeout(r, 600 * attempt)); return uploadOne(file, title, attempt + 1); }
             failed++;
+            lastFailReason = `${title}: ${err && err.message || err}`;
         }
         updateProgress();
     }
@@ -6185,7 +6251,7 @@ async function _runFileImportBatch(toUpload) {
     window._importActive = false;
     if (uploadLabel) uploadLabel.style.opacity = '1';
     const skipped = dupes + removed;
-    const summary = `✅ ${done - removed} neu importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}`;
+    const summary = `✅ ${done - removed} neu importiert${skipped > 0 ? `, ${skipped} Duplikate übersprungen` : ''}${failed > 0 ? `, ${failed} fehlgeschlagen (${lastFailReason})` : ''}`;
     setStatus(summary, failed > 0 ? '#ff9f0a' : '#32d74b');
 
     // Liste aktualisieren, dann Cover/Artist-Sync entkoppelt im Hintergrund
