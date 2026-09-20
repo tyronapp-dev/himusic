@@ -2780,15 +2780,23 @@ let _bgCacheActive = false;
 
     let isChangingSong = false;
     window.playNextSong = function() {
+        // Debounce MUSS vor dem Bruecken-Zweig stehen, nicht dahinter. Stand er dahinter, galt
+        // er nur fuer den Browser/PWA-Pfad - in der Huelle (der einzige Pfad, den ein echtes
+        // Geraet nutzt) feuerte jeder Doppel-Tipp zwei "next"-Befehle ungebremst hintereinander.
+        // Swift startet pro Befehl einen eigenen beginPlayback()-Task; ohne diese Bremse konnte
+        // ein ueberholter Task seinen (alten) Song noch in den Player schreiben, NACHDEM ein
+        // neuerer Task das schon richtig gemacht hatte - Anzeige zeigt den neuen Song (kommt aus
+        // dem aktuellen Warteschlangen-Index), der Player spielt weiter den alten. Genau das
+        // gemeldete Bild "Skip zeigt neuen Song, spielt aber noch den alten".
+        if (isChangingSong) return;
+        isChangingSong = true;
+        setTimeout(() => isChangingSong = false, 800);
         // In der Huelle fuehrt AVPlayer die Warteschlange, nicht diese Seite. Lokales
         // Weiterschalten wuerde aus playbackQueue rechnen, die nach jedem nativen
         // Auto-Skip im Hintergrund veraltet ist - dadurch wurden Songs uebersprungen.
         // Einzige Quelle der Wahrheit ist der native Player, genau wie bei cmd:'toggle'.
         const _bridge = _nativeBridge();
         if (_bridge) { _bridge.postMessage(JSON.stringify({ cmd: 'next' })); return; }
-        if (isChangingSong) return;
-        isChangingSong = true;
-        setTimeout(() => isChangingSong = false, 800);
         if (!playbackQueue || playbackQueue.length === 0) {
             if (window.globalSongsData && window.globalSongsData.length > 0) { playbackQueue = _shuffle([...window.globalSongsData]); } else return;
         }

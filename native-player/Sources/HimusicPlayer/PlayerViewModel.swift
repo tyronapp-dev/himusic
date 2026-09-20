@@ -529,6 +529,20 @@ final class PlayerViewModel: ObservableObject {
             }
         }
 
+        // LETZTE Pruefung vor dem eigentlichen Songwechsel. Alle Pruefungen oben sitzen an
+        // await-Punkten und fangen nur Ueberholungen VOR diesem Punkt ab - ab hier (Asset-/Item-
+        // Aufbau, beide synchron) laeuft der Rest ohne weiteren await bis hierher durch. Ohne
+        // diese Zeile konnte ein ueberholter Task (zwei Skips kurz hintereinander, z.B.
+        // Doppel-Tipp oder In-App-Skip UND Sperrbildschirm-Skip fast gleichzeitig) HIER noch
+        // player.replaceCurrentItem() mit dem ALTEN Song aufrufen, NACHDEM ein neuerer Task das
+        // schon richtig gemacht hatte - notifyNowPlayingChanged() liest den Song frisch aus dem
+        // Warteschlangen-Index und zeigte der Seite dadurch trotzdem den NEUEN Song, waehrend der
+        // Player laengst wieder auf dem ALTEN stand. Genau das gemeldete Bild "Skip zeigt neuen
+        // Song, spielt aber weiter den alten" - seit dem Umstieg auf sofortiges Streamen beim
+        // manuellen Skip (vorher bremste der Download-Wartepunkt zwei ueberlappende Skips
+        // natuerlich genug ab, dass sie praktisch nie zusammentrafen).
+        guard token == playbackToken else { return }
+
         // Ein noch laufender Sprung galt dem ALTEN Item - dessen Completion-Handler feuert nach
         // replaceCurrentItem() oft gar nicht mehr (AVPlayer verwirft ihn stillschweigend statt
         // ihn mit finished=false aufzurufen). Ohne dieses Zuruecksetzen blieb der Zaehler dann
