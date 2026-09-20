@@ -297,6 +297,7 @@ final class PlayerViewModel: ObservableObject {
             case "jumpTo": if let index = command.index { jumpTo(index) }
             case "removeAt": if let index = command.index { removeAt(index) }
             case "moveItem": if let index = command.index, let toIndex = command.toIndex { moveItem(from: index, to: toIndex) }
+            case "shuffle": shuffleRemaining()
             // Zieht den nativen Datei-Cache mit dem Web-Offline-Cache nach (siehe
             // _nativeEnsureCached in app2.js) - ohne das fuellte nur der Vorlader um die
             // aktuelle Warteschlangenposition (prefetchUpcoming) den nativen Cache, und ein im
@@ -784,6 +785,19 @@ final class PlayerViewModel: ObservableObject {
         let item = queue.remove(at: from)
         let clampedTo = min(max(to, currentIndex + 1), queue.count)
         queue.insert(item, at: clampedTo)
+        notifyQueueChanged()
+        saveSnapshot()
+    }
+
+    /// Shuffle-Knopf im grossen Web-Player: der Web-Player druckte bisher nur die eigene,
+    /// hier komplett wirkungslose JS-Variable "playbackQueue" durch (siehe Kommentar bei
+    /// "next" oben - in der Huelle fuehrt DIESER queue hier die Wiedergabe, nicht die Seite).
+    /// Nur der "als naechstes"-Teil wird gemischt, laufender Song und Verlauf bleiben stehen -
+    /// gleiche Grenze wie bei moveItem/removeAt.
+    func shuffleRemaining() {
+        guard currentIndex + 1 < queue.count else { return }
+        let remaining = Array(queue[(currentIndex + 1)...]).shuffled()
+        queue.replaceSubrange((currentIndex + 1)..., with: remaining)
         notifyQueueChanged()
         saveSnapshot()
     }

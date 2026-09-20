@@ -368,8 +368,14 @@ async function _nativeExtractAudio(file) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const dataBase64 = _bytesToB64(bytes);
     const ext = (file.name.split('.').pop() || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    // Dateigroesse + tatsaechliche Base64-Laenge mit in die Fehlermeldung, damit sich ein
+    // Fehlschlag (Verdacht: sehr grosse Payload kommt auf dem Weg WebContent-Prozess -> App-
+    // Prozess beschaedigt an, siehe WebShellView.handleMediaMessage) von einem echten AVFoundation-
+    // Fehler unterscheiden laesst, ohne extra nachfragen zu muessen.
     const res = await b.postMessage({ cmd: 'extractAudio', dataBase64, extension: ext });
-    if (!res || !res.ok) throw new Error('Audio-Extraktion fehlgeschlagen: ' + ((res && res.error) || 'unbekannt'));
+    if (!res || !res.ok) {
+        throw new Error(`Audio-Extraktion fehlgeschlagen: ${(res && res.error) || 'unbekannt'} (Datei ${Math.round(file.size / 1048576)} MB, Base64 ${dataBase64.length} Zeichen)`);
+    }
     return { bytes: _b64ToBytes(res.dataBase64), durationSeconds: res.durationSeconds || 0 };
 }
 function _b64ToBytes(b64) {
@@ -4949,7 +4955,20 @@ async function createNewPlaylistProcess() {
         if (audioPlayer) audioPlayer.loop = isRepeat;
     }
     document.getElementById('btn-repeat')?.addEventListener('click', (e) => { isRepeat = !isRepeat; e.currentTarget.classList.toggle('ctrl-active', isRepeat); audioPlayer.loop = isRepeat; localStorage.setItem('himusic_repeat', isRepeat ? '1' : '0'); });
-    document.getElementById('btn-shuffle')?.addEventListener('click', (e) => { isShuffle = !isShuffle; e.currentTarget.classList.toggle('ctrl-active', isShuffle); if(isShuffle) { playbackQueue = _shuffle(playbackQueue); } localStorage.setItem('himusic_shuffle', isShuffle ? '1' : '0'); });
+    document.getElementById('btn-shuffle')?.addEventListener('click', (e) => {
+        isShuffle = !isShuffle;
+        e.currentTarget.classList.toggle('ctrl-active', isShuffle);
+        if (isShuffle) {
+            // In der Huelle fuehrt der native Player (PlayerViewModel.swift) die Warteschlange,
+            // nicht diese Seite - playbackQueue hier umzusortieren aenderte an der echten
+            // Wiedergabe nichts (gemeldeter Bug: Shuffle druecken, es lief trotzdem die
+            // Standardreihenfolge weiter). Eigenes Kommando, analog zu next/prev/moveItem.
+            const _bridge = _nativeBridge();
+            if (_bridge) { _bridge.postMessage(JSON.stringify({ cmd: 'shuffle' })); }
+            else { playbackQueue = _shuffle(playbackQueue); }
+        }
+        localStorage.setItem('himusic_shuffle', isShuffle ? '1' : '0');
+    });
     // btn-next/btn-prev werden bereits von setupSmartSkipButton() verdrahtet (weiter oben,
     // inkl. Langdruck-Suchlauf). Die hier zusaetzlich registrierten Listener liefen doppelt:
     // EIN Antippen rief playPrevSong() zweimal auf, der zweite Aufruf wurde als Doppeltipp

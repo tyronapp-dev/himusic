@@ -370,11 +370,24 @@ struct WebShellView: UIViewRepresentable {
             _ message: WKScriptMessage,
             replyHandler: @escaping (Any?, String?) -> Void
         ) {
-            guard let body = message.body as? [String: Any],
-                  let cmd = body["cmd"] as? String, cmd == "extractAudio",
-                  let dataBase64 = body["dataBase64"] as? String,
-                  let inputData = Data(base64Encoded: dataBase64) else {
-                replyHandler(["ok": false, "error": "ungueltige Anfrage"], nil); return
+            // Vorher ein einziges Guard mit EINER generischen "ungueltige Anfrage"-Meldung fuer
+            // vier verschiedene moegliche Ursachen - der Screenrecording-Fehlschlag vom 20.09.
+            // liess sich dadurch nicht eingrenzen. Aufgesplittet, damit der naechste Fehlschlag
+            // sagt WELCHE Bedingung riss, plus die tatsaechliche Base64-Laenge (Verdacht: die
+            // WKScriptMessage-Bruecke verliert/kappt bei sehr grossen Payloads etwas auf dem Weg
+            // vom WebContent- in den App-Prozess - Screenrecordings sind bei gleicher Laenge viel
+            // groesser als komprimierte Kamera-Videos, die bisher zuverlaessig funktioniert haben).
+            guard let body = message.body as? [String: Any] else {
+                replyHandler(["ok": false, "error": "ungueltige Anfrage: Nachricht ist kein Objekt"], nil); return
+            }
+            guard let cmd = body["cmd"] as? String, cmd == "extractAudio" else {
+                replyHandler(["ok": false, "error": "ungueltige Anfrage: cmd fehlt/falsch (\(body["cmd"] ?? "nil"))"], nil); return
+            }
+            guard let dataBase64 = body["dataBase64"] as? String else {
+                replyHandler(["ok": false, "error": "ungueltige Anfrage: dataBase64 fehlt oder ist kein String"], nil); return
+            }
+            guard let inputData = Data(base64Encoded: dataBase64) else {
+                replyHandler(["ok": false, "error": "ungueltige Anfrage: Base64 nicht dekodierbar (Stringlaenge \(dataBase64.count) Zeichen)"], nil); return
             }
             let ext = (body["extension"] as? String) ?? ""
 
