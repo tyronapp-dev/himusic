@@ -19,6 +19,7 @@ final class PlayerViewModel: ObservableObject {
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
+    private var stallObserver: NSObjectProtocol?
     /// Cover des GERADE laufenden Songs, bewusst stark gehalten und bewusst nur EINS.
     ///
     /// Vorgeschichte, zwei Fehlversuche: erst ein Dictionary ueber alle Songs - das wuchs
@@ -186,6 +187,11 @@ final class PlayerViewModel: ObservableObject {
                 if !hatteNetz, self.hasNetwork {
                     self.artworkFailedForId = nil
                     if let item = self.currentItem { self.loadArtworkIfNeeded(for: item) }
+                    // Verbindung war weg und ist zurueck: haengt die Wiedergabe noch im
+                    // Puffer-Leerlauf (siehe handlePlaybackStall), gleich nachtreten statt
+                    // auf die naechste Nutzeraktion zu warten - deckt auch den seltenen Fall
+                    // ab, dass AVPlayer den Stall nie gemeldet hat.
+                    if self.isPlaying, self.player.rate == 0 { self.startPlaybackResiliently() }
                 }
             }
         }
@@ -479,6 +485,23 @@ final class PlayerViewModel: ObservableObject {
             Task { @MainActor in self?.handlePlaybackFailure(for: item, reason: reason) }
         }
 
+        // Aussetzer MITTEN im Stream (Puffer leergelaufen), typischerweise beim Wechsel
+        // WLAN<->Mobilfunk oder einer kurzen Verbindungsluecke. Anders als bei .failed/
+        // FailedToPlayToEndTime bleibt der Status dabei .readyToPlay - ohne diesen Beobachter
+        // faellt player.rate auf 0 und bleibt dort stehen, waehrend "isPlaying" weiterhin true
+        // zeigt: die App haelt sich fuer spielend, es kommt aber dauerhaft kein Ton mehr, bis
+        // man manuell den Song wechselt. Genau das gemeldete Bild "Musik spielt nach WLAN/5G-
+        // Wechsel nicht richtig weiter" - und ein danach versuchter Skip haengt aus demselben
+        // Grund erneut, weil auch der naechste Song im selben Puffer-Leerlauf stecken bleibt.
+        if let stallObserver { NotificationCenter.default.removeObserver(stallObserver) }
+        stallObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled,
+            object: playerItem,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handlePlaybackStall(for: item) }
+        }
+
         // Sobald das Item bereit ist: offenen Positionssprung nachholen und - falls die
         // Wiedergabe laufen soll, aber steht - nachtreten. Beides ist genau der Moment, ab
         // dem AVPlayer solche Anweisungen ueberhaupt zuverlaessig annimmt.
@@ -618,6 +641,16 @@ final class PlayerViewModel: ObservableObject {
             self.pendingSeekSeconds = resumeAt > 3 ? resumeAt : nil
             self.playCurrent()
         }
+    }
+
+    /// Reaktion auf AVPlayerItemPlaybackStalled (siehe Beobachter in beginPlayback). Nutzt
+    /// bewusst dieselbe Absicherung wie der Play-Knopf nach Kaltstart (startPlaybackResiliently)
+    /// statt einer eigenen: die prueft nach einer Sekunde nach, ob wirklich wieder Ton kommt,
+    /// und baut den Song sonst komplett neu auf (Cache/Netzadresse-Fallback inklusive) - genau
+    /// das, was ein haengender Stream nach einem Netzwechsel braucht.
+    private func handlePlaybackStall(for item: QueueItem) {
+        guard currentItem?.id == item.id, isPlaying else { return }
+        startPlaybackResiliently()
     }
 
     // MARK: - Defekte Songs
