@@ -332,23 +332,41 @@ function _primaryArtistName(artist) {
     return String(artist || '').split(/\s*(?:,|&|\bfeat\.?\b|\bft\.?\b|\bx\b|\bvs\.?\b|\bwith\b)\s*/i)[0].trim();
 }
 
-// Kuenstler-Sender: ZUERST alle Songs dieses Kuenstlers (auch als Feature), die vom Vibe her am
-// naechsten am Ausgangssong liegen, danach seine weniger passenden; DANACH Songs anderer
-// Kuenstler, ebenfalls nach Vibe-Naehe, und ganz am Ende die voellig anderen. Die Reihenfolge
-// ist hier Absicht (siehe _softShuffle) und wird NICHT zufaellig gemischt gespeichert.
+// Ab dieser Vibe-Aehnlichkeit gilt ein Song im Kuenstler-Sender als "nah". Gemessen an 150
+// Zufallsankern (Kuenstler mit >= 6 Songs): im Schnitt ~9 eigene Songs nah, ~23 weniger passend,
+// ~77 fremde nah. Bei Frenna "10 Racks" z.B. 15 eigene >= 0,74, die restlichen 6 bei 0 (ohne
+// Vibes bzw. ganz andere).
+const ARTIST_STATION_NEAR = 0.6;
+
+// Kuenstler-Sender, vier Stufen (Nutzer-Vorgabe 2026-10-01, "es geht hauptsaechlich um den Vibe"):
+//   0 = Songs des Kuenstlers (auch als Feature) mit nahem Vibe
+//   1 = Songs ANDERER Kuenstler mit nahem Vibe
+//   2 = weniger passende Songs des Kuenstlers
+//   3 = alles andere
+// Ein schlecht passender Kuenstler-Song darf also NICHT vor einem deutlich besser passenden
+// fremden Song laufen, nur weil er vom Kuenstler ist. Innerhalb jeder Stufe nach Vibe-Naehe.
+function _artistStationTier(isOwn, sim) {
+    const near = sim >= ARTIST_STATION_NEAR;
+    return isOwn ? (near ? 0 : 2) : (near ? 1 : 3);
+}
 function _buildArtistStationSongs(song, artistKey) {
     const key = String(artistKey || '').toLowerCase();
     const ctx = _stationVibeContext();
     const anchor = ctx.vecOf(song);
-    const own = [], others = [];
+    const tiers = [[], [], [], []];
     (window.globalSongsData || []).forEach(s => {
         if (s.id === song.id) return;
-        const e = { song: s, sim: _vibeScore(anchor, ctx.vecOf(s)), r: Math.random() };
-        (key && _artistKeys(s.artist).includes(key) ? own : others).push(e);
+        const sim = _vibeScore(anchor, ctx.vecOf(s));
+        const isOwn = !!key && _artistKeys(s.artist).includes(key);
+        tiers[_artistStationTier(isOwn, sim)].push({ song: s, sim, r: Math.random() });
     });
     const byRank = (a, b) => (b.sim - a.sim) || (a.r - b.r);
-    own.sort(byRank); others.sort(byRank);
-    return { key, ownCount: own.length + 1, ordered: [song, ...own.map(e => e.song), ...others.map(e => e.song)] };
+    const [near, othersNear, far, rest] = tiers.map(t => t.sort(byRank).map(e => e.song));
+    return {
+        key, near, othersNear, far, rest,
+        ownCount: near.length + far.length + 1,
+        ordered: [song, ...near, ...othersNear, ...far, ...rest],
+    };
 }
 
 // Mischt, haelt aber die Grundordnung: Position i bekommt einen Zufallsversatz, der mit der
@@ -364,15 +382,28 @@ function _orderedStation(id) {
     try { return JSON.parse(localStorage.getItem('heatbox_stations') || '[]').find(x => x.id === id && x.kind === 'artist') || null; }
     catch (e) { return null; }
 }
-// Ein Aufruf fuer alle Shuffle-Stellen: Kuenstler-Sender weich mischen, und zwar Kuenstler-Teil
-// und Fremd-Teil GETRENNT - sonst rutschen Fremde zwischen die Kuenstler-Songs, die laut Vorgabe
-// erst danach kommen sollen. Alles andere wie bisher voll zufaellig.
+// Ein Aufruf fuer alle Shuffle-Stellen: Kuenstler-Sender weich mischen, und zwar JEDE der vier
+// Stufen (_artistStationTier) fuer sich - sonst rutschen Songs ueber die Stufengrenze, z.B. ein
+// schlecht passender Kuenstler-Song vor die nahen fremden. Die Stufe wird beim Mischen frisch
+// gegen den Ausgangssong berechnet (Liste kann per "+50"/Umsortieren veraendert sein). Alles
+// andere wie bisher voll zufaellig.
 function _shuffleForList(listId, arr) {
     const st = _orderedStation(listId);
     if (!st) return _shuffle(arr);
-    const own = [], rest = [];
-    arr.forEach(s => (st.artistKey && _artistKeys(s.artist).includes(st.artistKey) ? own : rest).push(s));
-    return [..._softShuffle(own), ..._softShuffle(rest)];
+    const src = window._songIndex?.get(st.sourceSongId);
+    const tiers = [[], [], [], []];
+    if (src) {
+        const ctx = _stationVibeContext();
+        const anchor = ctx.vecOf(src);
+        arr.forEach(s => {
+            const isOwn = s.id === src.id || (!!st.artistKey && _artistKeys(s.artist).includes(st.artistKey));
+            tiers[_artistStationTier(isOwn, s.id === src.id ? 1 : _vibeScore(anchor, ctx.vecOf(s)))].push(s);
+        });
+    } else {
+        // Ausgangssong geloescht: nur noch nach Kuenstler trennen, Vibe-Naehe nicht berechenbar.
+        arr.forEach(s => (st.artistKey && _artistKeys(s.artist).includes(st.artistKey) ? tiers[0] : tiers[3]).push(s));
+    }
+    return tiers.flatMap(t => _softShuffle(t));
 }
 
 // Einstellbare Groesse fuer Sender/Vibe-Mixe (Einstellungen -> "Sender & Vibe Mixe"): "pool" =
@@ -3767,10 +3798,15 @@ let _bgCacheActive = false;
         const key = name.toLowerCase();
         if (key.length < 2) { _showToast('⚠️ Kein Künstler am Song – Sender nicht erstellt'); return; }
         const res = _buildArtistStationSongs(song, key);
-        // Alle Songs des Kuenstlers kommen rein (auch wenn es mehr als die Startgroesse sind),
-        // der Rest bis zur Startgroesse mit den naechstpassenden Fremden.
-        const keep = Math.max(_getStationSizeSettings().initial, res.ownCount);
-        const stationSongs = res.ordered.slice(0, keep);
+        // Gespeichert: ALLE Songs des Kuenstlers, dazwischen (Stufe 1) die naechsten fremden mit
+        // nahem Vibe - gedeckelt auf den "Auswahl-Topf" aus den Einstellungen, damit die weniger
+        // passenden Kuenstler-Songs (Stufe 2) ueberhaupt im Sender landen. Reicht das nicht fuer
+        // die Startgroesse (kleiner Kuenstler, seltener Vibe), wird mit Stufe 3 aufgefuellt.
+        // "+50" zieht danach die restlichen Stufe-1/3-Songs in Reihenfolge nach.
+        const sizes = _getStationSizeSettings();
+        let stationSongs = [song, ...res.near, ...res.othersNear.slice(0, sizes.pool), ...res.far];
+        if (stationSongs.length < sizes.initial) stationSongs = stationSongs.concat(res.rest.slice(0, sizes.initial - stationSongs.length));
+        const othersIn = stationSongs.length - res.ownCount;
         const newStation = {
             id: 'station_' + Date.now(),
             name: 'Sender: ' + name,
@@ -3785,7 +3821,7 @@ let _bgCacheActive = false;
         const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]');
         savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
         if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
-        _showToast(`Künstler-Sender – ${Math.min(res.ownCount, stationSongs.length)} Songs von ${name}, ${Math.max(0, stationSongs.length - res.ownCount)} ähnliche dazu`);
+        _showToast(`Künstler-Sender – ${res.ownCount} Songs von ${name}, ${othersIn} mit ähnlichem Vibe`);
         if (typeof window.openPlaylistDetails === 'function') window.openPlaylistDetails(newStation.id, newStation.name);
     };
 
