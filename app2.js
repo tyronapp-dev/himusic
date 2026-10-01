@@ -1430,8 +1430,23 @@ window._ytImportQueue = _ytImportQueue;
 // (bekannte Luecke, siehe ADR-007 "Keine Synchronisierung des Wiedergabestatus").
 // Reiner Anzeige-Sync - ruft NIE playSong()/_tryNativePlayerHandoff() auf, sonst wuerde die
 // Huelle denselben Song nochmal von vorn laden und hoerbar stottern.
+// Wiedergabe-Diagnose (2026-10-01): sporadischer "Delay, bevor der Song kommt". Die Huelle
+// misst pro Songstart Quelle (lokal / geladen / Stream) und Wartezeiten (payload.diag), die Seite
+// ergaenzt die Zeit seit dem Antippen (_lastHandoffAt aus _tryNativePlayerHandoff). Die letzten
+// 30 Starts zeigt "Einstellungen -> Wiedergabe-Diagnose" an.
+window._nativeStartLog = window._nativeStartLog || [];
+function _recordNativeStartDiag(diag) {
+    if (!diag || diag.readyMs == null || diag.readyMs < 0) return;   // erst wenn "spielbereit" gemessen
+    const log = window._nativeStartLog;
+    if (log.length && log[log.length - 1].id === diag.id && log[log.length - 1].readyMs === diag.readyMs) return;   // gleicher Start, erneuter Push
+    const sinceTap = (window._lastHandoffAt && window._lastHandoffId === diag.id) ? Date.now() - window._lastHandoffAt : null;
+    log.push({ at: new Date().toLocaleTimeString('de-DE'), id: diag.id, t: diag.t, src: diag.src, waitMs: diag.waitMs, readyMs: diag.readyMs, sinceTap });
+    if (log.length > 30) log.shift();
+}
+
 window._applyNativeNowPlaying = function(payload) {
     if (!payload || payload.id == null) return;
+    try { _recordNativeStartDiag(payload.diag); } catch (e) {}
     const song = window._songIndex && window._songIndex.get ? window._songIndex.get(payload.id) : null;
     // Diese Funktion laeuft NICHT nur beim Songwechsel, sondern auch bei jedem Play/Pause und
     // bei jedem Resync (Vordergrund-Comeback, Seiten-Reload). Alles, was nur bei einem echten
@@ -1887,6 +1902,8 @@ function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     try {
         const payloadJson = JSON.stringify({ queue, startIndex: 0 });
         if (bridge) {
+            // Fuer die Wiedergabe-Diagnose: Zeitpunkt des Antippens (siehe _recordNativeStartDiag)
+            window._lastHandoffAt = Date.now(); window._lastHandoffId = queue[0].id;
             bridge.postMessage(payloadJson);
             return true;
         }
@@ -5831,6 +5848,21 @@ async function createNewPlaylistProcess() {
             if (!confirm('App-Cache leeren und neu laden? Login und lokale Bibliothek bleiben erhalten.')) return;
             const bridge = _nativeBridge();
             if (bridge) bridge.postMessage(JSON.stringify({ cmd: 'clearCacheAndReload' }));
+        });
+
+        // Wiedergabe-Diagnose: die letzten Songstarts mit Quelle und Wartezeiten (siehe
+        // _recordNativeStartDiag). Als alert() - reiner Text, keine Escaping-Frage, und der Nutzer
+        // kann ihn per Screenshot weitergeben, wenn der Delay wieder auftritt.
+        const diagRow = document.getElementById('btn-playback-diag');
+        if (diagRow) diagRow.style.display = 'flex';
+        diagRow?.addEventListener('click', () => {
+            const log = window._nativeStartLog || [];
+            if (!log.length) { alert('Noch keine Songstarts gemessen. Spiel ein paar Songs ab und schau dann nochmal.'); return; }
+            const s = ms => (ms == null || ms < 0) ? '?' : (ms / 1000).toFixed(1).replace('.', ',') + ' s';
+            const lines = log.slice().reverse().map(e =>
+                `${e.at}  ${e.t}\n   ${e.src} · Wechsel nach ${s(e.waitMs)} · spielbereit nach weiteren ${s(e.readyMs)}` +
+                (e.sinceTap != null ? ` · ab Antippen ${s(e.sinceTap)}` : ''));
+            alert('Letzte Songstarts (neueste oben):\n\n' + lines.join('\n\n'));
         });
     }
 

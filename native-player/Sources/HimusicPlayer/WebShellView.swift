@@ -246,12 +246,15 @@ struct WebShellView: UIViewRepresentable {
             // um, und bis der erste Fortschritts-Push kam, haette sie nur den ungenauen
             // Datenbankwert - ein Sprung direkt nach dem Songwechsel landete dann daneben.
             // 0 heisst "noch nicht bekannt" (Datei laedt noch), dann bleibt der Notbehelf.
-            let payload: [String: Any] = [
+            var payload: [String: Any] = [
                 "id": item.id, "t": item.title, "a": item.artist,
                 "u": item.u, "c": item.c ?? "", "s": item.sourceLabel ?? "",
                 "d": player.currentItemDurationSeconds,
                 "isPlaying": isPlaying
             ]
+            // Zeitmessung des letzten Songstarts (siehe PlayerViewModel.StartDiag) - die Seite
+            // sammelt sie fuer "Einstellungen -> Wiedergabe-Diagnose".
+            if let diag = player.lastStartDiagPayload { payload["diag"] = diag }
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8) else { return }
             webView.evaluateJavaScript("window._applyNativeNowPlaying && window._applyNativeNowPlaying(\(json));")

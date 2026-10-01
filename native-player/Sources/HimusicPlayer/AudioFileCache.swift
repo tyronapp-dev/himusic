@@ -154,6 +154,10 @@ actor AudioFileCache {
         guard item.fileURL != nil else { return }
         if index[item.id] != nil { return }
         if currentlyDownloadingId == item.id { return }
+        // Laeuft fuer diesen Song schon ein Prioritaets-Download (fetchNow), NICHT zusaetzlich
+        // einreihen: sonst lud dieselbe Datei zweimal gleichzeitig (halbe Bandbreite), und der
+        // spaeter fertige Download ersetzte am Ende die Datei, die der Player evtl. schon abspielte.
+        if inFlightNow.contains(item.id) { return }
         if downloadQueue.contains(where: { $0.id == item.id }) { return }
         downloadQueue.append(item)
         processQueueIfNeeded()
@@ -165,30 +169,48 @@ actor AudioFileCache {
 
     /// Sofort-Download MIT PRIORITAET: laedt direkt (nicht hinten in die 1-parallel-Queue),
     /// mit den Retries + strikter Vollstaendigkeitspruefung aus download(). Gibt die lokale
-    /// URL zurueck, wenn danach eine gueltige Datei liegt - sonst nil (Aufrufer streamt dann).
-    /// Genau der Weg fuer "gerade importiert" / "gerade angetippt": danach spielt beginPlayback
-    /// von Platte statt die noch kalte Remote-Datei zu streamen.
-    func fetchNow(item: QueueItem) async -> URL? {
+    /// URL zurueck, wenn innerhalb von `maxWait` eine gueltige Datei liegt - sonst nil
+    /// (Aufrufer streamt dann). Der Download selbst laeuft UNABHAENGIG von maxWait weiter und
+    /// landet fuers naechste Mal im Cache.
+    ///
+    /// maxWait seit 2026-10-01: vorher wartete beginPlayback auf den KOMPLETTEN Download. Ein
+    /// angetippter, noch nicht gecachter Song kam dadurch je nach Netz erst nach Sekunden (im
+    /// Extremfall 3 Anlaeufe a 90 s), waehrend der alte Song einfach weiterlief - das gemeldete
+    /// "manchmal starker Delay, bevor der Song kommt", abhaengig davon, ob der Song schon lokal lag.
+    ///
+    /// Laedt die Vorlade-Warteschlange genau diesen Song gerade, wird KEIN zweiter Download
+    /// gestartet, sondern auf diesen gewartet (siehe ensureCached).
+    func fetchNow(item: QueueItem, maxWait: TimeInterval = .infinity) async -> URL? {
         if let existing = localFileURL(forId: item.id) { return existing }
         guard let remote = item.fileURL else { return nil }
-        if inFlightNow.contains(item.id) {
-            // Laeuft schon - kurz warten und nachsehen, kein zweiter Download.
-            for _ in 0..<40 {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                if let u = localFileURL(forId: item.id) { return u }
-                if !inFlightNow.contains(item.id) { break }
+        if !inFlightNow.contains(item.id) && currentlyDownloadingId != item.id {
+            inFlightNow.insert(item.id)
+            downloadQueue.removeAll { $0.id == item.id }
+            Task {
+                await self.download(item: item, from: remote)
+                self.inFlightNow.remove(item.id)
             }
-            return localFileURL(forId: item.id)
         }
-        inFlightNow.insert(item.id)
-        await download(item: item, from: remote)
-        inFlightNow.remove(item.id)
-        return localFileURL(forId: item.id)
+        let deadline = maxWait.isFinite ? Date().addingTimeInterval(maxWait) : Date.distantFuture
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            // hasCachedFile statt localFileURL: Letzteres schreibt bei jedem Aufruf den Index
+            // auf Platte - im 100-ms-Takt waere das unnoetige Last waehrend des Songwechsels.
+            if hasCachedFile(forId: item.id) { return localFileURL(forId: item.id) }
+            if !inFlightNow.contains(item.id) && currentlyDownloadingId != item.id { break }
+        }
+        return hasCachedFile(forId: item.id) ? localFileURL(forId: item.id) : nil
     }
 
     private func processQueueIfNeeded() {
         guard currentlyDownloadingId == nil, !downloadQueue.isEmpty else { return }
         let item = downloadQueue.removeFirst()
+        // Inzwischen anderweitig gecacht oder per fetchNow in Arbeit -> ueberspringen, statt
+        // dieselbe Datei ein zweites Mal zu laden (und am Ende die laufende Kopie zu ersetzen).
+        if index[item.id] != nil || inFlightNow.contains(item.id) {
+            processQueueIfNeeded()
+            return
+        }
         guard let remote = item.fileURL else {
             processQueueIfNeeded()
             return

@@ -65,6 +65,27 @@ final class PlayerViewModel: ObservableObject {
     private var pendingSeekSeconds: Double?
     private var itemStatusObservation: NSKeyValueObservation?
 
+    /// Hoechstens so lange wartet ein Songstart (Antippen, Auto-Skip) auf den Vorab-Download,
+    /// bevor er streamt - siehe beginPlayback. Manuelle Skips streamen sofort.
+    private static let fetchBeforePlayMaxWait: TimeInterval = 1.5
+
+    /// Zeitmessung des letzten Songstarts (2026-10-01) fuer die "Wiedergabe-Diagnose" in den
+    /// Einstellungen: der gemeldete Delay trat nur sporadisch auf - ohne Messung bliebe beim
+    /// naechsten Mal wieder nur Raten. Geht mit jedem Now-Playing-Push an die Seite.
+    struct StartDiag {
+        let id: Int
+        let title: String
+        let source: String      // "lokal" | "geladen" | "Stream" | "Stream (Download dauerte zu lange)"
+        let waitMs: Int         // Start von beginPlayback bis replaceCurrentItem
+        let replacedAt: Date
+        var readyMs: Int?       // replaceCurrentItem bis .readyToPlay
+    }
+    private(set) var lastStartDiag: StartDiag?
+    var lastStartDiagPayload: [String: Any]? {
+        guard let d = lastStartDiag else { return nil }
+        return ["id": d.id, "t": d.title, "src": d.source, "waitMs": d.waitMs, "readyMs": d.readyMs ?? -1]
+    }
+
     /// Meldet der eingebetteten Webseite den echten nativen Zustand zurueck (WebShellView.
     /// Coordinator schickt das als JS an app2.js's _applyNativeNowPlaying weiter). Ohne das
     /// zeigt die Seite nach Auto-Skips im Hintergrund/gesperrtem Screen weiterhin den zuletzt
@@ -401,9 +422,11 @@ final class PlayerViewModel: ObservableObject {
         userInitiated: Bool = false
     ) async {
         let cache = AudioFileCache.shared
+        let startedAt = Date()
         await cache.markCurrentlyPlaying(id: item.id)
         var localURL = ignoreLocalCopy ? nil : await cache.localFileURL(forId: item.id)
         guard token == playbackToken else { return }
+        var source = localURL != nil ? "lokal" : "Stream"
 
         // Kein lokaler File, aber Netz, und NICHT der "ohne-lokale-Kopie"-Zweitversuch:
         // JETZT herunterladen und von Platte spielen. Eine frisch hochgeladene Datei zu
@@ -419,9 +442,16 @@ final class PlayerViewModel: ObservableObject {
         // gegen einen seltenen kalten CDN-Edge - hier wird direkt gestreamt und im Hintergrund
         // nachgecacht (Zweig "playingRemote" unten), genau wie beim automatischen Auto-Skip
         // schon bisher als Fallback vorgesehen war, falls fetchNow() fehlschlaegt.
+        //
+        // Seit 2026-10-01 nur noch mit Zeitlimit (fetchBeforePlayMaxWait): auch das Antippen eines
+        // Songs in der Liste laeuft ueber diesen Zweig (start(with:) -> playCurrent() ist nicht
+        // userInitiated). Ohne Limit lief der alte Song so lange weiter, bis der neue KOMPLETT
+        // geladen war - je nach Netz Sekunden bis Minuten ("manchmal starker Delay"). Jetzt: ist
+        // die Datei nach 1,5 s nicht da, wird gestreamt; der Download laeuft im Hintergrund weiter.
         if localURL == nil, !ignoreLocalCopy, hasNetwork, item.fileURL != nil, !userInitiated {
-            localURL = await cache.fetchNow(item: item)
+            localURL = await cache.fetchNow(item: item, maxWait: Self.fetchBeforePlayMaxWait)
             guard token == playbackToken else { return }
+            source = localURL != nil ? "geladen" : "Stream (Download dauerte zu lange)"
         }
 
         // Ohne abspielbare Adresse ist der Eintrag defekt. Frueher endete das hier in einem
@@ -516,6 +546,11 @@ final class PlayerViewModel: ObservableObject {
                 guard let self, self.player.currentItem === observed else { return }
                 switch observed.status {
                 case .readyToPlay:
+                    // Zeitmessung abschliessen: von replaceCurrentItem bis "spielbereit"
+                    if var d = self.lastStartDiag, d.id == item.id, d.readyMs == nil {
+                        d.readyMs = Int(Date().timeIntervalSince(d.replacedAt) * 1000)
+                        self.lastStartDiag = d
+                    }
                     // Ab hier gilt der Song als spielbar - die Fehlerkette ist unterbrochen.
                     self.consecutiveFailures = 0
                     self.failedItemIds.remove(item.id)
@@ -575,6 +610,10 @@ final class PlayerViewModel: ObservableObject {
         // observePlayerTime) - exakt das gemeldete Bild "Skip springt zurueck, aber nur ab dem
         // zweiten Song".
         seeksInFlight = 0
+        lastStartDiag = StartDiag(
+            id: item.id, title: item.title, source: source,
+            waitMs: Int(Date().timeIntervalSince(startedAt) * 1000), replacedAt: Date(), readyMs: nil
+        )
         player.replaceCurrentItem(with: playerItem)
         if autoplay {
             player.play()
