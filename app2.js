@@ -224,35 +224,99 @@ function _artistKeys(artist) {
 // Nur fuer Sender relevant; Vibe-Mixe filtern weiterhin nach genau dem gewaehlten Vibe.
 const STATION_IGNORED_VIBES = ['HYPE', 'Carpool'];
 
-function _buildStationSongs(song) {
+// Seit 2026-10-01: Kosinus-Aehnlichkeit statt Punktesumme. Jeder Song ist ein Vektor aus seinen
+// Vibes; Hauptvibe zaehlt STATION_MAIN_WEIGHT-fach, ein SELTENER Vibe (wenige Songs tragen ihn)
+// mehr als ein haeufiger (IDF). Der Kosinus bestraft Vibes, die der Ausgangssong NICHT hat:
+// "rnb+calm+latenight" liegt naeher an "rnb+calm+latenight" als an "rnb+calm+latenight+aggro".
+// Gemessen an 2140 Songs (500 Zufallsanker): Treffer 1 ~0,98, Treffer 20 ~0,85, Treffer 100
+// ~0,60 - faellt gleichmaessig ab statt abrupt. Nur Vibes zaehlen, kein Klang, keine Herkunft.
+const STATION_MAIN_WEIGHT = 3;
+// Ab dieser Vibe-Aehnlichkeit kommt ein Song in einen Song-Sender (ersetzt "mind. 2 Punkte").
+// Gleicher Kuenstler kommt IMMER rein, rankt aber nur minimal hoeher - ein groesserer Bonus
+// (0,3 getestet) drueckte beim Song-Sender Kuenstler-Songs vor besser passende Vibes.
+const STATION_MIN_SCORE = 0.25;
+const STATION_ARTIST_BONUS = 0.05;
+
+// Baut pro Aufruf frisch (kein Cache -> nie veraltet nach neuem Tagging): die Haeufigkeit jedes
+// Vibes in der Bibliothek und eine Funktion, die aus einem Song seinen gewichteten Vibe-Vektor macht.
+function _stationVibeContext() {
     const ignored = new Set(STATION_IGNORED_VIBES.map(v => v.toLowerCase()));
-    const isIgnored = (v) => ignored.has(String(v).toLowerCase());
-    const sourceVibes = (song.vibes || []).filter(v => !isIgnored(v));
-    const sourceMain = _getMainVibes(song.id).filter(v => !isIgnored(v));
+    const df = new Map();
+    let tagged = 0;
+    (window.globalSongsData || []).forEach(s => {
+        const seen = new Set();
+        _parseVibes(s.vibes).forEach(raw => { const v = String(raw).toLowerCase(); if (!ignored.has(v)) seen.add(v); });
+        if (seen.size === 0) return;
+        tagged++;
+        seen.forEach(v => df.set(v, (df.get(v) || 0) + 1));
+    });
+    const idf = v => Math.log(1 + Math.max(tagged, 1) / (df.get(v) || 1));
+    function vecOf(s) {
+        const main = new Set(_getMainVibes(s.id).map(v => String(v).toLowerCase()));
+        const m = new Map();
+        let sq = 0;
+        _parseVibes(s.vibes).forEach(raw => {
+            const v = String(raw).toLowerCase();
+            if (ignored.has(v) || m.has(v)) return;
+            const w = (main.has(v) ? STATION_MAIN_WEIGHT : 1) * idf(v);
+            m.set(v, w);
+            sq += w * w;
+        });
+        main.forEach(v => { if (!m.has(v)) main.delete(v); });
+        return { m, norm: Math.sqrt(sq), main };
+    }
+    return { vecOf };
+}
+
+function _vibeCosine(a, b) {
+    if (!a.norm || !b.norm) return 0;
+    let dot = 0;
+    for (const [k, w] of a.m) { const o = b.m.get(k); if (o) dot += w * o; }
+    return dot / (a.norm * b.norm);
+}
+
+// Der Kosinus allein ist skalenblind: ein Song mit "RnB, Calm" nur als NORMALE Vibes kam gleich
+// weit vorn wie einer, bei dem genau diese Vibes Hauptvibes sind. Das widerspricht dem
+// "nur Hauptvibes"-Eingrenzen im Vibe-Mix. Deshalb Faktor 0,8..1,0 je nachdem, welcher Anteil der
+// Hauptvibes des Ausgangssongs (nach Gewicht) auch beim Kandidaten Hauptvibe ist. Hat der
+// Ausgangssong keine Hauptvibes, bleibt es reiner Kosinus.
+function _vibeScore(a, b) {
+    const cos = _vibeCosine(a, b);
+    if (!cos || a.main.size === 0) return cos;
+    let total = 0, hit = 0;
+    a.main.forEach(v => { const w = a.m.get(v) || 0; total += w; if (b.main.has(v)) hit += w; });
+    return cos * (0.8 + 0.2 * (total ? hit / total : 0));
+}
+
+// Alle Songs ausser dem Ausgangssong mit ihrer Vibe-Aehnlichkeit, beste zuerst. Gleiche Werte
+// (bei nur ~26 Vibes haeufig) werden ueber einen EINMAL vorab gezogenen Zufallswert getrennt -
+// ein Zufalls-Komparator waere nicht konsistent und mischt nicht fair (siehe _shuffle).
+function _rankByVibeSimilarity(song) {
+    const ctx = _stationVibeContext();
+    const anchor = ctx.vecOf(song);
+    const out = [];
+    (window.globalSongsData || []).forEach(s => {
+        if (s.id === song.id) return;
+        out.push({ song: s, sim: _vibeScore(anchor, ctx.vecOf(s)), r: Math.random() });
+    });
+    out.sort((a, b) => (b.sim - a.sim) || (a.r - b.r));
+    return out;
+}
+
+function _buildStationSongs(song) {
     // Kuenstler-Signal: traegt IMMER bei (nicht nur als Notnagel), gewichtet unter einem
     // Vibe-Treffer. Ohne das lief ein Sender fuer einen noch nicht getaggten Song ins Leere -
     // ohne Vibes gab es null Uebereinstimmungen und es blieben nur 5 Zufallssongs uebrig.
     const sourceArtists = new Set(_artistKeys(song.artist));
-    const scored = [];
-    window.globalSongsData.forEach(s => {
-        if (s.id === song.id) { scored.push({ song: s, score: Infinity }); return; }
-        const sVibes = s.vibes || [];
-        const sMain = _getMainVibes(s.id);
-        let score = 0;
-        sVibes.forEach(v => {
-            // Reicht als Ausschluss: sourceVibes ist bereits ohne die ignorierten Vibes,
-            // ein HYPE/Carpool des Zielsongs findet hier also nie eine Entsprechung.
-            if (!sourceVibes.includes(v)) return;
-            const mainHits = (sourceMain.includes(v) ? 1 : 0) + (sMain.includes(v) ? 1 : 0);
-            score += 1 + mainHits;
-        });
-        if (sourceArtists.size > 0 && _artistKeys(s.artist).some(a => sourceArtists.has(a))) score += 2;
-        if (score > 0) scored.push({ song: s, score });
+    const scored = _rankByVibeSimilarity(song).map(e => {
+        const same = sourceArtists.size > 0 && _artistKeys(e.song.artist).some(a => sourceArtists.has(a));
+        return { song: e.song, sim: e.sim, same, score: e.sim + (same ? STATION_ARTIST_BONUS : 0), r: e.r };
     });
-    scored.sort((a, b) => b.score - a.score || Math.random() - 0.5);
+    scored.sort((a, b) => (b.score - a.score) || (a.r - b.r));
     // Kein Deckel auf die Anzahl: alles ab Schwelle kommt rein (gespeichert werden nur IDs,
-    // siehe createStationForSong - eine lange Liste kostet daher kaum Platz).
-    let stationSongs = scored.filter(x => x.score >= 2).map(x => x.song);
+    // siehe createStationForSong - eine lange Liste kostet daher kaum Platz). Der Ausgangssong
+    // steht immer vorn.
+    let stationSongs = [song, ...scored.filter(x => x.same || x.sim >= STATION_MIN_SCORE).map(x => x.song)];
     // Greift nur noch, wenn wirklich nichts passt (kein Vibe, kein zweiter Song des
     // Kuenstlers). 25 statt 5, damit ein Sender auch dann laenger als eine Minute traegt.
     if (stationSongs.length <= 1) {
@@ -260,6 +324,55 @@ function _buildStationSongs(song) {
         stationSongs = Array.from(new Set([song, ...stationSongs, ...randomFill]));
     }
     return stationSongs;
+}
+
+// Anzeigename des ersten Kuenstlers im Feld ("A feat. B" -> "A"), Gross-/Kleinschreibung bleibt
+// fuer die Beschriftung erhalten; der Vergleich laeuft weiter ueber _artistKeys (klein).
+function _primaryArtistName(artist) {
+    return String(artist || '').split(/\s*(?:,|&|\bfeat\.?\b|\bft\.?\b|\bx\b|\bvs\.?\b|\bwith\b)\s*/i)[0].trim();
+}
+
+// Kuenstler-Sender: ZUERST alle Songs dieses Kuenstlers (auch als Feature), die vom Vibe her am
+// naechsten am Ausgangssong liegen, danach seine weniger passenden; DANACH Songs anderer
+// Kuenstler, ebenfalls nach Vibe-Naehe, und ganz am Ende die voellig anderen. Die Reihenfolge
+// ist hier Absicht (siehe _softShuffle) und wird NICHT zufaellig gemischt gespeichert.
+function _buildArtistStationSongs(song, artistKey) {
+    const key = String(artistKey || '').toLowerCase();
+    const ctx = _stationVibeContext();
+    const anchor = ctx.vecOf(song);
+    const own = [], others = [];
+    (window.globalSongsData || []).forEach(s => {
+        if (s.id === song.id) return;
+        const e = { song: s, sim: _vibeScore(anchor, ctx.vecOf(s)), r: Math.random() };
+        (key && _artistKeys(s.artist).includes(key) ? own : others).push(e);
+    });
+    const byRank = (a, b) => (b.sim - a.sim) || (a.r - b.r);
+    own.sort(byRank); others.sort(byRank);
+    return { key, ownCount: own.length + 1, ordered: [song, ...own.map(e => e.song), ...others.map(e => e.song)] };
+}
+
+// Mischt, haelt aber die Grundordnung: Position i bekommt einen Zufallsversatz, der mit der
+// Tiefe waechst (vorn eng, hinten locker). So kommen bei Zufall/Shuffle weiterhin zuerst die
+// passendsten, und mit der Zeit mischen sich die weniger passenden stärker - genau die
+// Beschreibung "immer weniger zum Vibe passend". Nur fuer Kuenstler-Sender.
+function _softShuffle(arr) {
+    return arr.map((s, i) => ({ s, k: i + Math.random() * (8 + i * 0.5) }))
+        .sort((a, b) => a.k - b.k).map(x => x.s);
+}
+function _orderedStation(id) {
+    if (!String(id).startsWith('station_')) return null;
+    try { return JSON.parse(localStorage.getItem('heatbox_stations') || '[]').find(x => x.id === id && x.kind === 'artist') || null; }
+    catch (e) { return null; }
+}
+// Ein Aufruf fuer alle Shuffle-Stellen: Kuenstler-Sender weich mischen, und zwar Kuenstler-Teil
+// und Fremd-Teil GETRENNT - sonst rutschen Fremde zwischen die Kuenstler-Songs, die laut Vorgabe
+// erst danach kommen sollen. Alles andere wie bisher voll zufaellig.
+function _shuffleForList(listId, arr) {
+    const st = _orderedStation(listId);
+    if (!st) return _shuffle(arr);
+    const own = [], rest = [];
+    arr.forEach(s => (st.artistKey && _artistKeys(s.artist).includes(st.artistKey) ? own : rest).push(s));
+    return [..._softShuffle(own), ..._softShuffle(rest)];
 }
 
 // Einstellbare Groesse fuer Sender/Vibe-Mixe (Einstellungen -> "Sender & Vibe Mixe"): "pool" =
@@ -2305,7 +2418,7 @@ function initApp() {
         // "Fremdkoerper" in dieser Warteschlange, ihre Ausnahme von der Kennung waere veraltet.
         window._manuallyQueuedIds.clear();
         const isShuffle = document.getElementById('btn-shuffle')?.classList.contains('ctrl-active');
-        if (isShuffle) queueToPlay = _shuffle(queueToPlay);
+        if (isShuffle) queueToPlay = _shuffleForList(listId, queueToPlay);
 
         const first = queueToPlay[0];
         playbackQueue = queueToPlay.slice(1);
@@ -3644,12 +3757,48 @@ let _bgCacheActive = false;
         if (typeof window.openPlaylistDetails === 'function') window.openPlaylistDetails(newStation.id, newStation.name);
     };
 
+    // Kuenstler-Sender (2026-10-01): Titel dieses Kuenstlers hauptsaechlich, nach Vibe-Naehe zum
+    // Ausgangssong geordnet - siehe _buildArtistStationSongs. Gespeichert wird die Reihenfolge
+    // selbst (kein Zufalls-Auszug wie beim Song-Sender), `kind: 'artist'` schaltet das weiche
+    // Mischen (_shuffleForList) und das geordnete "+50" frei.
+    window.createArtistStationForSong = function(song) {
+        if (!song || !song.title) { _showToast('⚠️ Song nicht gefunden – Sender nicht erstellt'); return; }
+        const name = _primaryArtistName(song.artist);
+        const key = name.toLowerCase();
+        if (key.length < 2) { _showToast('⚠️ Kein Künstler am Song – Sender nicht erstellt'); return; }
+        const res = _buildArtistStationSongs(song, key);
+        // Alle Songs des Kuenstlers kommen rein (auch wenn es mehr als die Startgroesse sind),
+        // der Rest bis zur Startgroesse mit den naechstpassenden Fremden.
+        const keep = Math.max(_getStationSizeSettings().initial, res.ownCount);
+        const stationSongs = res.ordered.slice(0, keep);
+        const newStation = {
+            id: 'station_' + Date.now(),
+            name: 'Sender: ' + name,
+            cover_data: song.cover_data || song.coverUrl || '',
+            sourceSongId: song.id,
+            kind: 'artist',
+            artistKey: key,
+            songIds: stationSongs.map(s => s.id),
+            expires: Date.now() + (24 * 60 * 60 * 1000),
+            pinned: false
+        };
+        const savedStations = JSON.parse(localStorage.getItem('heatbox_stations') || '[]');
+        savedStations.unshift(newStation); localStorage.setItem('heatbox_stations', JSON.stringify(savedStations));
+        if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
+        _showToast(`Künstler-Sender – ${Math.min(res.ownCount, stationSongs.length)} Songs von ${name}, ${Math.max(0, stationSongs.length - res.ownCount)} ähnliche dazu`);
+        if (typeof window.openPlaylistDetails === 'function') window.openPlaylistDetails(newStation.id, newStation.name);
+    };
+
     if(ctxCreateStation) {
         ctxCreateStation.addEventListener('click', () => {
             songContextOverlay.classList.remove('active');
             window.createStationForSong(window._resolveSongById(window.currentContextSongId));
         });
     }
+    document.getElementById('ctx-create-artist-station')?.addEventListener('click', () => {
+        songContextOverlay.classList.remove('active');
+        window.createArtistStationForSong(window._resolveSongById(window.currentContextSongId));
+    });
 
     const editOverlay = document.getElementById('edit-tags-overlay');
     const editTitle = document.getElementById('edit-input-title');
@@ -4519,7 +4668,7 @@ async function createNewPlaylistProcess() {
             candidatePool = _resolveMixSongs(item, { unbounded: true }) || [];
         } else if (item.sourceSongId != null) {
             const src = window._songIndex?.get(item.sourceSongId);
-            candidatePool = src ? _buildStationSongs(src) : [];
+            candidatePool = !src ? [] : (item.kind === 'artist' ? _buildArtistStationSongs(src, item.artistKey).ordered : _buildStationSongs(src));
         } else {
             // Aelterer Sender ohne sourceSongId (vor dieser Aenderung erstellt): kein Topf zum
             // Nachbauen vorhanden, Erweitern hier nicht moeglich.
@@ -4529,7 +4678,10 @@ async function createNewPlaylistProcess() {
         const remaining = candidatePool.filter(s => !currentIds.has(s.id));
         if (remaining.length === 0) { _showToast('Keine weiteren passenden Songs übrig'); return; }
         const ADD_STEP = 50;
-        const toAdd = remaining.length > ADD_STEP ? _shuffle([...remaining]).slice(0, ADD_STEP) : remaining;
+        // Kuenstler-Sender: die naechstpassenden IN REIHENFOLGE nachziehen (die Ordnung ist dort
+        // der Sinn), alle anderen wie bisher zufaellig aus dem Topf.
+        const toAdd = remaining.length <= ADD_STEP ? remaining
+            : (item.kind === 'artist' ? remaining.slice(0, ADD_STEP) : _shuffle([...remaining]).slice(0, ADD_STEP));
         item.songIds = [...(item.songIds || []), ...toAdd.map(s => s.id)];
         _saveStationLikeList(type, list);
         _showToast(`+${toAdd.length} Songs dazu (${item.songIds.length} gesamt)`);
@@ -4860,7 +5012,7 @@ async function createNewPlaylistProcess() {
 
     document.getElementById('btn-pld-shuffle')?.addEventListener('click', () => {
         if(window.currentPlaylistSongs.length === 0) return; window.currentPlayingPlaylistId = window.currentOpenPlaylistId; 
-        const shuffled = _shuffle([...window.currentPlaylistSongs]); const first = shuffled[0]; playbackQueue = shuffled.slice(1); window.playSong(first.title, first.artist, first.cover_data, first.file_url); savePlayerState();
+        const shuffled = _shuffleForList(window.currentOpenPlaylistId, [...window.currentPlaylistSongs]); const first = shuffled[0]; playbackQueue = shuffled.slice(1); window.playSong(first.title, first.artist, first.cover_data, first.file_url); savePlayerState();
     });
 
     document.getElementById('btn-pld-search')?.addEventListener('click', () => {
@@ -5171,6 +5323,11 @@ async function createNewPlaylistProcess() {
         // gefuellt, waehrend _songIndex je nach Ladezustand noch leer sein kann.
         const activeId = window.currentPlayingSongId ?? (window.currentSongData ? window.currentSongData.id : null);
         window.createStationForSong(window._resolveSongById(activeId) || window.currentSongData);
+    });
+    document.getElementById('bp-ctx-create-artist-station')?.addEventListener('click', () => {
+        document.getElementById('big-player-context-overlay').classList.remove('active');
+        const activeId = window.currentPlayingSongId ?? (window.currentSongData ? window.currentSongData.id : null);
+        window.createArtistStationForSong(window._resolveSongById(activeId) || window.currentSongData);
     });
 
     document.getElementById('bp-ctx-edit-tags')?.addEventListener('click', () => { document.getElementById('big-player-context-overlay').classList.remove('active'); document.getElementById('ctx-edit-tags').click(); });
