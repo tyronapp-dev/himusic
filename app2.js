@@ -89,8 +89,17 @@ function _shuffle(arr) {
 // weiterhin nur den reinen Vibe-Namen, keiner muss vom Marker wissen.
 const MAIN_VIBE_MARKER = '*';
 
+// System-Kennzeichen im vibes-Feld (Praefix "!"), gleiche Idee wie MAIN_VIBE_MARKER: reisen ueber
+// PUT /songs/:id mit, sind aber KEINE Vibes - _parseVibes filtert sie immer komplett raus.
+// META_CHECKED_MARKER = "Titel/Kuenstler wurden geprueft (Zwei-Zeugen-Abgleich, 2026-10-01), Vibes
+// fehlen ggf. noch" -> gruener statt roter Punkt (siehe _isMetaChecked).
+const SYSTEM_VIBE_PREFIX = '!';
+const META_CHECKED_MARKER = '!meta-ok';
+
 function _parseVibes(v) {
-    return _rawVibesArray(v).map(x => (typeof x === 'string' && x.startsWith(MAIN_VIBE_MARKER)) ? x.slice(MAIN_VIBE_MARKER.length) : x);
+    return _rawVibesArray(v)
+        .filter(x => !(typeof x === 'string' && x.startsWith(SYSTEM_VIBE_PREFIX)))
+        .map(x => (typeof x === 'string' && x.startsWith(MAIN_VIBE_MARKER)) ? x.slice(MAIN_VIBE_MARKER.length) : x);
 }
 
 // Gegenstueck zu _parseVibes: statt den Marker zu entfernen, liefert diese Funktion nur
@@ -187,6 +196,34 @@ function _setMainVibes(songId, vibesArr) {
     const map = _loadMainVibesMap();
     if (vibesArr.length === 0) delete map[songId]; else map[songId] = vibesArr;
     localStorage.setItem('himusic_main_vibes', JSON.stringify(map));
+}
+
+// "Titel geprueft"-Kennzeichen (META_CHECKED_MARKER). Wie die Hauptvibes: persistent im vibes-Feld
+// auf dem Server, lokal als Set gecacht, weil _parseVibes den Marker beim Laden entfernt. Wird bei
+// jedem fetchSongsFromDatabase() komplett aus den Rohdaten neu aufgebaut (EIN localStorage-Write).
+let _metaCheckedCache = null;
+function _loadMetaChecked() {
+    if (_metaCheckedCache) return _metaCheckedCache;
+    try { _metaCheckedCache = new Set(JSON.parse(localStorage.getItem('himusic_meta_checked') || '[]').map(String)); }
+    catch (e) { _metaCheckedCache = new Set(); }
+    return _metaCheckedCache;
+}
+function _isMetaChecked(songId) { return songId != null && _loadMetaChecked().has(String(songId)); }
+function _setMetaCheckedFromRaw(rawSongs) {
+    _metaCheckedCache = new Set(rawSongs.filter(s => _rawVibesArray(s.vibes).includes(META_CHECKED_MARKER)).map(s => String(s.id)));
+    try { localStorage.setItem('himusic_meta_checked', JSON.stringify([..._metaCheckedCache])); } catch (e) {}
+}
+
+// Vibes fuer ein PUT /songs/:id zusammenbauen - IMMER hierueber, nie _parseVibes(...) direkt senden:
+// die gespeicherten Song-Objekte enthalten nur die nackten Namen, Hauptvibe-"*" und System-
+// Kennzeichen muessen fuers Backend wieder dran. Bis 2026-10-01 schickten Song-Kuerzen, Hinter-
+// grund-Sync und Spotify-Pruefung die nackten Namen - die Hauptvibes des Songs gingen dabei auf dem
+// Server verloren und verschwanden beim naechsten Laden auch lokal.
+function _vibesForSave(songId, vibes) {
+    const main = _getMainVibes(songId);
+    const out = _parseVibes(vibes).map(v => main.includes(v) ? MAIN_VIBE_MARKER + v : v);
+    if (_isMetaChecked(songId)) out.push(META_CHECKED_MARKER);
+    return out;
 }
 
 // Baut den Vibes-Text für den Big Player, Hauptvibes fett + in der aktuellen Akzentfarbe (var(--accent),
@@ -1409,7 +1446,7 @@ window._applyNativeNowPlaying = function(payload) {
     if (largeCover) { largeCover.style.backgroundImage = bgStyle !== 'none' ? bgStyle : 'var(--accent)'; largeCover.style.backgroundSize = 'cover'; }
     _renderVibesText(bpHv, window.currentSongData.vibes, payload.id);
     const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
-    if (bpNoVibesDot) bpNoVibesDot.style.display = (window.currentSongData.vibes && window.currentSongData.vibes.length > 0) ? 'none' : 'block';
+    if (bpNoVibesDot) { bpNoVibesDot.style.display = (window.currentSongData.vibes && window.currentSongData.vibes.length > 0) ? 'none' : 'block'; bpNoVibesDot.classList.toggle('checked', _isMetaChecked(window.currentSongData.id)); }
 
     const homeNpCover = document.getElementById('home-np-cover');
     const homeNpTitle = document.getElementById('home-np-title');
@@ -2954,7 +2991,7 @@ let _bgCacheActive = false;
         if(largeCover) { largeCover.style.backgroundImage = bgStyle !== 'none' ? bgStyle : 'var(--accent)'; largeCover.style.backgroundSize = 'cover'; }
         _renderVibesText(bpHv, window.currentSongData.vibes, window.currentSongData.id);
         const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
-        if (bpNoVibesDot) bpNoVibesDot.style.display = (window.currentSongData.vibes && window.currentSongData.vibes.length > 0) ? 'none' : 'block';
+        if (bpNoVibesDot) { bpNoVibesDot.style.display = (window.currentSongData.vibes && window.currentSongData.vibes.length > 0) ? 'none' : 'block'; bpNoVibesDot.classList.toggle('checked', _isMetaChecked(window.currentSongData.id)); }
 
         const homeNpCover = document.getElementById('home-np-cover');
         const homeNpTitle = document.getElementById('home-np-title');
@@ -3449,6 +3486,7 @@ let _bgCacheActive = false;
                 // Hauptvibe-Cache aus den ROHEN Server-Daten wiederherstellen, BEVOR
                 // _parseVibes() den Marker gleich darunter entfernt - siehe MAIN_VIBE_MARKER.
                 all.forEach(s => { _setMainVibes(s.id, _extractMainVibes(s.vibes)); });
+                _setMetaCheckedFromRaw(all);
                 all.forEach(s => { s.vibes = _parseVibes(s.vibes); });
                 window.globalSongsData = all;
                 window._songIndex = new Map(all.map(s => [s.id, s]));
@@ -3491,7 +3529,7 @@ let _bgCacheActive = false;
         // Roter Punkt = Song hat noch keine Vibe-Tags gesetzt (siehe [[feedback]] Wunsch: sofort
         // erkennbar, sowohl in der Liste als auch im großen Player, verschwindet sobald Vibes da sind.
         const hasVibes = _parseVibes(song.vibes).length > 0;
-        const noVibesDotHtml = hasVibes ? '' : '<span class="no-vibes-dot"></span>';
+        const noVibesDotHtml = hasVibes ? '' : `<span class="no-vibes-dot${_isMetaChecked(song.id) ? ' checked' : ''}"></span>`;
         let coverHtml = '';
         if (song.cover_data && song.cover_data.length > 10) { coverHtml = `<div class="song-cover" style="background-image: url('${_cssUrl(song.cover_data)}'); background-size: cover; background-position: center; border-radius: 6px;">${noVibesDotHtml}</div>`; }
         else { const hue = Math.floor(Math.random() * 360); coverHtml = `<div class="song-cover" style="background: hsl(${hue}, 70%, 50%); display:flex; justify-content:center; align-items:center; border-radius: 6px;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="2"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>${noVibesDotHtml}</div>`; }
@@ -4024,7 +4062,7 @@ let _bgCacheActive = false;
             // Ans Backend geht eine EIGENE Kopie mit "*"-markierten Hauptvibes (siehe
             // MAIN_VIBE_MARKER) - changes selbst bleibt unmarkiert, weil es auch fuers lokale
             // Song-Objekt und applySongPatch (DOM) verwendet wird und dort niemand den Marker kennt.
-            const apiPayload = { ...changes, vibes: selectedVibes.map(v => mainVibes.includes(v) ? MAIN_VIBE_MARKER + v : v) };
+            const apiPayload = { ...changes, vibes: _vibesForSave(window.currentEditSongId, selectedVibes) };
 
             const song = window._songIndex?.get(window.currentEditSongId) || window._songIndex?.get(parseInt(window.currentEditSongId));
             if (song) Object.assign(song, changes);
@@ -4060,7 +4098,7 @@ let _bgCacheActive = false;
                     const bgStyle = changes.cover_data && changes.cover_data.length > 10 ? `url('${changes.cover_data}')` : null;
 
                     const bpNoVibesDot = document.getElementById('bp-no-vibes-dot');
-                    if (bpNoVibesDot) bpNoVibesDot.style.display = hasVibesNow ? 'none' : 'block';
+                    if (bpNoVibesDot) { bpNoVibesDot.style.display = hasVibesNow ? 'none' : 'block'; bpNoVibesDot.classList.toggle('checked', _isMetaChecked(songId)); }
                     const bpHv = document.getElementById('bp-header-vibes');
                     _renderVibesText(bpHv, selectedVibes, songId);
                     const bpTitle = document.getElementById('bp-song-name');
@@ -4161,7 +4199,7 @@ let _bgCacheActive = false;
                 if (trimStatus) trimStatus.innerText = 'Speichere...';
                 await apiUpdateSong(song.id, {
                     title: song.title, artist: song.artist, cover_data: song.cover_data,
-                    vibes: _parseVibes(song.vibes), file_url: uploadData.url, duration: newDuration
+                    vibes: _vibesForSave(song.id, song.vibes), file_url: uploadData.url, duration: newDuration
                 });
                 song.file_url = uploadData.url; song.duration = newDuration;
                 if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, { file_url: uploadData.url, duration: newDuration });
@@ -4330,11 +4368,9 @@ let _bgCacheActive = false;
         if (_noVibeFilterActive) { _noVibeFilterActive = false; _currentFilteredSongs = null; songsContainer.innerHTML = ''; allSongsElements.forEach(el => songsContainer.appendChild(el)); return; }
         _noVibeFilterActive = true; songsContainer.innerHTML = '<div style="text-align:center; padding: 20px; color: var(--text-secondary);">Lade Songs ohne Vibe...</div>';
 
-        const noVibeSongs = window.globalSongsData.filter(song => {
-            let vibes = song.vibes;
-            if (typeof vibes === 'string') { try { vibes = JSON.parse(vibes); } catch(e) { vibes = []; } }
-            if (!Array.isArray(vibes)) vibes = []; return vibes.length === 0;
-        });
+        // _parseVibes statt eigenem JSON.parse: filtert System-Kennzeichen (META_CHECKED_MARKER), die
+        // sonst als "Vibe" zaehlen wuerden, falls vibes hier doch einmal roh als String ankommt.
+        const noVibeSongs = window.globalSongsData.filter(song => _parseVibes(song.vibes).length === 0);
 
         if (noVibeSongs.length === 0) { songsContainer.innerHTML = '<div style="text-align:center; padding: 40px 20px; color: var(--text-secondary);">Alle Songs haben bereits einen Vibe 🎉</div>'; return; }
 
@@ -4367,8 +4403,7 @@ let _bgCacheActive = false;
 
             const filterNoVibe = selectedFilterVibes.includes('__no_vibe__'); const realVibes = selectedFilterVibes.filter(v => v !== '__no_vibe__');
             const matched = lazyAllSongs.filter(song => {
-                let vibes = song.vibes; if (typeof vibes === 'string') { try { vibes = JSON.parse(vibes); } catch(e) { vibes = []; } }
-                if (!Array.isArray(vibes)) vibes = []; const clean = vibes.filter(v => v && v.toString().trim() !== '');
+                const clean = _parseVibes(song.vibes).filter(v => v && v.toString().trim() !== '');
                 const hasNoVibes = clean.length === 0; const hasRealVibe = realVibes.length > 0 && clean.some(v => realVibes.includes(v));
                 return (filterNoVibe && hasNoVibes) || hasRealVibe;
             });
@@ -5779,7 +5814,7 @@ async function createNewPlaylistProcess() {
                         const patch = { title: meta.title, artist: meta.artist, album: meta.album || "", cover_data: meta.cover, vibes: _parseVibes(song.vibes) };
                         await _apiFetch(`${API_URL}/songs/${song.id}`, {
                             method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(patch), signal: _mkTimeout(15000)
+                            body: JSON.stringify({ ...patch, vibes: _vibesForSave(song.id, song.vibes) }), signal: _mkTimeout(15000)
                         });
                         if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, patch);
                         updated++;
@@ -6300,6 +6335,7 @@ window.applySongPatch = function(id, patch) {
                 let dot = c.querySelector('.no-vibes-dot');
                 if (hasVibes && dot) dot.remove();
                 else if (!hasVibes && !dot) { dot = document.createElement('span'); dot.className = 'no-vibes-dot'; c.appendChild(dot); }
+                if (dot && !hasVibes) dot.classList.toggle('checked', _isMetaChecked(id));
             }
         }
     });
@@ -6691,7 +6727,7 @@ async function processBackgroundSync() {
                     }
                     await _apiFetch(`${API_URL}/songs/${song.id}`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ ...patch, vibes: _parseVibes(song.vibes) }),
+                        body: JSON.stringify({ ...patch, vibes: _vibesForSave(song.id, song.vibes) }),
                         signal: _mkTimeout(15000)
                     });
                     if (typeof window.applySongPatch === 'function') window.applySongPatch(song.id, patch);

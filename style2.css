@@ -587,6 +587,8 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     pointer-events: none;
 }
 .large-cover .no-vibes-dot { top: 10px; right: 10px; width: 16px; height: 16px; border-width: 3px; }
+/* Gruen statt rot: Titel/Kuenstler wurden schon geprueft (META_CHECKED_MARKER), es fehlen nur noch die Vibes. */
+.no-vibes-dot.checked { background: #30d158; }
 
 /* ─── Pin-Markierung: angepinnte Sender/Vibe-Mixe überleben die 24h-Auto-Löschung ──────── */
 .pin-badge {
