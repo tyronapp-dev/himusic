@@ -440,7 +440,25 @@ function _shuffleForList(listId, arr) {
         // Ausgangssong geloescht: nur noch nach Kuenstler trennen, Vibe-Naehe nicht berechenbar.
         arr.forEach(s => (st.artistKey && _artistKeys(s.artist).includes(st.artistKey) ? tiers[0] : tiers[3]).push(s));
     }
-    return tiers.flatMap(t => _softShuffle(t));
+    // "Zufall" darf NICHT wie "Abspielen" wirken (Nutzer-Rueckmeldung 2026-10-01): vorher mischte
+    // _softShuffle auch Stufe 0 so eng, dass fast immer der Ausgangssong zuerst lief. Jetzt:
+    //  - Startsong echt zufaellig aus Stufe 0 (Kuenstler, naher Vibe). Hat der Topf < 3 Songs, wird
+    //    stufenweise aufgefuellt: naechstpassende fremde (Stufe 1, Rang-Reihenfolge), dann die
+    //    uebrigen Kuenstler-Songs (Stufe 2, z.B. wenn der Ausgangssong selbst keine Vibes hat und
+    //    es deshalb gar keine "nahen" gibt), zuletzt Stufe 3 - sonst waere der Start bei kleinen
+    //    Kuenstlern / ungetaggtem Ausgangssong trotzdem immer derselbe Song.
+    //  - danach restliche Kuenstler-Songs voll gemischt, ab Stufe 1 weiter weich (passendste zuerst).
+    const START_POOL_MIN = 3;
+    const startPool = [...tiers[0]];
+    for (const i of [1, 2, 3]) {
+        if (startPool.length >= START_POOL_MIN) break;
+        // Stufe 2 ganz: die uebrigen Kuenstler-Songs sind untereinander gleich (un)passend
+        startPool.push(...(i === 2 ? tiers[2] : tiers[i].slice(0, START_POOL_MIN - startPool.length)));
+    }
+    if (startPool.length === 0) return [];
+    const first = startPool[Math.floor(Math.random() * startPool.length)];
+    const rest = tiers.map(t => t.filter(s => s !== first));
+    return [first, ..._shuffle(rest[0]), ...rest.slice(1).flatMap(t => _softShuffle(t))];
 }
 
 // Einstellbare Groesse fuer Sender/Vibe-Mixe (Einstellungen -> "Sender & Vibe Mixe"): "pool" =
