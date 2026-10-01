@@ -1244,7 +1244,13 @@ async function _ytImportOne(item) {
         }
     }
 
-    const fname = 'fast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '_local_yt.m4a';
+    // Seit 2026-10-01 traegt der Dateiname die YouTube-Video-ID ("_yt_<id>.m4a" statt "_local_yt.m4a").
+    // Grund: beim Titel-Abgleich (Zwei-Zeugen-Regel) hatten In-App-Importe keinen zweiten Zeugen -
+    // der Dateiname war bei allen gleich, die Herkunft nicht mehr rekonstruierbar. Mit der ID laesst
+    // sich der Original-Upload jederzeit eindeutig nachschlagen. Nur bei gueltiger 11-Zeichen-ID
+    // (landet im URL-Pfad von PUT /upload/), sonst der alte Name.
+    const fname = 'fast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7)
+        + (/^[A-Za-z0-9_-]{11}$/.test(ex.videoId || '') ? '_yt_' + ex.videoId : '_local_yt') + '.m4a';
     const verifyUrl = `${API_URL}/media/${fname}`;   // Worker-Route - hier ist der API-Key ok
     let fileUrl = verifyUrl;
 
@@ -2055,6 +2061,30 @@ function _durationMismatch(localDurationSec, resultDurationSec) {
 // trotzdem noch treffen) - niedrigerer Schwellwert nur für die Spotify-Prüfung.
 const _META_MATCH_THRESHOLD_SPOTIFY = 0.22;
 
+// Nachgespielte Versionen, die NIE als Treffer gelten (ausser der lokale Titel verlangt genau das,
+// z.B. "... (Instrumental)"). Gefunden beim Titel-Abgleich 2026-10-01: iTunes lieferte fuer
+// bekannte Songs als ersten Treffer oft eine Karaoke-Fassung ("Done Again - 21 Questions (In The
+// Style Of 50 Cent) [Performance Track]") - gleicher Titel, fast gleiche Laenge, also bestand sie
+// Text- UND Laengen-Check und landete als Name + Cover in der Bibliothek.
+const _META_BAD_VERSION = /karaoke|in the style of|performance track|demonstration vocals|made famous|tribute|backing track|instrumental|cover version|8-bit|lullaby|piano version/i;
+function _isBadVersion(resultLabel, localTitle) {
+    return _META_BAD_VERSION.test(resultLabel || '') && !_META_BAD_VERSION.test(localTitle || '');
+}
+
+// Zweiter Zeuge fuer den KUENSTLER bei automatischen Abgleichen (strict): der Kuenstler des
+// Treffers muss in der Quelle selbst vorkommen - im Original-Titel (YouTube-Titel / Dateiname
+// enthalten ihn fast immer) oder im gespeicherten Kuenstler. Ohne das reichten ein aehnlicher
+// Titel + passende Laenge: "Give It To Me" (eigentlich Timbaland) wurde zu "Rick James - Give It
+// to Me Baby". Steht kein Kuenstler in der Quelle, gibt es keinen Treffer -> Song bleibt
+// "Unbekannt" zur manuellen Bearbeitung, statt still falsch benannt zu werden.
+function _artistConfirmedBySource(localTitle, localArtist, resultArtist) {
+    const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '');
+    const known = localArtist && !/^unbekannt/i.test(String(localArtist).trim());
+    const hay = norm(localTitle) + (known ? norm(localArtist) : '');
+    return String(resultArtist || '').split(/,|&|\bfeat\.?|\bft\.?|\bx\b|\bwith\b/i)
+        .map(norm).filter(k => k.length >= 3).some(k => hay.includes(k));
+}
+
 // Levenshtein-Distanz: zählt einzelne Buchstaben-Änderungen (einfügen/löschen/ersetzen) zwischen
 // zwei Strings - bildet "X Buchstaben falsch" direkter ab als der Bigram-Vergleich oben, der bei
 // KURZEN Titeln schon bei 1-2 vertippten Buchstaben unverhältnismäßig stark einbricht (ein
@@ -2100,7 +2130,9 @@ function _typoToleratedMatch(localTitle, localArtist, resultTitle, resultArtist)
 // Spotify-Suche über den Worker. Liefert das volle Metadaten-Objekt {title, artist, cover}
 // oder null. data.error === "rate_limited" → Spotify drosselt gerade unsere App-Kennung;
 // der Aufrufer kann das anzeigen bzw. auf iTunes ausweichen.
-async function searchSongMetaSpotify(title, artist, localDurationSec = 0, retryCount = 0) {
+// strict=true (Standard) fuer alle automatischen Abgleiche, die ohne Rueckfrage schreiben;
+// false nur fuer die Such-Knoepfe im Tag-Editor (dort sieht der Nutzer das Ergebnis vor dem Speichern).
+async function searchSongMetaSpotify(title, artist, localDurationSec = 0, retryCount = 0, strict = true) {
     const q = _cleanSearchTerm(title, artist);
     if (!q) return null;
     try {
@@ -2116,6 +2148,8 @@ async function searchSongMetaSpotify(title, artist, localDurationSec = 0, retryC
         // pro Feld (typoOk) - letzteres fängt genau die Fälle "1-3 Buchstaben falsch", die der
         // Bigram-Vergleich bei kurzen Titeln fälschlich verwirft.
         const resultLabel = `${data.result.title || ''} ${data.result.artist || ''}`;
+        if (_isBadVersion(`${resultLabel} ${data.result.album || ''}`, title)) return null;
+        if (strict && !_artistConfirmedBySource(title, artist, data.result.artist)) return null;
         const diceOk = _stringSimilarity(`${title} ${artist || ''}`, resultLabel) >= _META_MATCH_THRESHOLD_SPOTIFY;
         const typoOk = _typoToleratedMatch(title, artist, data.result.title, data.result.artist);
         if (!diceOk && !typoOk) return null;
@@ -2128,35 +2162,40 @@ async function searchSongMetaSpotify(title, artist, localDurationSec = 0, retryC
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
             await new Promise(resolve => setTimeout(resolve, 1000));
-            return searchSongMetaSpotify(title, artist, localDurationSec, retryCount + 1);
+            return searchSongMetaSpotify(title, artist, localDurationSec, retryCount + 1, strict);
         }
         return null;
     }
 }
 
 // iTunes-Suche (direkt, kein Key). Liefert {title, artist, cover} oder null.
-async function searchSongMetaItunes(title, artist, localDurationSec = 0, retryCount = 0) {
+async function searchSongMetaItunes(title, artist, localDurationSec = 0, retryCount = 0, strict = true) {
     const q = _cleanSearchTerm(title, artist);
     if (!q) return null;
     try {
-        const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=1`, { signal: AbortSignal.timeout(5000) });
+        // limit=10 statt 1: der erste Treffer war bei bekannten Songs oft eine Karaoke-Fassung
+        // (siehe _META_BAD_VERSION). Jetzt der erste Treffer, der ALLE Pruefungen besteht.
+        const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=10`, { signal: AbortSignal.timeout(5000) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        const t = data.results && data.results[0];
+        const t = (data.results || []).find(r => {
+            const resultLabel = `${r.trackName || ''} ${r.artistName || ''}`;
+            if (_isBadVersion(`${resultLabel} ${r.collectionName || ''}`, title)) return false;
+            if (strict && !_artistConfirmedBySource(title, artist, r.artistName)) return false;
+            const diceOk = _stringSimilarity(`${title} ${artist || ''}`, resultLabel) >= _META_MATCH_THRESHOLD;
+            const typoOk = _typoToleratedMatch(title, artist, r.trackName, r.artistName);
+            if (!diceOk && !typoOk) return false;
+            // Zweite Absicherung per Songlänge (siehe _durationMismatch) - iTunes liefert die Länge in
+            // der Suchantwort immer mit (trackTimeMillis).
+            const resultDurationSec = r.trackTimeMillis ? Math.round(r.trackTimeMillis / 1000) : 0;
+            return !_durationMismatch(localDurationSec, resultDurationSec);
+        });
         if (!t) return null;
-        const resultLabel = `${t.trackName || ''} ${t.artistName || ''}`;
-        const diceOk = _stringSimilarity(`${title} ${artist || ''}`, resultLabel) >= _META_MATCH_THRESHOLD;
-        const typoOk = _typoToleratedMatch(title, artist, t.trackName, t.artistName);
-        if (!diceOk && !typoOk) return null;
-        // Zweite Absicherung per Songlänge (siehe _durationMismatch) - iTunes liefert die Länge in
-        // der Suchantwort immer mit (trackTimeMillis), bisher ungenutzt.
-        const resultDurationSec = t.trackTimeMillis ? Math.round(t.trackTimeMillis / 1000) : 0;
-        if (_durationMismatch(localDurationSec, resultDurationSec)) return null;
         return { title: t.trackName, artist: t.artistName, album: t.collectionName || "", cover: (t.artworkUrl100 || '').replace('100x100bb', '600x600bb') || null };
     } catch (e) {
         if (retryCount < 2 && (e.name === 'AbortError' || e.message.includes('Failed to fetch'))) {
             await new Promise(resolve => setTimeout(resolve, 1000));
-            return searchSongMetaItunes(title, artist, localDurationSec, retryCount + 1);
+            return searchSongMetaItunes(title, artist, localDurationSec, retryCount + 1, strict);
         }
         return null;
     }
@@ -3969,7 +4008,7 @@ let _bgCacheActive = false;
         btnSearchItunes.addEventListener('click', async () => {
             btnSearchItunes.innerText = "Suche...";
             const editDuration = window._songIndex?.get(window.currentEditSongId)?.duration;
-            const meta = await searchSongMetaItunes(editTitle.value, editArtist.value, editDuration);
+            const meta = await searchSongMetaItunes(editTitle.value, editArtist.value, editDuration, 0, false);
             btnSearchItunes.innerText = _applyEditorMeta(meta) ? "Gefunden!" : "Nichts gefunden";
             setTimeout(() => btnSearchItunes.innerHTML = ITUNES_BTN_HTML, 2000);
         });
@@ -3979,7 +4018,7 @@ let _bgCacheActive = false;
         btnSearchSpotify.addEventListener('click', async () => {
             btnSearchSpotify.innerText = "Suche...";
             const editDuration = window._songIndex?.get(window.currentEditSongId)?.duration;
-            const meta = await searchSongMetaSpotify(editTitle.value, editArtist.value, editDuration);
+            const meta = await searchSongMetaSpotify(editTitle.value, editArtist.value, editDuration, 0, false);
             if (meta && meta.rateLimited) {
                 // Spotify drosselt gerade → dem Nutzer sagen, was los ist, statt "nichts gefunden"
                 btnSearchSpotify.innerText = "Spotify überlastet – nutze iTunes";
