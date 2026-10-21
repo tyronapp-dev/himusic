@@ -606,7 +606,7 @@ final class PlayerViewModel: ObservableObject {
         let cache = AudioFileCache.shared
         let startedAt = Date()
         await cache.markCurrentlyPlaying(id: item.id)
-        let localURL = ignoreLocalCopy ? nil : await cache.localFileURL(forId: item.id)
+        let localURL = ignoreLocalCopy ? nil : await cache.localFileURL(for: item, online: hasNetwork)
         let known = await cache.knownDuration(forId: item.id)
         guard token == playbackToken else { return }
 
@@ -627,7 +627,7 @@ final class PlayerViewModel: ObservableObject {
             waitMs: waitMs, replacedAt: Date(), readyMs: nil
         )
         installCurrent(track, autoplay: autoplay)
-        journal("Start \"\(item.title)\" [\(source)] nach \(waitMs) ms, Index \(currentIndex)/\(queue.count)")
+        journal("Start \"\(item.title)\" [\(source)] nach \(waitMs) ms, Index \(currentIndex)/\(queue.count), id=\(item.id), Datei \(item.fileURL?.lastPathComponent ?? "?")")
         updateNowPlayingInfo()
         // Jeder Songstart ist ein frischer Anlauf fuers Cover - eine Merkung aus einem
         // frueheren Versuch (z.B. damals kein Netz) soll ihn nicht blockieren.
@@ -762,7 +762,7 @@ final class PlayerViewModel: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let cache = AudioFileCache.shared
-            let local = await cache.localFileURL(forId: nextItem.id)
+            let local = await cache.localFileURL(for: nextItem, online: self.hasNetwork)
             guard generation == self.preloadGeneration, token == self.playbackToken,
                   self.player.currentItem === current else { return }
             let source = local != nil ? "lokal" : "Stream (vorgeladen)"
@@ -1541,7 +1541,7 @@ final class PlayerViewModel: ObservableObject {
             let finalTarget = target
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let local = await AudioFileCache.shared.localFileURL(forId: item.id)
+                let local = await AudioFileCache.shared.localFileURL(for: item, online: self.hasNetwork)
                 // Nur der Song zaehlt, nicht der Token: der erste von zwei schnellen Tipps stellt
                 // um und erhoeht dabei den Token - ein Token-Vergleich liesse den ZWEITEN, juengeren
                 // Tipp verfallen, und der aeltere gewaenne ("springt auf die fruehere Stelle").

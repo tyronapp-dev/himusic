@@ -42,6 +42,17 @@ actor AudioFileCache {
         /// Gemessene Dauer der LOKALEN Datei in Sekunden (sample-genau, mit praeziser Zeitbasis
         /// gelesen). Optional, damit ein aelterer Index ohne dieses Feld weiter lesbar ist.
         var duration: Double?
+        /// Dateiname der Netzadresse, von der diese Kopie stammt (Herkunftsnachweis). Der Index ist
+        /// nach `id` geordnet - ohne diesen Nachweis lieferte er unter einer id JEDE Datei, die dort
+        /// liegt, auch eine alte oder fremde (id wiederverwendet, Datei des Songs ausgetauscht). Die
+        /// PWA spielt immer nach Adresse und kennt den Fehler nicht. nil = Eintrag aus einer Fassung
+        /// vor dem Nachweis: gilt als unbestaetigt (siehe localFileURL(for:)).
+        var src: String?
+    }
+
+    /// Herkunftsnachweis einer Adresse: der Dateiname (im Medien-Host eindeutig, enthaelt Zeitstempel).
+    private static func sourceName(of item: QueueItem) -> String? {
+        item.fileURL?.lastPathComponent
     }
 
     private let cacheDir: URL
@@ -190,6 +201,28 @@ actor AudioFileCache {
         return url
     }
 
+    /// Lokale Datei fuer DIESEN Song - aber nur, wenn die Kopie nachweislich von seiner Adresse stammt.
+    /// Passt die Herkunft nicht (oder fehlt sie bei einem alten Eintrag), wird die Kopie verworfen und
+    /// der Song streamt einmal und laedt dann neu. Kostet hoechstens einen Download pro betroffenem,
+    /// tatsaechlich gespieltem Song; die Bibliothek wird dadurch nicht neu geladen.
+    ///
+    /// `online`: ein alter Eintrag OHNE Herkunft wird nur verworfen, wenn Netz da ist - ohne Netz laesse
+    /// er sich nicht neu laden, und eine vermutlich intakte Offline-Kopie waere umsonst weg. Ein Eintrag
+    /// MIT Herkunft, die nicht passt, ist dagegen sicher falsch und wird immer verworfen.
+    func localFileURL(for item: QueueItem, online: Bool = true) -> URL? {
+        guard let entry = index[item.id] else { return nil }
+        guard let wanted = Self.sourceName(of: item) else { return localFileURL(forId: item.id) }
+        if entry.src == nil, !online { return localFileURL(forId: item.id) }
+        if entry.src != wanted {
+            PlaybackJournal.note("Cache: Kopie id=\(item.id) gehoert nicht zu dieser Adresse (\(entry.src ?? "ohne Herkunft") statt \(wanted)) -> verworfen")
+            try? FileManager.default.removeItem(at: fileURL(for: entry))
+            index.removeValue(forKey: item.id)
+            scheduleIndexSave()
+            return nil
+        }
+        return localFileURL(forId: item.id)
+    }
+
     /// Gemessene Dauer der lokalen Kopie, falls bekannt.
     func knownDuration(forId id: Int) -> Double? {
         guard let d = index[id]?.duration, d.isFinite, d > 0 else { return nil }
@@ -321,7 +354,7 @@ actor AudioFileCache {
     /// Laedt die Warteschlange genau diesen Song gerade, wird KEIN zweiter Download gestartet,
     /// sondern auf diesen gewartet.
     func fetchNow(item: QueueItem, maxWait: TimeInterval = .infinity) async -> URL? {
-        if let existing = localFileURL(forId: item.id) { return existing }
+        if let existing = localFileURL(for: item) { return existing }
         guard let remote = item.fileURL else { return nil }
         if !isBusy(item.id) {
             urgentQueue.removeAll { $0.id == item.id }
@@ -337,10 +370,10 @@ actor AudioFileCache {
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
             // hasCachedFile statt localFileURL: Letzteres fasst den Zugriffsstempel an.
-            if hasCachedFile(forId: item.id) { return localFileURL(forId: item.id) }
+            if hasCachedFile(forId: item.id) { return localFileURL(for: item) }
             if !isBusy(item.id) { break }
         }
-        return hasCachedFile(forId: item.id) ? localFileURL(forId: item.id) : nil
+        return hasCachedFile(forId: item.id) ? localFileURL(for: item) : nil
     }
 
     // MARK: - Download
@@ -461,7 +494,9 @@ actor AudioFileCache {
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: dest.path)
         let size = (attrs?[.size] as? Int64) ?? 0
-        index[item.id] = Entry(id: item.id, ext: ext, sizeBytes: size, lastAccessed: Date(), duration: measured)
+        // Lag unter dieser id eine Datei mit anderer Endung, wird sie hier nicht mehr referenziert - weg damit.
+        if let old = index[item.id], old.ext != ext { try? FileManager.default.removeItem(at: fileURL(for: old)) }
+        index[item.id] = Entry(id: item.id, ext: ext, sizeBytes: size, lastAccessed: Date(), duration: measured, src: Self.sourceName(of: item))
         scheduleIndexSave()
         enforceCap()
         onCached?(item.id)
