@@ -29,7 +29,12 @@ struct QueueItem: Codable, Identifiable, Equatable {
 
     var title: String { t }
     var artist: String { a }
-    var fileURL: URL? { URL(string: u) }
+    /// Nur Adressen des eigenen Medien-Hosts (siehe HimusicBuild.isAllowedMediaURL). Alles andere
+    /// ist fuer Wiedergabe, Download und Vorladen gleichermassen "keine Datei".
+    var fileURL: URL? {
+        guard let url = URL(string: u), HimusicBuild.isAllowedMediaURL(url) else { return nil }
+        return url
+    }
     var coverURL: URL? { c.flatMap { URL(string: $0) } }
     var sourceLabel: String? { (s?.isEmpty == false) ? s : nil }
     var dbDuration: Double? {

@@ -7,7 +7,19 @@ import UIKit
 /// fuer Verwirrung: "ist die neue IPA ueberhaupt installiert?" liess sich nur raten.
 /// Bei jeder Aenderung unter native-player/ hochzaehlen.
 enum HimusicBuild {
-    static let id = "2026-10-21.1"
+    static let id = "2026-10-21.2"
+
+    /// Einziger Host, von dem die Huelle Audio laedt oder streamt (alle 2188 Songs der Bibliothek
+    /// liegen dort, gemessen 2026-10-21). Bis dahin konnte die Seite - oder ein fremder Frame, der
+    /// die Bruecke erreicht - der Huelle JEDE https-Adresse zum Laden geben (cacheBackground,
+    /// ensureCached, Stream). himusicHttp hat so eine Allowlist schon; fuer Audio fehlte sie.
+    /// Aendert sich der Host (eigene Domain), muss er hier nachgezogen werden - Songs mit anderem
+    /// Host gelten sonst als "keine abspielbare Datei hinterlegt" und stehen im Protokoll.
+    static let mediaHost = "himusic-api.tyron-app.workers.dev"
+
+    static func isAllowedMediaURL(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https" && url.host?.lowercased() == mediaHost
+    }
 
     /// Faehigkeiten, die diese Huelle der Seite meldet (window.__himusicNativeCaps). Die Seite
     /// nutzt neue Bridge-Befehle nur, wenn die Huelle sie kennt - so bleibt eine noch nicht
@@ -35,7 +47,11 @@ final class PlaybackJournal {
     static let shared = PlaybackJournal()
 
     private static let maxLines = 400
+    /// Waehrend einer langen Sitzung waechst die Datei; ab dieser Zeilenzahl wird sie auf die
+    /// letzten maxLines gekuerzt (nicht nur beim App-Start).
+    private static let rewriteThreshold = 1500
     private var lines: [String] = []
+    private var linesInFile = 0
     private let fileURL: URL
     private var handle: FileHandle?
     private let formatter: DateFormatter
@@ -55,9 +71,22 @@ final class PlaybackJournal {
                     .suffix(Self.maxLines)
             )
         }
-        // Beim Start auf die letzten Zeilen kuerzen, damit die Datei nicht ewig waechst.
-        let trimmed = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
-        try? trimmed.write(to: fileURL, atomically: true, encoding: .utf8)
+        rewriteFile()
+    }
+
+    /// Schreibt die Datei neu auf die letzten maxLines und oeffnet das Schreib-Handle erneut.
+    /// Aus dem iCloud-Backup ausgenommen: das Protokoll sagt, wann welcher Song lief - das gehoert
+    /// aufs Geraet, nicht in ein Backup (wie der Audio-Cache, siehe AudioFileCache).
+    private func rewriteFile() {
+        try? handle?.close()
+        lines = Array(lines.suffix(Self.maxLines))
+        let content = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+        try? content.write(to: fileURL, atomically: true, encoding: .utf8)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var excluded = fileURL
+        try? excluded.setResourceValues(values)
+        linesInFile = lines.count
         handle = try? FileHandle(forWritingTo: fileURL)
         _ = try? handle?.seekToEnd()
     }
@@ -79,6 +108,8 @@ final class PlaybackJournal {
         if let data = (line + "\n").data(using: .utf8) {
             try? handle?.write(contentsOf: data)
         }
+        linesInFile += 1
+        if linesInFile > Self.rewriteThreshold { rewriteFile() }
     }
 
     var text: String { lines.suffix(Self.maxLines).joined(separator: "\n") }
@@ -87,6 +118,7 @@ final class PlaybackJournal {
         lines.removeAll()
         try? handle?.truncate(atOffset: 0)
         _ = try? handle?.seekToEnd()
+        linesInFile = 0
     }
 }
 

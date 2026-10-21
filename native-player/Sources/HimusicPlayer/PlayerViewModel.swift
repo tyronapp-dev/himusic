@@ -490,7 +490,10 @@ final class PlayerViewModel: ObservableObject {
             case "ensureCached": if let item = command.item { Task { await AudioFileCache.shared.ensureCached(item: item) } }
             // Die ganze Bibliothek fuers Auffuellen im Leerlauf - ersetzt tausende
             // Einzelnachrichten. Stoppt an der Fuellgrenze, verdraengt nie etwas.
-            case "cacheBackground": if let items = command.items { Task { await AudioFileCache.shared.setBackground(items) } }
+            // Mit Obergrenze: die echte Bibliothek hat ~2200 Songs; mehr als das Mehrfache davon ist
+            // kein Auffuellen mehr, sondern ein Speicher-/Datenvolumen-Problem.
+            case "cacheBackground":
+                if let items = command.items { Task { await AudioFileCache.shared.setBackground(Array(items.prefix(10_000))) } }
             // Frisch importierter Song: SOFORT mit Prioritaet in den lokalen Cache holen, damit
             // der erste Antipper von Platte spielt statt die noch kalte Datei zu streamen.
             case "cacheNow": if let item = command.item { Task { _ = await AudioFileCache.shared.fetchNow(item: item) } }

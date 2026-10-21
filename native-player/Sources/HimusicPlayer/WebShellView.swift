@@ -345,10 +345,22 @@ struct WebShellView: UIViewRepresentable {
             webView.evaluateJavaScript("window._applyNativeJournal && window._applyNativeJournal(\(literal));")
         }
 
+        /// Nur Nachrichten der eigenen Seite im Hauptframe. Die Kanaele sind in ALLEN Frames
+        /// erreichbar (auch in eingebetteten, z.B. der YouTube-Vorschau) - ohne diese Pruefung
+        /// koennte fremder Code dort die Huelle steuern (Downloads anstossen, Wiedergabe uebernehmen).
+        private func isTrusted(_ message: WKScriptMessage) -> Bool {
+            message.frameInfo.isMainFrame
+                && message.frameInfo.securityOrigin.host == WebShellView.startURL.host
+        }
+
         func userContentController(
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
+            guard isTrusted(message) else {
+                Task { @MainActor in PlaybackJournal.shared.log("Bruecke: Nachricht aus fremdem Frame/Herkunft verworfen") }
+                return
+            }
             guard let json = message.body as? String else { return }
             // Abgefangen statt an PlayerViewModel weitergereicht, weil dafuer die WKWebView-
             // Referenz noetig ist, die nur die Coordinator hier haelt (siehe clearCacheAndReload).
@@ -372,6 +384,7 @@ struct WebShellView: UIViewRepresentable {
             replyHandler: @escaping (Any?, String?) -> Void
         ) {
             guard message.name == "himusicHttp" else { replyHandler(nil, "unbekannter Kanal"); return }
+            guard isTrusted(message) else { replyHandler(["ok": false, "error": "nur die eigene Seite im Hauptframe"], nil); return }
             // Audio-Extraktion (AudioExtractor.swift) laeuft ueber denselben Kanal wie die
             // YouTube-Anfragen, unterschieden per cmd statt einer eigenen Kanal-Registrierung
             // (siehe Kommentar bei makeUIView) - deshalb hier VOR der url-Pruefung abzweigen,

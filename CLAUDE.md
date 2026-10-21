@@ -61,7 +61,7 @@ Key runtime state lives on `window` so UI fragments in `app2.js` can share it:
    - `himusic-app-shell-v1.4` — HTML/JS/CSS, stale-while-revalidate
    - `himusic-covers-v1` — album art, cache-first with SVG fallback
    - `himusic-audio-v1` — audio files, cache-first + manual Range-request handling for iOS seeking
-2. **IndexedDB** (`HeatBoxAudio` / `audioFiles` store) — audio blobs for true offline playback. `startBackgroundCacheQueue()` now runs automatically after every library load (not just when the offline toggle is on), throttled to 1 parallel download and paused while a song is actively playing — see [ADR-002](docs/decisions/ADR-002-automatic-offline-caching.md) for why (a 3-parallel unconditional version previously pulled ~14 GB at once on large libraries and made the app sluggish). The manual "download everything now" button stays fast (12 parallel) since it's an explicit one-off action.
+2. **IndexedDB** (`HeatBoxAudio` / `audioFiles` store) — audio blobs for true offline playback **in a plain browser/PWA only**. `startBackgroundCacheQueue()` runs automatically after every library load, throttled to 1 parallel download and paused while a song is actively playing — see [ADR-002](docs/decisions/ADR-002-automatic-offline-caching.md). **Inside the native shell it no longer downloads anything** ([ADR-015](docs/decisions/ADR-015-wiedergabe-kern.md)): the native player never reads IndexedDB, so the library (12+ GB) was being fetched twice and fought the song being played for bandwidth. The shell instead sends the library once (`cmd:'cacheBackground'`) to the native file cache; "offline" ticks/counter come from the native cache state (`_applyNativeCachedIds`). Old IndexedDB blobs stay until "Alle offline gespeicherten Songs löschen" is pressed (frees the space, native cache untouched).
 3. **localStorage** — `himusic_auth` (login flag), `heatbox_state` (player state: current song, queue, volume, EQ settings), `himusic_sync_giveup` (song IDs the background metadata sync gave up on — see below)
 
 ### YouTube Import
@@ -118,7 +118,7 @@ The Songs page has a plain draggable scrollbar on the right edge (`#songs-scroll
 Song titles, artist names, playlist/station/vibe-mix names, and YouTube search results (title, channel, thumbnail URL) are attacker-influenceable (YouTube titles are free text set by any uploader) and get inserted into the DOM via `innerHTML` template strings in many places (`updateSongDOM`, `buildQueueItem`, `renderHomeSections`, the YouTube search results renderer, the duplicate cleaner, playlist list items). **Always wrap these values in `_esc()`** (defined near the top of `app2.js`) before interpolating them into an `innerHTML` string — see [ADR-004](docs/decisions/ADR-004-xss-hardening-html-escaping.md) for the stored-XSS this fixed. `alert()`/`confirm()` calls don't need escaping (plain-text dialogs, can't execute markup).
 
 ### Service Worker update
-Bumping `CACHE_NAME` in `sw.js` triggers cache invalidation on next load. The SW uses `skipWaiting()` + `clients.claim()` so updates apply immediately. Currently at `v1.4`.
+Bumping `CACHE_NAME` in `sw.js` triggers cache invalidation on next load. The SW uses `skipWaiting()` + `clients.claim()` so updates apply immediately. Currently at `v1.95` — keep `window.HIMUSIC_WEB_VERSION` (top of `app2.js`, shown in Einstellungen → Wiedergabe-Diagnose) in step with it.
 
 ## Native Hülle (iOS) — ADR-007
 
@@ -149,9 +149,9 @@ Netz-Adresse nach, notfalls über `window._songIndex`.
 (`AudioFileCache.swift`), unabhängig von der IndexedDB der PWA. `beginPlayback()`
 (`PlayerViewModel.swift`) löst **zuerst** gegen diesen Cache auf (`localFileURL(forId:)`) und
 spielt von Platte; gestreamt wird nur, wenn keine lokale Kopie existiert. Befüllt wird er
-proaktiv über `ensureCachedQueue()` beim Queue-Wechsel und über `ensureCached`/`cacheNow`
-aus dem Web-Code (`_nativeEnsureCached`, u.a. im Hintergrund-Cache-Durchlauf und direkt nach
-einem YouTube-Import).
+mit zwei Prioritäten (siehe ADR-015): dringend über `setUpcoming()` (laufender Song + Fenster,
+bei jedem Songwechsel ersetzt), im Leerlauf über `setBackground()` (ganze Bibliothek, Seite
+schickt sie einmal per `cmd:'cacheBackground'`), plus `cacheNow` direkt nach einem YouTube-Import.
 
 Folge: Es gibt **zwei getrennte Caches** für dieselben Dateien — IndexedDB für die PWA im
 Vordergrund, der native Dateicache für die Hülle. Das kostet Speicher doppelt, ist aber
@@ -159,6 +159,16 @@ Absicht: der AVPlayer kommt an die IndexedDB nicht heran.
 
 > Bis ~08/2026 stand hier, echtes Offline im Hintergrund sei „bewusst offen". Das war seit
 > ADR-011/013 überholt und wurde am 17.09.2026 gegen den tatsächlichen Code korrigiert.
+
+### Wiedergabe-Kern (ADR-015, 2026-10-21) — vor jeder Arbeit an Wiedergabe/Zeitleiste/Sperrbildschirm lesen
+Der Player ist ein **`AVQueuePlayer` mit vorgeladenem Nachfolger** (`PlayerViewModel.prepareNext`): am Songende wechselt das System selbst (auch bei gesperrtem Handy); nur Antippen/Sprung/Zurück/Fehler setzen hart neu auf (`playCurrent` → `beginPlayback` → `installCurrent`). Der Start wartet **nie** auf einen Download — lokal, sonst sofort streamen und mit Priorität nachladen. Die Regeln, die verhindern, dass dieselben Fehler zurückkommen:
+- **Dauer hat eine einzige Quelle:** `PlayerViewModel.effectiveDuration()` (Sperrbildschirm, Seite, Sprung, Begrenzung). Nie eine zweite Dauer in der Seite berechnen. Bei 66 % der Songs steht in der DB `duration = 0`.
+- **Die Seite sendet Anteile, nicht Sekunden:** `{cmd:'seekTo', fraction}`. Der Player rechnet, merkt vor, prüft die Landung (`seekExactly`) und wiederholt einmal mit Toleranz. Neue Bridge-Befehle nur nutzen, wenn `_nativeHas('<fähigkeit>')` — Liste in `HimusicBuild.capabilities`; die Seite ist sofort live, die Hülle erst nach Neuinstallation.
+- **`AudioFileCache` hat zwei Prioritäten** (dringend = laufender Song + 15er-Fenster, ersetzt sich bei jedem Wechsel; Auffüllen = Rest, nur im Leerlauf, nur unter 7 GB, verdrängt nie). Nie die ganze Warteschlange/Bibliothek in `ensureCached` kippen.
+- **Handoff klein halten:** eingebettete `data:`-Cover nur für die ersten 25 Songs (117 Songs, 16,8 MB insgesamt), Rest per `setCover`. Warteschlange liegt als Datei (`PlaybackQueue.json`), nicht in `UserDefaults`, nie auf dem Main-Thread kodieren.
+- **Fortsetzung:** endet eine Liste (< 30 Folgesongs), hängt `_continuationTail` 200 ähnliche Songs an (abschaltbar `localStorage himusic_autocontinue='0'`).
+- **Diagnose statt Raten:** Einstellungen → Wiedergabe-Diagnose zeigt Fassung (Seite + Hülle `HimusicBuild.id`) und das **native Ereignisprotokoll** (Wechsel, Sprünge mit Ziel/Landung/Quelle, Fernbedienung, Cache-Fehler) — es läuft auch bei gesperrtem Handy. **Bei einem wiederkehrenden Wiedergabe-Fehler zuerst dieses Protokoll lesen.** `HimusicBuild.id` bei jeder Änderung unter `native-player/` hochzählen.
+- Zeitleisten-Fehler wurden vor ADR-015 neunmal an einzelnen Nähten gepatcht (Liste im ADR). Kein zehnter Patch ohne Protokoll-Beleg.
 
 **Release-Schleife:**
 1. Änderung unter `native-player/` committen und pushen → `.github/workflows/build-native-player.yml`
