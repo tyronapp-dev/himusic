@@ -10,3 +10,8 @@ tools/.env*
 # Claude-Code-Arbeitsdateien: Laufzeit-Locks, lokale Permissions (enthalten
 # alte Rechner-/Arbeitgeberpfade) und Agenten-Gedaechtnis - nicht ins oeffentliche Repo.
 .claude/
+
+# Abhaengigkeiten der Diagnose-Skripte (tools/diagnose, npm i playwright-core) - nie einchecken
+node_modules/
+tools/diagnose/package.json
+tools/diagnose/package-lock.json

@@ -96,6 +96,9 @@ Am Gerät **nicht** prüfbar von hier; die Prüfpunkte nennen, was im Protokoll 
 9. **Skip während eines Sprungs:** Zeitleiste tippen, sofort Weiter. Erwartet: `Sprung verworfen: Titel hat inzwischen gewechselt`, der neue Song startet bei 0:00.
 10. **YouTube-Vorschau und Sperrbildschirm (offene Hypothese, nicht belegt):** die Vorschau in der Suche läuft im Web-Prozess über einen iframe und kann die Sperrbildschirm-Anzeige übernehmen (Titel von YouTube, Tasten ins Leere). Test: erst Vorschau abspielen, dann sperren. Fehlt im Protokoll die Zeile `Fernbedienung: Weiter` bei sichtbaren Tasten, gehört Now-Playing gerade nicht der Player-Schicht. Nicht umgesetzt: die Vorschau pausiert den Player bisher nicht.
 
+## Folgemeldung am selben Abend (offen, Ursache unbekannt)
+Nach dem Einspielen meldete Tyron: Zeitleiste "scheint behoben", aber **ein Tipp auf einen Song in der Songs-Seite spielt einen anderen Song**. Ausgeschlossen (geprüft): die Seite sendet in 10 von 10 Fällen den richtigen Song als Start (`tools/diagnose/browsertest-songs-tippen.mjs`); alle 2188 Datentypen und URLs sind gültig. Offene Hypothesen H1–H4 und was als Nächstes gebraucht wird (Screenshot der Wiedergabe-Diagnose, drei Antworten) stehen in der Vault-Akte. Regel: **kein Patch auf Verdacht** — erst das Protokoll (`Warteschlange übernommen … Start …` zeigt, was die Hülle bekam; danach `Start …`/`Fehler bei …`/`Wechsel …`).
+
 ## Bewusst offen / nicht Teil dieses Auftrags
 - **Wiederholen-Knopf wirkt in der Hülle nicht** (setzt nur `audioPlayer.loop`, der native Player kennt keinen Repeat) — schon vorher so, von der Prüfung nebenbei bemerkt.
 - `AVQueuePlayer` garantiert für einen **Stream**-Nachfolger keine Pufferzusage: ist er nicht rechtzeitig bereit, stockt der Wechsel. Das Protokoll zeigt es (`Nachfolger spielbereit`); der Cache-Umbau macht es selten, weil der Nachfolger meist lokal ist.

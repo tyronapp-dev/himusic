@@ -108,3 +108,8 @@ Der neue Wert wird **im Skript erzeugt und nirgends ausgegeben** — nicht im Te
 einer Datei. Du musst ihn nie selbst sehen oder abtippen: `POST /auth/login` gibt ihn beim
 nächsten Einloggen automatisch zurück. Auf dem Gerät reicht danach ein einmaliges Aus- und
 wieder Einloggen mit dem `LOGIN_PASSWORD`.
+
+## diagnose/ — Test- und Messskripte (ADR-015)
+
+Lesende Bibliotheks-Messungen (nur Summen, nie Titel/Key) und Playwright-Browsertests der Seite gegen eine gestubbte API.
+Anleitung, Stand der Messung und Grenzen: [diagnose/README.md](diagnose/README.md).
