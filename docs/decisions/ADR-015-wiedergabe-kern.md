@@ -34,7 +34,9 @@ Allein die Zeitleiste hat in der Git-Historie **neun** Korrekturen: `2c51716` (B
 5. **12-MB-Handoff + 12-MB-Snapshot auf dem Main-Thread — belegt (Messung).** `saveSnapshot()` kodierte alle 10 s und bei jedem Songwechsel die ganze Warteschlange nach `UserDefaults` — spürbare Hakler beim Skippen.
 6. **Landung des Sprungs wurde nie geprüft — belegt.** Der Abschluss-Handler von `player.seek` räumte nur auf; ein Sprung, der nicht (oder woanders) landete, fiel niemandem auf. **Was bei Fehler 2 am Gerät konkret schiefging, ist nicht bewiesen** (Streams ohne präzise Zeitbasis, unterbrochene Sprünge, Überschreiben der Anzeige). Deshalb wird es jetzt gemessen statt vermutet (Protokoll).
 7. Kleiner Beitrag, belegt: iOS erzeugt nach einem Touch zusätzlich synthetische Maus-Ereignisse; ein Tipp lief zweimal durch dieselbe Logik. Außerdem überschrieb der Sekundentakt die Anzeige, solange der Finger auf der Leiste lag.
-8. **Fortsetzung fehlte — belegt.** Die native Warteschlange ist genau die Liste, aus der man gestartet hat (Playlist, Vibe-Filter, kleiner Sender). Danach `next()` → stilles `return`, der Player zeigte weiter "spielt".
+8. **Zweite, bisher unentdeckte Dauer-Quelle im `<audio>`-Element der Seite — belegt im Code (von der unabhängigen Prüfung gefunden, von mir gegen den Code bestätigt; ich hatte das Element zuvor fälschlich für "inert" gehalten).** `loadPlayerState` setzte in der Hülle `audio.src` auf den zuletzt gespeicherten Song und rief `load()`; `handleScrub` bevorzugte `audioPlayer.duration`, ein `loadedmetadata`-Handler schrieb sie in `window.currentSongDuration`. Lädt WebKit die Metadaten, trägt die Seite für die ganze Sitzung die **Dauer des alten Songs** — kürzerer alter Song heißt: jeder Tipp landet systematisch zu früh, **egal wie oft man tippt** (genau die Beschreibung von Fehler 2). Ob iOS ohne Nutzergeste die Metadaten wirklich lädt, ist am Gerät nicht geprüft; der Fehler ist damit **plausibel, nicht bewiesen**. Beseitigt, indem die Hülle das Element nie befüllt und seine Ereignisse ignoriert.
+9. **Netzausfall markierte Nachfolger dauerhaft als defekt — belegt im Code (Prüfung).** Ein vorgeladener, ungecachter Stream scheiterte im Funkloch sofort, landete in `failedItemIds`, der nächste ebenso; mit Netz blieben alle übersprungen, "Weiter" tat still nichts. Behoben (siehe unten).
+10. **Fortsetzung fehlte — belegt.** Die native Warteschlange ist genau die Liste, aus der man gestartet hat (Playlist, Vibe-Filter, kleiner Sender). Danach `next()` → stilles `return`, der Player zeigte weiter "spielt".
 
 ## Decision
 **Native Hülle**
@@ -48,6 +50,13 @@ Allein die Zeitleiste hat in der Git-Historie **neun** Korrekturen: `2c51716` (B
 - **Tastatur:** `KeyboardObserver` blendet die Mini-Leiste aus; die Seite bekommt `kb-open` (Navigation gleitet weg).
 - **`PlaybackJournal`:** Ereignisprotokoll **auf Platte**, läuft auch im Hintergrund, überlebt Neustart; **Build-Kennung** (`HimusicBuild.id`) der Hülle.
 - `navigator.mediaSession` der Seite wird in der Hülle stillgelegt (Hauptframe). *Absicherung, kein belegter Fehler:* in der Hülle registriert die Seite sie ohnehin nicht (`playSong` nimmt den Handoff-Zweig), WebKit hängt aber seine Medien-Sitzung an dieselbe System-Schnittstelle.
+
+**Nachgezogen nach unabhängiger Prüfung (frischer Subagent) und Security-Gate (Layer 0, gitleaks sauber):**
+- *Offline:* ohne Netz sind nur lokale Songs spielbare Nachfolger (`cachedIdSet`); ein nicht ladbarer Stream-Nachfolger wird **nicht** mehr als defekt markiert, sondern kurz zurückgestellt und startet zu seiner Zeit normal (mit Wiederholungen).
+- *Sprung:* Wiederholung/Ergebnis eines Sprungs gilt nur für das Item, auf dem er gestartet wurde (Skip während des Sprungs traf vorher den neuen Song); **Anzeige-Ziel** (`seekDisplay`) statt alter Position bis zur Landung; beim Wechsel Stream→Datei wird der **Anteil** durchgereicht, der letzte Tipp gewinnt.
+- *Konsistenz:* `reconcileCurrent()` vor jeder Navigation (System hatte gewechselt, Buchführung stand noch aus); Fallback bei entferntem Titel springt zum nächsten spielbaren, nicht zum alten Index; Fortschritt wird beim Öffnen des großen Players sofort gepusht; ein Tipp pro Wechsel kodiert die Warteschlange nur einmal.
+- *Cache:* veraltete dringende Downloads werden abgebrochen (`setUpcoming`), Ressourcen-Timeout 300 s, Vorpufferung (`preferredForwardBufferDuration`) für Stream-Nachfolger, Protokollzeile "Nachfolger spielbereit".
+- *Sicherheit:* Audio nur von `himusic-api.tyron-app.workers.dev` (alle 2188 Songs, gemessen), Bridge-Nachrichten nur aus dem Hauptframe der eigenen Seite, `cacheBackground` auf 10 000 begrenzt, Protokoll aus dem iCloud-Backup ausgenommen und im Betrieb gekürzt.
 
 **Seite**
 - Zeitleiste sendet den Anteil; genau ein Sprung pro Tipp; die Anzeige gehört beim Ziehen dem Finger. Ältere Hüllen (ohne Fähigkeit `seekFraction`) bekommen weiter Sekunden — **Fähigkeiten statt Versionsabfrage** (`window.__himusicNativeCaps`).
@@ -81,7 +90,15 @@ Am Gerät **nicht** prüfbar von hier; die Prüfpunkte nennen, was im Protokoll 
 4. **Skip-Fluss:** mehrfach schnell weiter. Erwartet: `Wechsel … (Skip)`. Zeilen `Start … [Stream] nach … ms` zeigen, wann doch gestreamt wurde.
 5. **Offline** (Flugmodus): Songs im Fenster müssen weiterspielen; `Cache:`-Zeilen zeigen Fehlschläge.
 6. **Tastatur:** Suchen — Navigation weg, Leiste weg, Scrollen schließt die Tastatur.
-7. **Was nicht entschieden ist:** ob `AVQueuePlayer` einen *defekten* Titel selbst überspringt (angenommen ja, Buchführung fängt beide Reihenfolgen ab); ob iOS bei `advanceToNextItem()` `currentItem` synchron setzt (die Buchführung ist dagegen abgesichert).
+7. **Was nicht entschieden ist:** ob `AVQueuePlayer` einen *defekten* Titel selbst überspringt (angenommen ja, Buchführung fängt beide Reihenfolgen ab); ob iOS bei `advanceToNextItem()` `currentItem` synchron setzt (`reconcileCurrent` + wiederholtes `prepareNext` fangen beides ab, aber ein Fehlverhalten würde als `nachgezogen`/`unerwarteter Titel` im Protokoll stehen); was `player.currentTime()` **während** eines Sprungs liefert (die Anzeige ist deshalb vom Zielwert unabhängig gemacht); ob iOS die Metadaten des `<audio>` ohne Nutzergeste lädt (Punkt 8 oben).
+8. **Funkloch (Offline):** lokalen Song spielen, Flugmodus, Song enden lassen, Flugmodus aus. Erwartet: nächster *lokaler* Song spielt weiter, kein "übersprungen"-Toast-Regen; nach Netz-zurück funktioniert "Weiter".
+9. **Skip während eines Sprungs:** Zeitleiste tippen, sofort Weiter. Erwartet: `Sprung verworfen: Titel hat inzwischen gewechselt`, der neue Song startet bei 0:00.
+10. **YouTube-Vorschau und Sperrbildschirm (offene Hypothese, nicht belegt):** die Vorschau in der Suche läuft im Web-Prozess über einen iframe und kann die Sperrbildschirm-Anzeige übernehmen (Titel von YouTube, Tasten ins Leere). Test: erst Vorschau abspielen, dann sperren. Fehlt im Protokoll die Zeile `Fernbedienung: Weiter` bei sichtbaren Tasten, gehört Now-Playing gerade nicht der Player-Schicht. Nicht umgesetzt: die Vorschau pausiert den Player bisher nicht.
+
+## Bewusst offen / nicht Teil dieses Auftrags
+- **Wiederholen-Knopf wirkt in der Hülle nicht** (setzt nur `audioPlayer.loop`, der native Player kennt keinen Repeat) — schon vorher so, von der Prüfung nebenbei bemerkt.
+- `AVQueuePlayer` garantiert für einen **Stream**-Nachfolger keine Pufferzusage: ist er nicht rechtzeitig bereit, stockt der Wechsel. Das Protokoll zeigt es (`Nachfolger spielbereit`); der Cache-Umbau macht es selten, weil der Nachfolger meist lokal ist.
+- Cache-Grenze 8 GB / Auffüllgrenze 7 GB unverändert (Bibliothek 12,3 GB).
 
 ## Nächste Wiederkehr eines dieser Fehler
 **Zuerst Einstellungen → Wiedergabe-Diagnose öffnen, kopieren, lesen — nicht den Code raten.** Das Protokoll läuft auch bei gesperrtem Handy mit.
