@@ -137,6 +137,7 @@ final class PlayerViewModel: ObservableObject {
         onNowPlayingChanged?(item, isPlaying)
         notifyQueueChanged()
         persistPosition()
+        pushProgress()
     }
 
     /// Nur der Song-/Dauer-Stand an die Seite, ohne Warteschlange und Speichern.
@@ -331,6 +332,9 @@ final class PlayerViewModel: ObservableObject {
             await AudioFileCache.shared.setOnCached { [weak self] id in
                 Task { @MainActor in self?.handleCached(id) }
             }
+            // Ausgangsstand fuer nextPlayableIndex (offline nur lokale Songs) - ohne ihn waere
+            // die Menge bis zum ersten Cache-Push der Seite leer.
+            await self.pushCachedIds()
         }
     }
 
@@ -462,7 +466,12 @@ final class PlayerViewModel: ObservableObject {
         if let command = try? JSONDecoder().decode(BridgeCommand.self, from: data) {
             switch command.cmd {
             case "toggle": togglePlayPause()
-            case "playerView": isWebOverlayVisible = command.open ?? false
+            case "playerView":
+                isWebOverlayVisible = command.open ?? false
+                // Beim Oeffnen SOFORT die echte Position schicken. Bis dahin kamen Pushes nur im
+                // Sekundentakt waehrend der Wiedergabe - nach Auto-Wechsel im Hintergrund + Pause zeigte
+                // die Leiste die Position des VORIGEN Songs, und ein Tipp darauf sprang "daneben".
+                if isWebOverlayVisible { pushProgress() }
             // Transport aus der Web-Oberflaeche: IMMER echter Songwechsel. Die Seite darf
             // nicht selbst aus playbackQueue/playbackHistory rechnen - die veralten bei
             // jedem nativen Auto-Skip im Hintergrund und lieferten dadurch falsche Songs.
@@ -635,6 +644,7 @@ final class PlayerViewModel: ObservableObject {
     /// gedacht.
     private func installCurrent(_ track: Track, autoplay: Bool) {
         preloadGeneration += 1
+        seekGeneration += 1   // ein noch laufender Sprung gehoerte zum alten Item
         track.consumed = true
         tracks[ObjectIdentifier(track.playerItem)] = track
         player.removeAllItems()
@@ -659,7 +669,11 @@ final class PlayerViewModel: ObservableObject {
         // kippen lassen - dort lieber ungefaehres Timing als gar keinen Ton.
         let options: [String: Any] = remote ? [:] : [AVURLAssetPreferPreciseDurationAndTimingKey: true]
         let asset = AVURLAsset(url: url, options: options)
-        let track = Track(item: item, playerItem: AVPlayerItem(asset: asset), isRemote: remote, source: source)
+        let playerItem = AVPlayerItem(asset: asset)
+        // Stream: ausdruecklich vorpuffern lassen. Fuer einen vorgeladenen Nachfolger heisst "im Player"
+        // sonst nur "AVFoundation beginnt zu laden" - ohne Zusage, dass beim Wechsel schon Daten da sind.
+        if remote { playerItem.preferredForwardBufferDuration = 30 }
+        let track = Track(item: item, playerItem: playerItem, isRemote: remote, source: source)
         track.observe(
             onStatus: { [weak self] t in Task { @MainActor [weak self] in self?.trackStatusChanged(t) } },
             onDuration: { [weak self] t in Task { @MainActor [weak self] in self?.trackDurationChanged(t) } },
@@ -683,14 +697,32 @@ final class PlayerViewModel: ObservableObject {
 
     /// Naechster abspielbarer Index hinter `index` (ueberspringt Eintraege ohne Adresse und
     /// bereits als defekt bekannte).
+    ///
+    /// OHNE NETZ nur Songs, die lokal liegen (cachedIdSet). Vorher wurde ein ungecachter
+    /// Nachfolger auch im Funkloch als Stream eingehaengt, scheiterte sofort und landete dauerhaft
+    /// in failedItemIds - ebenso der naechste und uebernaechste. Kam das Netz zurueck, blieben alle
+    /// uebersprungen, und "Weiter" tat still nichts. Jetzt spielt die App offline, was sie lokal hat.
     private func nextPlayableIndex(after index: Int) -> Int? {
         var i = index + 1
         while i < queue.count {
-            if queue[i].fileURL != nil, !failedItemIds.contains(queue[i].id) { return i }
+            let item = queue[i]
+            if item.fileURL != nil, !failedItemIds.contains(item.id),
+               hasNetwork || cachedIdSet.contains(item.id) {
+                return i
+            }
             i += 1
         }
         return nil
     }
+
+    /// Songs, die nativ lokal liegen - im Speicher gehalten, damit nextPlayableIndex ohne
+    /// Actor-Aufruf (synchron) entscheiden kann. Wird beim Start geladen, bei jedem fertigen
+    /// Download ergaenzt und bei jedem Cache-Stand-Push an die Seite aufgefrischt. Evakuierte Songs
+    /// stehen evtl. noch darin - dann scheitert der Start einmal und die normale Fehlerbehandlung greift.
+    private var cachedIdSet: Set<Int> = []
+
+    /// Wann ein gescheiterter vorgeladener Stream fruehestens erneut vorgeladen wird.
+    private var preloadBackoff: [Int: Date] = [:]
 
     private func removeItemsAfterCurrent() {
         let items = player.items()
@@ -712,6 +744,13 @@ final class PlayerViewModel: ObservableObject {
             return
         }
         let nextItem = queue[nextIdx]
+        // Ein eben gescheiterter Stream-Nachfolger wird nicht sofort wieder vorgeladen (Schleife).
+        // Wenn sein Moment kommt, startet er normal - dort gibt es Wiederholungen und Uebersprung.
+        if let until = preloadBackoff[nextItem.id], until > Date() {
+            preloadGeneration += 1
+            removeItemsAfterCurrent()
+            return
+        }
         if let second = player.items().dropFirst().first,
            let t = tracks[ObjectIdentifier(second)], t.item.id == nextItem.id {
             return
@@ -744,13 +783,17 @@ final class PlayerViewModel: ObservableObject {
     /// lokale Kopie getauscht (Streams: keine verlaessliche Dauer, kein genaues Seeking, brauchen
     /// Netz - im Hintergrund bei gesperrtem Handy ist lokal die einzige verlaessliche Quelle).
     private func handleCached(_ id: Int) {
+        cachedIdSet.insert(id)
+        preloadBackoff.removeValue(forKey: id)
         if let second = player.items().dropFirst().first,
            let t = tracks[ObjectIdentifier(second)], t.item.id == id, t.isRemote {
             journal("Nachfolger \"\(t.item.title)\" liegt jetzt lokal -> Stream ersetzt")
             preloadGeneration += 1
             removeItemsAfterCurrent()
-            prepareNext()
         }
+        // Idempotent und billig: stimmt der Nachfolger schon, passiert nichts. Ohne Netz kann ein
+        // eben fertig gewordener Song der naechste spielbare sein (nextPlayableIndex).
+        prepareNext()
         scheduleCachedIdsPush()
     }
 
@@ -770,6 +813,7 @@ final class PlayerViewModel: ObservableObject {
 
     private func pushCachedIds() async {
         let ids = await AudioFileCache.shared.cachedIds()
+        cachedIdSet = Set(ids)   // frischt auch den Speicherstand fuer nextPlayableIndex auf
         onCachedIds?(ids)
     }
 
@@ -808,11 +852,16 @@ final class PlayerViewModel: ObservableObject {
             if queue[i].id == track.item.id { found = i; break }
             i += 1
         }
+        // Nicht hinter der alten Position gefunden: die Warteschlange hat sich inzwischen veraendert
+        // (umsortiert, gemischt) - dann irgendwo suchen, statt falsch zu verbuchen.
+        if found == nil { found = queue.firstIndex(where: { $0.id == track.item.id }) }
         track.consumed = true
         guard let idx = found else {
-            // Die Warteschlange hat sich inzwischen geaendert und der Titel steht nicht mehr
-            // dort, wo er erwartet wurde - sicher neu aufsetzen statt falsch zu verbuchen.
-            journal("Wechsel (\(how)) auf unerwarteten Titel id=\(track.item.id) -> neu aufsetzen")
+            // Der Titel steht gar nicht mehr in der Warteschlange (entfernt, waehrend das System
+            // schon umgeschaltet hatte): ab dem naechsten spielbaren Eintrag neu aufsetzen - NICHT
+            // am alten Index, der waere ein schon gespielter Song.
+            journal("Wechsel (\(how)) auf Titel id=\(track.item.id), der nicht mehr in der Warteschlange steht -> neu aufsetzen")
+            if let n = nextPlayableIndex(after: currentIndex) { currentIndex = n }
             playCurrent()
             return
         }
@@ -820,6 +869,7 @@ final class PlayerViewModel: ObservableObject {
         currentIndex = idx
         lastNavigationStep = 1
         playbackToken += 1
+        seekGeneration += 1   // ein noch laufender Sprung gehoerte zum alten Titel
         forgetPendingSeek()
         seeksInFlight = 0
         knownDurationForCurrent = nil
@@ -844,6 +894,15 @@ final class PlayerViewModel: ObservableObject {
         }
         if track.playerItem.status == .readyToPlay { trackBecameReady(track) }
         if isPlaying, player.timeControlStatus == .paused { player.play() }
+    }
+
+    /// Hat das SYSTEM gerade auf den Nachfolger gewechselt und die Buchfuehrung steht noch aus
+    /// (sie laeuft ueber einen asynchronen Beobachter), muss sie VOR jeder neuen Navigation
+    /// nachgezogen werden - sonst rechnet next()/previous()/removeAt() mit dem alten Index, und ein
+    /// Tipp genau am Songende baute den eben gestarteten Song von vorn neu auf.
+    private func reconcileCurrent() {
+        guard let item = player.currentItem, let track = tracks[ObjectIdentifier(item)], !track.consumed else { return }
+        advanceBookkeeping(to: track, how: "nachgezogen")
     }
 
     private func refreshKnownDuration(for item: QueueItem) {
@@ -885,6 +944,10 @@ final class PlayerViewModel: ObservableObject {
             }
         } else if status == .failed, tracks[ObjectIdentifier(track.playerItem)] != nil {
             preloadedTrackFailed(track)
+        } else if status == .readyToPlay, tracks[ObjectIdentifier(track.playerItem)] != nil, !track.consumed {
+            // Belegt im Protokoll, ob der Nachfolger beim Songende wirklich schon bereit war - fuer
+            // Streams ist "eingehaengt" keine Zusage (siehe makeTrack).
+            journal("Nachfolger spielbereit: \"\(track.item.title)\" [\(track.source)]")
         }
     }
 
@@ -909,6 +972,7 @@ final class PlayerViewModel: ObservableObject {
         // weg - und der Cache laedt sie beim naechsten Vorladen sauber neu.
         if retriedFromRemoteId == item.id {
             retriedFromRemoteId = nil
+            cachedIdSet.remove(item.id)
             Task { _ = await AudioFileCache.shared.discardCachedFile(forId: item.id) }
         }
         // Dauer einer lokalen Datei festhalten (fuer Songs, die schon vor dieser Fassung im
@@ -920,9 +984,13 @@ final class PlayerViewModel: ObservableObject {
         applyPendingSeek()
         if isPlaying && player.timeControlStatus == .paused { player.play() }
         // Jetzt steht die gemessene Songdauer fest. Zwei Empfaenger brauchen sie: der
-        // SPERRBILDSCHIRM und die SEITE (Zeitleiste rechnet damit).
+        // SPERRBILDSCHIRM und die SEITE (Zeitleiste rechnet damit). Nur Song-/Dauer-Stand, ohne
+        // die Warteschlange noch einmal zu kodieren und zu schicken - die ging beim Wechsel schon
+        // raus (bis zu 25 eingebettete Cover, das war pro Skip doppelte Arbeit auf dem Main-Thread).
         updateNowPlayingInfo()
-        notifyNowPlayingChanged()
+        pushNowPlayingOnly()
+        persistPosition()
+        pushProgress()
     }
 
     /// Die Dauer eines Streams steht oft erst NACH .readyToPlay fest. Ohne diese Nachpflege
@@ -973,14 +1041,18 @@ final class PlayerViewModel: ObservableObject {
         handoverAssertion = nil
     }
 
+    /// Ein VORGELADENER Nachfolger konnte nicht laden. Das ist noch KEIN Urteil ueber den Song:
+    /// meist ist es das Netz (Funkloch bei gesperrtem Handy) oder ein kalter CDN-Rand. Frueher
+    /// landete er hier dauerhaft in failedItemIds, der naechste ungecachte ebenso - kam das Netz
+    /// zurueck, blieben alle uebersprungen und "Weiter" tat still nichts. Jetzt: nur aus dem
+    /// Player nehmen und kurz nicht erneut vorladen (sonst Schleife). Kommt sein Moment, startet er
+    /// ueber den normalen harten Start - dort gibt es Wiederholungen, Uebersprung und Meldung.
     private func preloadedTrackFailed(_ track: Track) {
         let reason = track.playerItem.error?.localizedDescription ?? "Datei nicht lesbar"
-        journal("Vorgeladener Nachfolger \"\(track.item.title)\" defekt: \(reason)")
-        failedItemIds.insert(track.item.id)
-        onPlaybackFailed?(track.item, hasNetwork ? reason : "\(reason) (offline)")
+        journal("Vorgeladener Nachfolger \"\(track.item.title)\" nicht ladbar (\(reason)) - wird beim Weiterspielen normal gestartet")
+        preloadBackoff[track.item.id] = Date().addingTimeInterval(30)
         player.remove(track.playerItem)
         if let t = tracks.removeValue(forKey: ObjectIdentifier(track.playerItem)) { t.stopObserving() }
-        prepareNext()
     }
 
     /// Holt einen vorgemerkten Positionssprung nach. Gegen die Songdauer begrenzt, damit ein
@@ -1224,6 +1296,7 @@ final class PlayerViewModel: ObservableObject {
             notifyNowPlayingChanged()
             return
         }
+        forgetPendingSeek()   // eine vorgemerkte Position gehoerte zum gescheiterten Song, nicht zum naechsten
         currentIndex = ziel
         playCurrent()
     }
@@ -1242,6 +1315,7 @@ final class PlayerViewModel: ObservableObject {
     /// Naechster Song. Ist der Nachfolger schon vorgeladen (der Normalfall), wechselt der Player
     /// sofort und ohne Neuaufbau - kein Download, kein Warten. Sonst harter Start.
     func next() {
+        reconcileCurrent()
         guard let target = nextPlayableIndex(after: currentIndex) else {
             journal("Weiter: kein Nachfolger vorhanden")
             return
@@ -1268,6 +1342,7 @@ final class PlayerViewModel: ObservableObject {
     /// sodass nach diesem Song die urspruengliche Playlist/der Mix normal weiterlaeuft.
     /// Laeuft gerade nichts, wird der Song bereitgestellt, aber nicht gestartet.
     func insertNext(_ item: QueueItem) {
+        reconcileCurrent()
         guard item.fileURL != nil else { return }
         if queue.isEmpty {
             // Nichts in der Warteschlange: Song bereitstellen, aber NICHT losspielen -
@@ -1294,6 +1369,7 @@ final class PlayerViewModel: ObservableObject {
     /// Der Rest der Warteschlange bleibt unveraendert, uebersprungene Songs stehen danach
     /// im "Verlauf"-Teil der Ansicht (alles vor currentIndex).
     func jumpTo(_ index: Int) {
+        reconcileCurrent()
         guard queue.indices.contains(index) else { return }
         lastNavigationStep = index >= currentIndex ? 1 : -1
         forgetPendingSeek()
@@ -1304,6 +1380,7 @@ final class PlayerViewModel: ObservableObject {
     /// Eintrag per Wisch aus der Warteschlange entfernen. Der laufende Song ist bewusst
     /// ausgenommen - ihn zu entfernen waere ein Stopp, kein Entfernen.
     func removeAt(_ index: Int) {
+        reconcileCurrent()
         guard queue.indices.contains(index), index != currentIndex else { return }
         queue.remove(at: index)
         if index < currentIndex { currentIndex -= 1 }
@@ -1318,6 +1395,7 @@ final class PlayerViewModel: ObservableObject {
     /// liegen". "to" ist wie bei Array.splice() gemeint: die Zielposition im SCHON VERKUERZTEN
     /// Array nach dem Entfernen.
     func moveItem(from: Int, to: Int) {
+        reconcileCurrent()
         guard queue.indices.contains(from), from > currentIndex else { return }
         let item = queue.remove(at: from)
         let clampedTo = min(max(to, currentIndex + 1), queue.count)
@@ -1330,6 +1408,7 @@ final class PlayerViewModel: ObservableObject {
     /// Shuffle-Knopf im grossen Web-Player: mischt nur den "als naechstes"-Teil, laufender
     /// Song und Verlauf bleiben stehen.
     func shuffleRemaining() {
+        reconcileCurrent()
         guard currentIndex + 1 < queue.count else { return }
         let remaining = Array(queue[(currentIndex + 1)...]).shuffled()
         queue.replaceSubrange((currentIndex + 1)..., with: remaining)
@@ -1353,6 +1432,7 @@ final class PlayerViewModel: ObservableObject {
     /// App-Oberflaeche (Web-Player, NativePlayerBar) wollte der Nutzer genau das nicht,
     /// dafuer gibt es previousTrack().
     func previous() {
+        reconcileCurrent()
         if safeSeconds(player.currentTime()) > 3 || currentIndex == 0 {
             seekExactly(to: 0)
             return
@@ -1367,6 +1447,7 @@ final class PlayerViewModel: ObservableObject {
     /// (grosser Web-Player und native Leiste). Am Anfang der Warteschlange bleibt nur der
     /// Neustart des aktuellen Songs uebrig - es gibt nichts davor.
     func previousTrack() {
+        reconcileCurrent()
         guard currentIndex > 0 else {
             seekExactly(to: 0)
             return
@@ -1384,57 +1465,107 @@ final class PlayerViewModel: ObservableObject {
     /// wird der Anteil vorgemerkt und nachgeholt (applyPendingSeek). Die Seite muss dafuer
     /// nichts mehr wissen - frueher rechnete sie mit einer eigenen, oft falschen Dauer.
     func seek(toFraction fraction: Double) {
-        let f = max(0, min(1, fraction.isFinite ? fraction : 0))
-        guard let track = currentTrack, track.playerItem.status == .readyToPlay,
-              let duration = effectiveDuration() else {
-            pendingSeekFraction = f
-            pendingSeekFractionAt = Date()
-            pendingSeekSeconds = nil
-            journal("Sprung vorgemerkt: \(Int(f * 100)) % (Dauer/Item noch nicht bereit)")
-            return
-        }
-        seek(toSeconds: f * duration)
+        requestSeek(seconds: nil, fraction: max(0, min(1, fraction.isFinite ? fraction : 0)))
     }
 
     /// Absoluter Positionssprung (Control Center, Langdruck, aeltere Seite).
-    ///
-    /// Frueher "teilweise nicht angenommen" aus mehreren Gruenden, alle behoben: ganze Sekunden
-    /// als Zeitbasis (jetzt 600), Toleranz (jetzt .zero), Item noch nicht bereit (jetzt
-    /// vorgemerkt), Ziel hinter dem Dateiende (jetzt begrenzt) - und seit 2026-10-21: der Sprung
-    /// prueft, WO er gelandet ist, und wiederholt sich einmal mit Toleranz (seekExactly).
     func seek(toSeconds seconds: Double) {
+        requestSeek(seconds: max(0, seconds.isFinite ? seconds : 0), fraction: nil)
+    }
+
+    /// Position, die Seite und Sperrbildschirm WAEHREND eines Sprungs zeigen: das Ziel. Bis zur
+    /// Landung (bei einem Stream oft Sekunden) meldete player.currentTime() eine andere Stelle -
+    /// Leiste und Sperrbildschirm fielen auf die alte Position zurueck und sprangen dann nach vorn
+    /// (das gemeldete "setzt sich zurueck"). An den Song gebunden, damit es nach einem Wechsel nie
+    /// auf den falschen Titel wirkt; verfaellt spaetestens nach 8 s.
+    private var seekDisplay: (itemId: Int, seconds: Double, until: Date)?
+
+    private func setSeekDisplay(_ seconds: Double) {
+        guard let item = currentItem else { return }
+        seekDisplay = (itemId: item.id, seconds: seconds, until: Date().addingTimeInterval(8))
+    }
+
+    private func displayedPosition() -> Double {
+        if let d = seekDisplay, d.itemId == currentItem?.id, Date() < d.until { return d.seconds }
+        seekDisplay = nil
+        return safeSeconds(player.currentTime())
+    }
+
+    /// Gemeinsamer Weg aller Spruenge (Anteil oder Sekunden):
+    ///  1. Item noch nicht bereit / Dauer unbekannt -> vormerken (Anteil bleibt Anteil).
+    ///  2. Ziel gegen das Songende begrenzen. Ohne diese Grenze landet AVPlayer am Ende, feuert
+    ///     AVPlayerItemDidPlayToEndTime und schaltet zum NAECHSTEN SONG - ein Tipp auf die
+    ///     Zeitleiste sah aus wie ein Weiterschalten. Begrenzt wird gegen die Dauer, die der
+    ///     Player SELBST kennt (nicht gegen eine Datenbankangabe, die laenger sein kann als die Datei).
+    ///  3. Stream mit inzwischen vorhandener lokaler Kopie: erst auf die Datei umstellen und dort
+    ///     springen (genau, feste Dauer). Dabei wird der ANTEIL durchgereicht, nicht die aus der
+    ///     Stream-Dauer berechneten Sekunden - die Datei hat oft eine andere (genauere) Dauer.
+    ///     Der LETZTE Tipp gewinnt.
+    ///  4. Sonst springen und die Landung pruefen (seekExactly).
+    private func requestSeek(seconds: Double?, fraction: Double?) {
         guard let track = currentTrack, track.playerItem.status == .readyToPlay else {
-            pendingSeekSeconds = max(0, seconds)
-            pendingSeekFraction = nil
+            if let fraction {
+                pendingSeekFraction = fraction
+                pendingSeekFractionAt = Date()
+                pendingSeekSeconds = nil
+                if let d = effectiveDuration() { setSeekDisplay(fraction * d) }
+                journal("Sprung vorgemerkt: \(Int(fraction * 100)) % (Item noch nicht bereit)")
+            } else if let seconds {
+                pendingSeekSeconds = seconds
+                pendingSeekFraction = nil
+                setSeekDisplay(seconds)
+            }
             return
         }
 
-        // GEGEN DAS SONGENDE BEGRENZEN. Ohne diese Grenze hatte ein Sprung hinter das
-        // Dateiende eine drastische Nebenwirkung: AVPlayer landet am Ende, feuert
-        // AVPlayerItemDidPlayToEndTime und schaltet zum NAECHSTEN SONG - ein Tipp auf die
-        // Zeitleiste sah aus wie ein Weiterschalten. Begrenzt wird gegen die Dauer, die der
-        // Player SELBST kennt (nicht gegen eine Datenbankangabe, die laenger sein kann als die Datei).
+        var target: Double
+        if let fraction {
+            guard let duration = effectiveDuration() else {
+                pendingSeekFraction = fraction
+                pendingSeekFractionAt = Date()
+                pendingSeekSeconds = nil
+                journal("Sprung vorgemerkt: \(Int(fraction * 100)) % (Dauer noch unbekannt)")
+                return
+            }
+            target = fraction * duration
+        } else {
+            target = seconds ?? 0
+        }
         let limit = playerDuration > 0 ? playerDuration : (effectiveDuration() ?? 0)
-        let upper = limit > 1 ? limit - 0.5 : seconds
-        let target = max(0, min(seconds, upper))
+        let upper = limit > 1 ? limit - 0.5 : target
+        target = max(0, min(target, upper))
+        setSeekDisplay(target)
 
-        // Streams springen ungenau (keine praezise Zeitbasis). Liegt inzwischen eine lokale Kopie
-        // vor, wird erst darauf umgestellt und dann dort gesprungen - genau und mit fester Dauer.
         if track.isRemote {
             let item = track.item
-            let token = playbackToken
+            let finalTarget = target
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let local = await AudioFileCache.shared.localFileURL(forId: item.id)
-                guard token == self.playbackToken, self.currentItem?.id == item.id else { return }
-                if local != nil {
+                // Nur der Song zaehlt, nicht der Token: der erste von zwei schnellen Tipps stellt
+                // um und erhoeht dabei den Token - ein Token-Vergleich liesse den ZWEITEN, juengeren
+                // Tipp verfallen, und der aeltere gewaenne ("springt auf die fruehere Stelle").
+                guard self.currentItem?.id == item.id else { return }
+                guard local != nil else {
+                    self.seekExactly(to: finalTarget)
+                    return
+                }
+                if let fraction {
+                    self.pendingSeekFraction = fraction
+                    self.pendingSeekFractionAt = Date()
+                    self.pendingSeekSeconds = nil
+                } else {
+                    self.pendingSeekSeconds = finalTarget
+                    self.pendingSeekFraction = nil
+                }
+                if self.currentTrack?.isRemote == true {
                     self.journal("Sprung: lokale Kopie vorhanden -> von Stream auf Datei umgestellt")
-                    self.pendingSeekSeconds = target
                     // autoplay: nur weiterspielen, wenn vorher auch etwas lief - ein Sprung in
                     // der Pause darf die Wiedergabe nicht starten.
                     self.playCurrent(autoplay: self.isPlaying)
                 } else {
-                    self.seekExactly(to: target)
+                    // Schon umgestellt (ein anderer Tipp war schneller): Ziel greift jetzt/beim Bereitwerden.
+                    self.applyPendingSeek()
                 }
             }
             return
@@ -1443,17 +1574,20 @@ final class PlayerViewModel: ObservableObject {
     }
 
     /// Springt und PRUEFT das Ergebnis. Vorher wurde der Abschluss-Handler nur zum Aufraeumen
-    /// genutzt: ein Sprung, der nicht (oder woanders) landete, fiel niemandem auf - die Anzeige
-    /// zeigte kurz das Ziel und sprang dann auf die tatsaechliche Stelle zurueck ("setzt sich
-    /// ein ganzes Stueck zurueck, egal wie oft ich druecke"). Jetzt: weicht die Landung um mehr
-    /// als seekToleranceSeconds ab oder schlug der Sprung fehl, wird EINMAL mit Toleranz
-    /// wiederholt (der Player waehlt dann die naechste ihm moegliche Stelle), und jeder Sprung
-    /// steht im Protokoll - so laesst sich spaeter belegen statt vermuten, was passiert ist.
+    /// genutzt: ein Sprung, der nicht (oder woanders) landete, fiel niemandem auf. Jetzt: weicht
+    /// die Landung um mehr als seekToleranceSeconds ab oder schlug der Sprung fehl, wird EINMAL
+    /// mit Toleranz wiederholt (der Player waehlt dann die naechste ihm moegliche Stelle), und
+    /// jeder Sprung steht im Protokoll - so laesst sich spaeter belegen statt vermuten.
+    ///
+    /// Gehoert das Ergebnis zu einem Titel, der inzwischen nicht mehr laeuft (Skip waehrend des
+    /// Sprungs: AVPlayer beendet ihn mit finished == false), wird es verworfen - sonst wiederholte
+    /// sich der Sprung auf dem NEUEN Song.
     private func seekExactly(to seconds: Double, attempt: Int = 0) {
         // Zaehler statt Bool: zieht man schnell mehrfach, ueberlappen sich die Spruenge.
         seeksInFlight += 1
         seekGeneration += 1
         let generation = seekGeneration
+        let itemKey = player.currentItem.map { ObjectIdentifier($0) }
         let tolerance: CMTime = (attempt == 0) ? .zero : .positiveInfinity
         let remote = currentTrack?.isRemote == true
         player.seek(
@@ -1464,22 +1598,25 @@ final class PlayerViewModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.seeksInFlight = max(0, self.seeksInFlight - 1)
+                guard self.player.currentItem.map({ ObjectIdentifier($0) }) == itemKey else {
+                    self.journal("Sprung verworfen: Titel hat inzwischen gewechselt")
+                    return
+                }
                 let landed = self.safeSeconds(self.player.currentTime())
                 let off = abs(landed - seconds)
                 self.journal(String(
                     format: "Sprung Ziel %.1f s -> gelandet %.1f s (%@, Abweichung %.1f s, Versuch %d, %@)",
                     seconds, landed, finished ? "ok" : "abgebrochen", off, attempt + 1, remote ? "Stream" : "lokal"
                 ))
+                let newest = (generation == self.seekGeneration)
                 // Nur der NEUESTE Sprung wird nachgebessert - ein ueberholter ist absichtlich abgebrochen.
-                if generation == self.seekGeneration, attempt == 0,
-                   !finished || off > Self.seekToleranceSeconds {
+                if newest, attempt == 0, !finished || off > Self.seekToleranceSeconds {
                     self.seekExactly(to: seconds, attempt: 1)
                     return
                 }
+                if newest { self.seekDisplay = nil }   // gelandet: ab jetzt wieder die echte Position
                 self.updateNowPlayingInfo()
-                // Die Seite bekommt Fortschritt sonst erst beim naechsten Sekundentakt. Bis
-                // dahin ueberschrieb genau dieser Takt die gezogene Position noch einmal mit
-                // dem alten Stand.
+                // Die Seite bekommt Fortschritt sonst erst beim naechsten Sekundentakt.
                 self.pushProgress()
             }
         }
@@ -1496,7 +1633,7 @@ final class PlayerViewModel: ObservableObject {
 
     private func pushProgress() {
         guard isWebOverlayVisible else { return }
-        onProgressChanged?(safeSeconds(player.currentTime()), effectiveDuration() ?? 0)
+        onProgressChanged?(displayedPosition(), effectiveDuration() ?? 0)
     }
 
     // MARK: - Setup
@@ -1624,7 +1761,7 @@ final class PlayerViewModel: ObservableObject {
         }
 
         let duration = effectiveDuration()
-        var elapsed = safeSeconds(player.currentTime())
+        var elapsed = displayedPosition()
         if let duration { elapsed = min(elapsed, duration) }
 
         var info: [String: Any] = [

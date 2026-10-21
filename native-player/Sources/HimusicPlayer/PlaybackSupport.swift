@@ -7,7 +7,7 @@ import UIKit
 /// fuer Verwirrung: "ist die neue IPA ueberhaupt installiert?" liess sich nur raten.
 /// Bei jeder Aenderung unter native-player/ hochzaehlen.
 enum HimusicBuild {
-    static let id = "2026-10-21.2"
+    static let id = "2026-10-21.3"
 
     /// Einziger Host, von dem die Huelle Audio laedt oder streamt (alle 2188 Songs der Bibliothek
     /// liegen dort, gemessen 2026-10-21). Bis dahin konnte die Seite - oder ein fremder Frame, der
@@ -26,6 +26,7 @@ enum HimusicBuild {
     /// aktualisierte Huelle mit der neuen Seite kompatibel (die Seite wird ueber GitHub Pages
     /// sofort ausgeliefert, die Huelle erst nach Neuinstallation).
     static let capabilities = [
+        "queuePlayer",      // vorgeladener Nachfolger, Wechsel synchron verbucht: schnelle Doppeltipps sicher
         "seekFraction",     // seekTo mit "fraction" - die Huelle rechnet mit ihrer eigenen Dauer
         "journal",          // Ereignisprotokoll abrufbar (cmd "journal")
         "keyboard",         // _applyNativeKeyboard

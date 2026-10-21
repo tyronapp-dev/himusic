@@ -2621,7 +2621,12 @@ function initApp() {
                 if(typeof window.updateActiveHighlights === 'function') setTimeout(window.updateActiveHighlights, 100);
 
                 const audio = document.getElementById('main-audio-player');
-                if(audio) {
+                // NICHT in der Huelle: dort spielt der native Player, das <audio> ist nur eine Attrappe.
+                // Befuellt man es hier trotzdem mit dem zuletzt gespeicherten Song, laedt WebKit dessen
+                // Metadaten und audioPlayer.duration traegt fuer die ganze Sitzung die Dauer DIESES
+                // alten Songs - die Zeitleiste rechnete damit jeden Tipp um (kuerzerer alter Song =
+                // jeder Sprung landet systematisch zu frueh, egal wie oft man tippt).
+                if(audio && !window.__himusicNativeShell) {
                     const songUrl = state.currentSong.fileUrl || state.currentSong.file_url;
                     if (songUrl) {
                         audio.src = songUrl;
@@ -3320,6 +3325,12 @@ let _bgCacheActive = false;
         // neuerer Task das schon richtig gemacht hatte - Anzeige zeigt den neuen Song (kommt aus
         // dem aktuellen Warteschlangen-Index), der Player spielt weiter den alten. Genau das
         // gemeldete Bild "Skip zeigt neuen Song, spielt aber noch den alten".
+        // Neue Huelle (Faehigkeit 'queuePlayer'): sie verbucht jeden Wechsel synchron und ist gegen
+        // schnelle Doppeltipps selbst abgesichert. Die 800-ms-Sperre unten verschluckte dort den
+        // zweiten Tipp ("reagiert verzoegert oder gar nicht") - und der Sperrbildschirm hat sie
+        // ohnehin nie gehabt.
+        const _fastBridge = _nativeBridge();
+        if (_fastBridge && _nativeHas('queuePlayer')) { _fastBridge.postMessage(JSON.stringify({ cmd: 'next' })); return; }
         if (isChangingSong) return;
         isChangingSong = true;
         setTimeout(() => isChangingSong = false, 800);
@@ -3411,6 +3422,9 @@ let _bgCacheActive = false;
 
     let isDraggingTime = false;
     function updateTimeUI(current, duration) {
+        // Ist die bekannte Dauer kuerzer als die laufende Position (gerundeter DB-Wert, getrimmter
+        // Song), liefe die Leiste ueber 100 % und die Restzeit ins Negative.
+        if (duration && duration > 0 && current > duration) current = duration;
         if (timeCurrentEl) timeCurrentEl.innerText = formatTime(current);
         if (duration && duration > 0) {
             if (progressBar) progressBar.style.width = ((current / duration) * 100) + '%';
@@ -3429,11 +3443,13 @@ let _bgCacheActive = false;
     }
 
     audioPlayer.addEventListener('timeupdate', () => {
+        if (window.__himusicNativeShell) return;   // Attrappe, siehe loadPlayerState
         if (isDraggingTime) return; 
         let duration = audioPlayer.duration || window.currentSongDuration;
         updateTimeUI(audioPlayer.currentTime || 0, duration);
     });
     audioPlayer.addEventListener('loadedmetadata', () => {
+        if (window.__himusicNativeShell) return;   // Attrappe, siehe loadPlayerState
         if (audioPlayer.duration && !isNaN(audioPlayer.duration) && audioPlayer.duration !== Infinity) {
             window.currentSongDuration = audioPlayer.duration;
             updateTimeUI(0, audioPlayer.duration);
@@ -3457,7 +3473,11 @@ let _bgCacheActive = false;
             const clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : (e.changedTouches ? e.changedTouches[0].clientX : e.clientX);
             if (typeof clientX !== 'number') return null;
             const percent = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-            const duration = audioPlayer.duration || window.currentSongDuration || window.currentSongData?.duration;
+            // In der Huelle zaehlt NUR die Dauer, die der native Player meldet (bzw. der DB-Wert bis
+            // dahin) - das <audio>-Element ist dort eine Attrappe und liefert nichts Verlaessliches.
+            const duration = _nativeBridge()
+                ? (window.currentSongDuration || window.currentSongData?.duration)
+                : (audioPlayer.duration || window.currentSongDuration || window.currentSongData?.duration);
             const known = !!duration && isFinite(duration) && duration > 0;
             if (known) updateTimeUI(percent * duration, duration);
             else if (progressBar) progressBar.style.width = (percent * 100) + '%';
@@ -3473,7 +3493,7 @@ let _bgCacheActive = false;
         // Tipp-Position gegen diesen Naeherungswert um UND sprang direkt, landete der Sprung
         // systematisch neben der beruehrten Stelle - kleiner, aber jedes Mal falscher Versatz,
         // genau je nachdem ob der erste native Tick bei diesem Tipp schon da war oder nicht.
-        const _durationIstVerlaesslich = () => !!audioPlayer.duration || !!window._durationIsFromNative;
+        const _durationIstVerlaesslich = () => _nativeBridge() ? !!window._durationIsFromNative : !!audioPlayer.duration;
 
         // Beim Loslassen: in der Huelle absolut ueber die Bruecke springen (das lokale
         // <audio> ist dort inert - ein currentTime-Schubs daran bewegte den echten
@@ -3487,7 +3507,7 @@ let _bgCacheActive = false;
                 // Ohne bekannte Dauer gibt es kein Ziel in Sekunden; dann haelt die Huelle selbst
                 // ihre Pushes waehrend des Sprungs zurueck.
                 window._seekTargetSeconds = (typeof seconds === 'number') ? seconds : null;
-                window._seekGuardUntil = Date.now() + 2500;
+                window._seekGuardUntil = Date.now() + 6000;
                 const msg = { cmd: 'seekTo' };
                 if (typeof seconds === 'number') msg.seconds = seconds;
                 // Neue Huelle: der Anteil gilt, sie rechnet mit ihrer eigenen Dauer (der, die sie

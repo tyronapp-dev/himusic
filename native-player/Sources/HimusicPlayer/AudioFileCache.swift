@@ -52,6 +52,11 @@ actor AudioFileCache {
     private var urgentQueue: [QueueItem] = []
     private var backgroundQueue: [QueueItem] = []
     private var activeUrgent: Set<Int> = []
+    /// Laufende dringende Downloads, damit veraltete abgebrochen werden koennen (setUpcoming). Ohne
+    /// das belegten nach einigen schnellen Skips zwei Downloads von Songs, die laengst nicht mehr
+    /// dran waren (bis zu 3 Versuche je 25/90 s), beide Spuren - der laufende und der naechste Song
+    /// warteten und wurden gestreamt.
+    private var urgentTasks: [Int: Task<Void, Never>] = [:]
     private var activeBackground: Int?
     private var inFlightNow: Set<Int> = []   // laeuft gerade ein fetchNow() fuer diese id?
     private var currentlyPlayingId: Int?
@@ -71,7 +76,7 @@ actor AudioFileCache {
     private lazy var dlSession: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 25
-        cfg.timeoutIntervalForResource = 90
+        cfg.timeoutIntervalForResource = 300   // grosse Dateien (mp4 bis ~20 MB) schaffen 90 s im Mobilnetz nicht
         cfg.waitsForConnectivity = false
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: cfg)
@@ -249,6 +254,10 @@ actor AudioFileCache {
     /// laufender Song + die naechsten. Alles, was vorher dringend war und nicht mehr dazugehoert,
     /// faellt weg - wer weiterspringt, soll nicht noch die Songs von vorhin laden.
     func setUpcoming(_ items: [QueueItem]) {
+        let keep = Set(items.map(\.id))
+        // Dringende Downloads, die nicht mehr zum Fenster gehoeren, abbrechen - sie halten sonst eine
+        // der zwei Spuren, waehrend der laufende/naechste Song wartet.
+        for (id, task) in urgentTasks where !keep.contains(id) { task.cancel() }
         let wanted = items.filter { needsDownload($0) }
         let ids = Set(wanted.map(\.id))
         backgroundQueue.removeAll { ids.contains($0.id) }
@@ -271,7 +280,7 @@ actor AudioFileCache {
             let item = urgentQueue.removeFirst()
             guard needsDownload(item), let remote = item.fileURL else { continue }
             activeUrgent.insert(item.id)
-            Task { await self.runQueued(item, remote: remote, urgent: true) }
+            urgentTasks[item.id] = Task { await self.runQueued(item, remote: remote, urgent: true) }
         }
 
         guard urgentQueue.isEmpty, activeUrgent.isEmpty, inFlightNow.isEmpty, activeBackground == nil else { return }
@@ -294,7 +303,12 @@ actor AudioFileCache {
 
     private func runQueued(_ item: QueueItem, remote: URL, urgent: Bool) async {
         _ = await download(item: item, from: remote)
-        if urgent { activeUrgent.remove(item.id) } else { activeBackground = nil }
+        if urgent {
+            activeUrgent.remove(item.id)
+            urgentTasks.removeValue(forKey: item.id)
+        } else {
+            activeBackground = nil
+        }
         pump()
     }
 
@@ -351,8 +365,10 @@ actor AudioFileCache {
         var tmpURL: URL?
         var http: HTTPURLResponse?
         for attempt in 0..<3 {
+            if Task.isCancelled { return false }   // nicht mehr im Fenster (setUpcoming) - ohne Protokollzeile
             if attempt > 0 {
                 try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_800_000_000)
+                if Task.isCancelled { return false }
             }
             if let (u, resp) = try? await dlSession.download(from: remote),
                let h = resp as? HTTPURLResponse, h.statusCode == 200 {
@@ -362,6 +378,7 @@ actor AudioFileCache {
             }
         }
         guard let tmpURL, let http else {
+            if Task.isCancelled { return false }
             PlaybackJournal.note("Cache: Download id=\(item.id) fehlgeschlagen (kein 200 nach 3 Versuchen)")
             return false
         }
