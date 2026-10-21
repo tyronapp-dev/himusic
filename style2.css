@@ -154,6 +154,25 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     padding: 0 6px;
 }
 
+/* Tastatur offen (2026-10-21): Die Leiste rutschte mit der Tastatur nach oben und liess beim
+   Suchen nur einen schmalen Streifen fuer die Ergebnisse. Jetzt gleitet sie weg und kommt mit der
+   Tastatur zurueck. Nur transform + opacity (kein Layout), starkes ease-out; Ausblenden schneller
+   als Einblenden - der Nutzer tippt gerade, das System reagiert. visibility nimmt die Leiste nach
+   dem Ausblenden auch aus der Bedienungshilfe-Reihenfolge. Reduced Motion: die globale Regel oben
+   setzt alle Uebergaenge auf ~0 ms. Gesetzt von app2.js (_applyNativeKeyboard). */
+#bottom-nav {
+    transition: transform 220ms var(--ease-out), opacity 180ms var(--ease-out), visibility 0s linear 0s;
+}
+html.kb-open #bottom-nav {
+    transform: translateY(calc(100% + 24px));
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform 160ms var(--ease-out), opacity 140ms var(--ease-out), visibility 0s linear 160ms;
+}
+html.kb-open #mini-player { display: none !important; }
+html.kb-open .view { padding-bottom: calc(env(safe-area-inset-bottom) + 16px); }
+
 /* Gleitende Glas-Pille hinter dem aktiven Tab (Apple-Music-Stil). Breite/Höhe werden von
    app2.js aus der tatsächlichen Bounding-Box des Buttons gemessen (+ etwas Padding) statt
    fest in CSS geraten zu werden - sonst passt es nicht zu jeder Icon/Label-Kombination und
@@ -1020,4 +1039,32 @@ input, textarea { -webkit-user-select: auto !important; user-select: auto !impor
     background: var(--glass-sheen), rgba(255,255,255,0.07);
     backdrop-filter: blur(20px) saturate(180%);
     -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+/* ─── Wiedergabe-Diagnose: Protokoll der nativen Huelle (2026-10-21) ───────────────────────
+   Vollbild ueber allem, auch ueber der nativen Mini-Leiste (die blendet sich bei offenem
+   Overlay selbst aus, siehe playerView-Beobachter in app2.js). Mindestens 44 px grosse Tasten. */
+#native-journal-overlay {
+    position: fixed; inset: 0; z-index: 10000;
+    display: none; flex-direction: column;
+    background: rgba(0, 0, 0, 0.94);
+    padding: calc(env(safe-area-inset-top) + 12px) 12px calc(env(safe-area-inset-bottom) + 12px);
+}
+#native-journal-overlay.open { display: flex; }
+.njo-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.njo-bar button {
+    flex: 1 1 auto; min-height: 44px; padding: 0 14px;
+    border-radius: 12px; border: 0.5px solid rgba(255,255,255,0.25);
+    background: rgba(255,255,255,0.12); color: var(--text-primary);
+    font: inherit; font-size: 15px; font-weight: 600;
+    transition: transform 120ms var(--ease-out);
+}
+.njo-bar button:active { transform: scale(0.97); }
+#njo-text {
+    flex: 1; overflow: auto; -webkit-overflow-scrolling: touch;
+    padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.05);
+    color: rgba(255,255,255,0.88);
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word;
+    -webkit-user-select: text; user-select: text;
 }

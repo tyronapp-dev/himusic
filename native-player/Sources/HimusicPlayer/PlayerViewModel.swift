@@ -996,6 +996,9 @@ final class PlayerViewModel: ObservableObject {
             return
         }
         guard let target = pendingSeekSeconds else { return }
+        // Erst springen, wenn das Item wirklich bereit ist - ein Sprung auf ein noch ladendes Item
+        // verpufft folgenlos, und der vorgemerkte Wert waere danach verbraucht.
+        guard player.currentItem?.status == .readyToPlay else { return }
         pendingSeekSeconds = nil
         let duration = playerDuration
         guard !(duration > 0 && target >= duration - 2) else { return }
@@ -1578,22 +1581,28 @@ final class PlayerViewModel: ObservableObject {
             forInterval: CMTime(seconds: 1, preferredTimescale: 1),
             queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            self.updateNowPlayingInfo()
-            // Position (drei Zahlen) hoechstens alle 10 s sichern - die Warteschlange selbst
-            // wird hier NICHT mehr angefasst (siehe persistQueueSoon).
-            if self.isPlaying, Date().timeIntervalSince(self.lastPositionSaveAt) > 10 {
-                self.persistPosition()
-            }
-            guard self.isWebOverlayVisible else { return }
-            // WAEHREND EINES LAUFENDEN SPRUNGS NICHTS MELDEN. player.currentTime() liefert bis
-            // zum Abschluss des Sprungs weiterhin die ALTE Stelle. Dieser Takt hat sie
-            // ungefiltert an die Seite geschickt und damit die gerade gezogene Position wieder
-            // ueberschrieben. Der Abschluss-Handler in seekExactly() meldet die Zielstelle
-            // ohnehin, sobald sie wirklich erreicht ist.
-            guard self.seeksInFlight == 0 else { return }
-            self.pushProgress()
+            // Ausdruecklich auf den Main-Actor: der Beobachter laeuft zwar auf der Main-Queue,
+            // fuer den Compiler ist die Closure aber nicht isoliert (Warnung "kann nicht aus einer
+            // Sendable-Closure referenziert werden").
+            Task { @MainActor [weak self] in self?.secondTick() }
         }
+    }
+
+    private func secondTick() {
+        updateNowPlayingInfo()
+        // Position (drei Zahlen) hoechstens alle 10 s sichern - die Warteschlange selbst
+        // wird hier NICHT mehr angefasst (siehe persistQueueSoon).
+        if isPlaying, Date().timeIntervalSince(lastPositionSaveAt) > 10 {
+            persistPosition()
+        }
+        guard isWebOverlayVisible else { return }
+        // WAEHREND EINES LAUFENDEN SPRUNGS NICHTS MELDEN. player.currentTime() liefert bis
+        // zum Abschluss des Sprungs weiterhin die ALTE Stelle. Dieser Takt hat sie
+        // ungefiltert an die Seite geschickt und damit die gerade gezogene Position wieder
+        // ueberschrieben. Der Abschluss-Handler in seekExactly() meldet die Zielstelle
+        // ohnehin, sobald sie wirklich erreicht ist.
+        guard seeksInFlight == 0 else { return }
+        pushProgress()
     }
 
     // MARK: - Control Center / Lock Screen

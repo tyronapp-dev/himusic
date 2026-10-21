@@ -52,7 +52,7 @@
                 </div>
 
                 <div class="search-container">
-                    <input type="text" id="home-search-input" class="search-input" placeholder="Globale Suche...">
+                    <input type="text" id="home-search-input" class="search-input" placeholder="Globale Suche..." enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off">
                 </div>
 
                 <div id="home-search-results" class="song-container list-view" style="display: none; margin-top: 20px;"></div>
@@ -125,7 +125,7 @@
                     <h1 class="page-heading">Songs</h1>
                     <button id="more-options-btn" class="header-action-btn"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2.5"></circle><circle cx="12" cy="12" r="2.5"></circle><circle cx="12" cy="19" r="2.5"></circle></svg></button>
                 </div>
-                <div class="search-container"><input type="text" id="songs-search-input" class="search-input" placeholder="Song suchen"></div>
+                <div class="search-container"><input type="text" id="songs-search-input" class="search-input" placeholder="Song suchen" enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off"></div>
                 <div class="action-button-container">
                     <button id="btn-add-songs" class="secondary-btn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 6px; margin-top: -2px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg> Musik importieren</button>
 <input type="file" id="native-file-upload" accept=".mp3, .wav, .m4a, .aac, .mp4, .mov, .m4v, audio/*, video/*" multiple style="display: none;">
@@ -149,7 +149,7 @@
                         YouTube Import
                     </h3>
                     <div style="position: relative; margin-bottom: 10px;">
-                        <input type="text" id="yt-search-input" placeholder="Songname suchen..." style="width: 100%; box-sizing: border-box; padding: 14px; padding-right: 40px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; outline: none; font-size: 16px;">
+                        <input type="text" id="yt-search-input" enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="Songname suchen..." style="width: 100%; box-sizing: border-box; padding: 14px; padding-right: 40px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.5); color: white; outline: none; font-size: 16px;">
                         <button id="yt-search-clear-btn" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #aaa; font-size: 24px; cursor: pointer; display: none; padding: 0;">&times;</button>
                     </div>
                     <button id="yt-search-btn" style="width: 100%; padding: 14px; border-radius: 10px; border: none; background: rgba(255,255,255,0.12); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); color: white; font-weight: bold; font-size: 16px; cursor: pointer; border: 0.5px solid rgba(255,255,255,0.18);">🔍 Suchen</button>
@@ -334,10 +334,11 @@
                             <div class="settings-row-info"><h4>App-Cache leeren</h4><p>Bei veralteter Anzeige trotz Update - kein Neu-Login nötig</p></div>
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
                         </div>
-                        <!-- Nur in der Huelle: Zeitmessung der letzten Songstarts (Quelle lokal/geladen/Stream
-                             + Wartezeiten), um sporadische Verzoegerungen beim Abspielen einzugrenzen. -->
+                        <!-- Nur in der Huelle: Ereignisprotokoll der Wiedergabe (laeuft auch bei gesperrtem
+                             Handy mit, ueberlebt den Hintergrund), Fassung von App und Seite sowie die
+                             Zeitmessung der letzten Songstarts. Statt zu raten, was passiert ist. -->
                         <div class="settings-row" id="btn-playback-diag" style="cursor: pointer; display: none;">
-                            <div class="settings-row-info"><h4>Wiedergabe-Diagnose</h4><p>Zeigt, wie lange die letzten Songstarts gedauert haben und warum</p></div>
+                            <div class="settings-row-info"><h4>Wiedergabe-Diagnose</h4><p>Protokoll von Wechseln, Sprüngen und Sperrbildschirm – zum Kopieren</p></div>
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                         </div>
                     </div>
@@ -393,7 +394,7 @@
                 </div>
 
                <div id="pld-search-container" class="search-container" style="display: none; margin-top: 0; margin-bottom: 15px;">
-                    <input type="text" id="pld-search-input" class="search-input" placeholder="In Playlist suchen...">
+                    <input type="text" id="pld-search-input" class="search-input" placeholder="In Playlist suchen..." enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off">
                 </div>
 
                 <div id="playlist-details-songs-container" class="song-container list-view"></div>

@@ -414,6 +414,37 @@ function _softShuffle(arr) {
     return arr.map((s, i) => ({ s, k: i + Math.random() * (8 + i * 0.5) }))
         .sort((a, b) => a.k - b.k).map(x => x.s);
 }
+
+// Fortsetzung, wenn eine Liste zu Ende geht (2026-10-21). Die Warteschlange der Huelle ist genau die
+// Liste, aus der man gestartet hat: eine Playlist mit 12 Songs, ein Vibe-Filter, ein Sender mit
+// wenigen Treffern. Danach gab es NICHTS mehr - der Player blieb stehen, der Skip auf dem
+// Sperrbildschirm tat nichts, und das Handy zeigte weiter "spielt". Spotify laeuft an dieser Stelle
+// einfach weiter; hier jetzt auch: mit Songs, die nach den eigenen Vibes am naechsten liegen
+// (dieselbe Aehnlichkeit wie bei Sendern), danach der Rest zufaellig. Die Songs haengen schon in
+// der nativen Warteschlange, sie funktioniert also auch im Hintergrund und ohne die Seite.
+// Abschaltbar: localStorage 'himusic_autocontinue' = '0'.
+const CONTINUE_WHEN_FEWER_THAN = 30;   // weniger Folgesongs als das -> auffuellen
+const CONTINUE_COUNT = 200;            // so viele kommen dazu (rund 12 Stunden Musik)
+const CONTINUE_LABEL = 'Danach: ähnliche Songs';
+function _autoContinueEnabled() {
+    try { return localStorage.getItem('himusic_autocontinue') !== '0'; } catch (e) { return true; }
+}
+function _continuationTail(currentSong, upcoming) {
+    const all = window.globalSongsData || [];
+    if (all.length < 2 || !currentSong) return [];
+    const used = new Set([currentSong.id, ...upcoming.map(s => s.id)]);
+    const anchor = (window._songIndex && window._songIndex.get(currentSong.id)) || currentSong;
+    const ranked = _rankByVibeSimilarity(anchor).filter(e => !used.has(e.song.id) && e.song.file_url);
+    const near = _softShuffle(ranked.filter(e => e.sim >= STATION_MIN_SCORE).map(e => e.song));
+    let picked = near.slice(0, CONTINUE_COUNT);
+    if (picked.length < CONTINUE_COUNT) {
+        // Wenige/keine Vibes: mit dem Rest auffuellen, zufaellig (Fisher-Yates, siehe _shuffle).
+        const have = new Set(picked.map(s => s.id));
+        const rest = _shuffle(ranked.map(e => e.song).filter(s => !have.has(s.id)));
+        picked = picked.concat(rest.slice(0, CONTINUE_COUNT - picked.length));
+    }
+    return picked;
+}
 function _orderedStation(id) {
     if (!String(id).startsWith('station_')) return null;
     try { return JSON.parse(localStorage.getItem('heatbox_stations') || '[]').find(x => x.id === id && x.kind === 'artist') || null; }
@@ -512,6 +543,18 @@ function _base64urlEncode(str) {
 // nativ: kein App-Wechsel, kein Bestaetigungsdialog, kein Streit um die Audio-Sitzung.
 function _nativeBridge() {
     return (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.himusicNative) || null;
+}
+
+// Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
+// CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
+// "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
+window.HIMUSIC_WEB_VERSION = '1.95';
+
+// Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
+// ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur
+// benutzt werden, wenn die Huelle sie meldet (window.__himusicNativeCaps, siehe WebShellView.swift).
+function _nativeHas(capability) {
+    return Array.isArray(window.__himusicNativeCaps) && window.__himusicNativeCaps.includes(capability);
 }
 
 // ── YOUTUBE-IMPORT IN DER APP (Phase-0-Spike) ─────────────────────────────────
@@ -1463,6 +1506,17 @@ window._applyNativeNowPlaying = function(payload) {
         vibes: song ? _parseVibes(song.vibes) : []
     };
 
+    // Eingebettetes Cover (data:-URI) nachliefern: der Handoff traegt solche Cover nur fuer die
+    // ersten Songs der Warteschlange mit (siehe _tryNativePlayerHandoff), sonst waeren es ~12 MB
+    // pro Antippen. Kommt ein spaeterer Song dran, fehlt der Huelle sein Cover fuer den
+    // Sperrbildschirm - hier bekommt sie es, sobald die Seite den Song kennt. Einmal pro Song.
+    if (!payload.c && song && typeof song.cover_data === 'string' && song.cover_data.startsWith('data:image/')
+        && song.cover_data.length <= 400000 && _nativeHas('setCover') && window._coverSentFor !== payload.id) {
+        window._coverSentFor = payload.id;
+        const _b = _nativeBridge();
+        if (_b) _b.postMessage(JSON.stringify({ cmd: 'setCover', id: payload.id, c: song.cover_data }));
+    }
+
     const bgStyle = window.currentSongData.coverUrl && window.currentSongData.coverUrl.length > 10 ? `url('${window.currentSongData.coverUrl}')` : 'none';
 
     const mp = document.getElementById('mini-player');
@@ -1577,6 +1631,10 @@ window._applyNativeProgress = function(current, duration) {
         if (warVorherUnbekannt) window._flushPendingScrub?.();
     }
 
+    // Liegt der Finger auf der Leiste, gehoert die Anzeige ihm (siehe setDragging). Mit Frist:
+    // ginge ein touchend je verloren, bliebe die Anzeige sonst fuer immer stehen.
+    if (window._isScrubbing && Date.now() - (window._isScrubbingAt || 0) < 15000) return;
+
     if (window._seekTargetSeconds !== null) {
         const angekommen = Math.abs(current - window._seekTargetSeconds) < 1.5;
         if (angekommen || Date.now() > window._seekGuardUntil) {
@@ -1586,6 +1644,114 @@ window._applyNativeProgress = function(current, duration) {
         }
     }
     if (typeof window.updateTimeUI === 'function') window.updateTimeUI(current, duration);
+};
+
+// ── TASTATUR (2026-10-21) ───────────────────────────────────────────────────────
+// Beim Suchen verdeckten Navigationsleiste und (native) Mini-Leiste die Ergebnisse: beide rutschen
+// mit der Tastatur nach oben, uebrig blieb ein schmaler Streifen. Solange die Tastatur offen ist,
+// bekommt <html> die Klasse "kb-open" (Navigation raus, kaum Rand unten - siehe style2.css), und
+// die Huelle blendet ihre eigene Leiste aus. Quelle des Zustands in der Huelle: die echten
+// Tastatur-Ereignisse von iOS (_applyNativeKeyboard). Ohne Huelle (Browser) ersatzweise der Fokus.
+window._applyNativeKeyboard = function(visible) {
+    document.documentElement.classList.toggle('kb-open', !!visible);
+};
+(function _setupSearchKeyboardBehavior() {
+    const SEARCH_IDS = ['home-search-input', 'songs-search-input', 'pld-search-input', 'yt-search-input'];
+    const isSearch = (el) => !!el && SEARCH_IDS.includes(el.id);
+    const isTextField = (el) => !!el && /^(INPUT|TEXTAREA)$/.test(el.tagName);
+
+    document.addEventListener('focusin', (e) => {
+        if (!window.__himusicNativeShell && isTextField(e.target)) document.documentElement.classList.add('kb-open');
+    });
+    document.addEventListener('focusout', () => {
+        if (window.__himusicNativeShell) return;
+        setTimeout(() => { if (!isTextField(document.activeElement)) document.documentElement.classList.remove('kb-open'); }, 150);
+    });
+
+    // Scrollen in den Ergebnissen schliesst die Tastatur - wie in jeder nativen Such-Ansicht. Wer
+    // durch Treffer blaettert, will sie sehen; die Tastatur bleibt dabei nur im Weg. Ein Tippen
+    // ins Feld holt sie zurueck. Ziehen IM Feld (Cursor setzen) zaehlt nicht.
+    let startY = null;
+    document.addEventListener('touchstart', (e) => { startY = e.touches.length ? e.touches[0].clientY : null; }, { passive: true });
+    document.addEventListener('touchmove', (e) => {
+        const field = document.activeElement;
+        if (startY === null || !isSearch(field) || e.target === field || !e.touches.length) return;
+        if (Math.abs(e.touches[0].clientY - startY) > 14) { field.blur(); startY = null; }
+    }, { passive: true });
+    // "Suchen"/Enter schliesst die Tastatur ebenfalls (die Ergebnisse stehen schon da).
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && isSearch(e.target) && e.target.tagName === 'INPUT') e.target.blur();
+    });
+})();
+
+// ── CACHE-STAND DER HUELLE ──────────────────────────────────────────────────────
+// Welche Songs der native Player WIRKLICH lokal hat. Die IndexedDB dieser Seite ist in der Huelle
+// bedeutungslos: der Player liest sie nie. Fuer "offline"-Haken und den Zaehler zaehlt, was nativ
+// liegt (siehe getAllLocalUrls in initApp).
+window._nativeCachedIds = null;
+window._applyNativeCachedIds = function(ids) {
+    window._nativeCachedIds = new Set(Array.isArray(ids) ? ids : []);
+    window._syncOfflineBadges?.();
+    window._refreshOfflineLabel?.();
+};
+
+// ── WIEDERGABE-DIAGNOSE (Protokoll der Huelle) ──────────────────────────────────
+// Ereignisprotokoll aus der Huelle, gemeinsam mit Fassungen und den letzten Songstarts. Es laeuft
+// nativ auch bei gesperrtem Handy mit - genau dort, wo die Seite nichts mitschreiben kann.
+function _webDiagHeader() {
+    const s = ms => (ms == null || ms < 0) ? '?' : (ms / 1000).toFixed(1).replace('.', ',') + ' s';
+    const starts = (window._nativeStartLog || []).slice().reverse().slice(0, 12).map(e =>
+        `${e.at}  ${e.t}  [${e.src}]  Wechsel ${s(e.waitMs)} · bereit +${s(e.readyMs)}` + (e.sinceTap != null ? ` · ab Tipp ${s(e.sinceTap)}` : ''));
+    return `Seite v${window.HIMUSIC_WEB_VERSION || '?'} · Hülle ${window.__himusicNativeBuild || 'unbekannt (ältere Fassung)'}\n` +
+        (starts.length ? `\nLetzte Songstarts (neueste oben):\n${starts.join('\n')}\n` : '') + '\n';
+}
+async function _copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none;';
+        document.body.appendChild(ta); ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        return ok;
+    } catch (e) { return false; }
+}
+window._applyNativeJournal = function(nativeText) {
+    const text = _webDiagHeader() + String(nativeText || '');
+    let ov = document.getElementById('native-journal-overlay');
+    if (!ov) {
+        ov = document.createElement('div');
+        ov.id = 'native-journal-overlay';
+        ov.setAttribute('role', 'dialog');
+        ov.setAttribute('aria-modal', 'true');
+        ov.setAttribute('aria-label', 'Wiedergabe-Diagnose');
+        ov.innerHTML =
+            '<div class="njo-bar">' +
+            '<button type="button" id="njo-copy">Kopieren</button>' +
+            '<button type="button" id="njo-clear">Protokoll leeren</button>' +
+            '<button type="button" id="njo-close">Schließen</button>' +
+            '</div><pre id="njo-text" tabindex="0"></pre>';
+        document.body.appendChild(ov);
+        const close = () => ov.classList.remove('open');
+        ov.querySelector('#njo-close').addEventListener('click', close);
+        ov.querySelector('#njo-clear').addEventListener('click', () => {
+            if (!confirm('Das gespeicherte Protokoll löschen?')) return;
+            const b = _nativeBridge();
+            if (b) b.postMessage(JSON.stringify({ cmd: 'journalClear' }));
+            ov.querySelector('#njo-text').textContent = 'Protokoll geleert.';
+        });
+        ov.querySelector('#njo-copy').addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            const ok = await _copyText(ov.querySelector('#njo-text').textContent);
+            btn.textContent = ok ? 'Kopiert ✓' : 'Kopieren nicht möglich';
+            setTimeout(() => { btn.textContent = 'Kopieren'; }, 1800);
+        });
+    }
+    const pre = ov.querySelector('#njo-text');
+    pre.textContent = text;
+    ov.classList.add('open');
+    pre.scrollTop = pre.scrollHeight;   // neueste Ereignisse unten
+    ov.querySelector('#njo-close').focus();
 };
 
 // Ein Song liess sich nicht abspielen (defekte/leere Datei, Quelle nicht erreichbar). Der
@@ -1684,7 +1850,7 @@ window._applyNativeQueue = function(snapshot) {
         const bridge = _nativeBridge();
         if (!bridge) return;
         const open = !!(fsPlayer && fsPlayer.classList.contains('open'))
-            || !!document.querySelector('.action-sheet-overlay.active');
+            || !!document.querySelector('.action-sheet-overlay.active, #native-journal-overlay.open');
         if (open === lastOpen) return;
         lastOpen = open;
         bridge.postMessage(JSON.stringify({ cmd: 'playerView', open }));
@@ -1793,7 +1959,8 @@ function _enqueueSongNext(song) {
                 // richtig, wenn die Seite zwischendurch neu geladen wird - die frueher dafuer
                 // gefuehrte Merkliste (_manuallyQueuedIds) war nach jedem Reload leer, und der
                 // eingereihte Song trug danach wieder das Etikett der alten Quelle.
-                s: ''
+                s: '',
+                d: song.duration > 0 ? song.duration : undefined
             }
         }));
         return;
@@ -1869,21 +2036,31 @@ function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     // Fall ein JSON-String von hunderten MB - die App waere beim Starten einer grossen Liste
     // schlicht weg. 250 KB reichen fuer ein sauberes Cover; alles darueber wird ausgelassen
     // (der Song laeuft normal, nur ohne Bild auf dem Sperrbildschirm).
+    //
+    // Messung 2026-10-21 an der echten Bibliothek: 117 von 2188 Songs tragen ein eingebettetes
+    // Cover, zusammen 16,8 MB. Selbst mit dem 250-KB-Deckel pro Cover waren das ~12 MB JSON bei
+    // JEDEM Antippen eines Songs (JSON.stringify hier, Dekodieren in der Huelle, danach alle
+    // 10 s dieselbe Menge noch einmal ins Speichern) - spuerbare Hakler. Deshalb tragen nur die
+    // ersten DATA_COVER_WINDOW Songs ihr eingebettetes Cover mit; fuer alle weiteren liefert
+    // _applyNativeNowPlaying es per cmd:'setCover' nach, sobald der Song dran ist.
     const COVER_DATA_MAX = 250 * 1024;
-    const _coverFor = (coverUrl) => {
+    const DATA_COVER_WINDOW = 25;
+    const _coverFor = (coverUrl, allowData) => {
         if (!coverUrl) return null;
         if (coverUrl.startsWith('http')) return coverUrl;
-        if (bridge && coverUrl.startsWith('data:image/') && coverUrl.length <= COVER_DATA_MAX) return coverUrl;
+        if (bridge && allowData && coverUrl.startsWith('data:image/') && coverUrl.length <= COVER_DATA_MAX) return coverUrl;
         return null;
     };
 
-    const toItem = (id, title, artist, fileUrl, coverUrl) => ({
+    // durationSec: Datenbankwert, nur Notbehelf fuer die Huelle (bei 2/3 der Songs 0 - dann weggelassen).
+    const toItem = (id, title, artist, fileUrl, coverUrl, durationSec, allowDataCover, label) => ({
         id: id ?? 0,
         t: title || 'Unbekannt',
         a: artist || '',
         u: remoteUrl(id, fileUrl),
-        c: _coverFor(coverUrl),
-        s: sourceLabel
+        c: _coverFor(coverUrl, allowDataCover),
+        s: label === undefined ? sourceLabel : label,
+        d: durationSec > 0 ? durationSec : undefined
     });
 
     // Bis 2026-08-10 stand hier slice(0, 24) - insgesamt 25 Songs. Das war eine Grenze des
@@ -1892,9 +2069,13 @@ function _tryNativePlayerHandoff(currentSong, upcomingQueue) {
     // war die native Warteschlange zu Ende, Skip tat nichts mehr und die Wiedergabe endete.
     // In der Huelle geht deshalb die volle Warteschlange rueber, nur der URL-Weg bleibt gekappt.
     const upcoming = bridge ? (upcomingQueue || []) : (upcomingQueue || []).slice(0, 24);
+    // Geht die Liste bald zu Ende, haengt eine Fortsetzung dran (siehe _continuationTail).
+    const tail = (bridge && _autoContinueEnabled() && upcoming.length < CONTINUE_WHEN_FEWER_THAN)
+        ? _continuationTail(currentSong, upcoming) : [];
     const queue = [
-        toItem(currentSong.id, currentSong.title, currentSong.artist, currentSong.fileUrl, currentSong.coverUrl),
-        ...upcoming.map(s => toItem(s.id, s.title, s.artist, s.file_url, s.cover_data))
+        toItem(currentSong.id, currentSong.title, currentSong.artist, currentSong.fileUrl, currentSong.coverUrl, currentSong.duration, true),
+        ...upcoming.map((s, i) => toItem(s.id, s.title, s.artist, s.file_url, s.cover_data, s.duration, i < DATA_COVER_WINDOW)),
+        ...tail.map(s => toItem(s.id, s.title, s.artist, s.file_url, s.cover_data, s.duration, false, CONTINUE_LABEL))
     ].filter(item => !!item.u);
 
     if (queue.length === 0) return false;
@@ -2660,18 +2841,38 @@ function initApp() {
     }
     _moveNavPill(document.querySelector('.nav-btn.active') || navButtons[0]);
     window.addEventListener('resize', () => _moveNavPill(document.querySelector('.nav-btn.active') || navButtons[0]));
+    // Ein Tipp auf einen Tab der unteren Leiste zeigt IMMER die Standardansicht dieser Seite
+    // (2026-10-21, Nutzerwunsch): vorher blieb eine Suche samt gefilterter Liste stehen - wer in
+    // "Songs" etwas gesucht hatte und spaeter wieder dorthin wechselte, sah das Suchergebnis statt
+    // der Liste, und auch ein Tipp auf den schon aktiven Tab tat nichts. Gleiche Regel wie bei der
+    // Tab-Leiste von iOS: erneuter Tipp = zurueck zum Anfang. Bewusst NICHT zurueckgesetzt: ein aktiver
+    // Vibe-Filter - er ist eine eigene, sichtbare Auswahl mit eigenem Knopf zum Aufheben.
+    function _resetViewToDefault(targetId) {
+        const active = document.activeElement;
+        if (active && /^(INPUT|TEXTAREA)$/.test(active.tagName)) active.blur();   // Tastatur weg
+        if (targetId === 'view-home') window._resetHomeSearch?.();
+        if (targetId === 'view-songs') window._resetSongsSearch?.();
+        // Die Playlist-Detailansicht ist eine eigene Ansicht und faellt beim Wechsel ohnehin weg;
+        // ihre Suche aber sollte beim naechsten Oeffnen nicht noch gefiltert sein.
+        window._resetPlaylistDetailSearch?.();
+    }
     navButtons.forEach(btn => {
         btn.addEventListener('click', (e) => {
             navButtons.forEach(b => b.classList.remove('active'));
             e.currentTarget.classList.add('active');
             _moveNavPill(e.currentTarget);
             const targetId = e.currentTarget.getAttribute('data-target');
-            window.currentOpenPlaylistId = null; 
+            window.currentOpenPlaylistId = null;
+            _resetViewToDefault(targetId);
             if (targetId === 'view-settings' && typeof window.updateAppStats === 'function') window.updateAppStats();
             if (targetId === 'view-settings' && typeof renderYtQueueList === 'function') renderYtQueueList();
             views.forEach(view => {
                 if (view.id === targetId) {
+                    // Schon aktiv (erneuter Tipp auf denselben Tab): sanft nach oben. Sonst steht die
+                    // Ansicht beim Einblenden gleich oben, nicht dort, wo man sie zuletzt verlassen hat.
+                    const warAktiv = view.classList.contains('active');
                     view.classList.remove('hidden');
+                    if (warAktiv) view.scrollTo({ top: 0, behavior: 'smooth' }); else view.scrollTop = 0;
                     setTimeout(() => view.classList.add('active'), 10);
                 } else {
                     view.classList.remove('active');
@@ -2809,15 +3010,25 @@ function initApp() {
     }
 
     async function getAllLocalUrls() {
+        let urls = new Set();
         try {
             const db = await openHBDatabase();
             const tx = db.transaction(HB_STORE, 'readonly');
-            return new Promise((resolve) => {
+            urls = await new Promise((resolve) => {
                 const req = tx.objectStore(HB_STORE).getAllKeys();
                 req.onsuccess = () => resolve(new Set(req.result));
                 req.onerror   = () => resolve(new Set());
             });
-        } catch(e) { return new Set(); }
+        } catch(e) { urls = new Set(); }
+        // In der Huelle zusaetzlich (und eigentlich allein massgeblich): was der native Player
+        // wirklich lokal hat. Ein Song nur in der IndexedDB spielt dort trotzdem ueber das Netz.
+        if (window._nativeCachedIds && window._songIndex) {
+            window._nativeCachedIds.forEach(id => {
+                const s = window._songIndex.get(id);
+                if (s && s.file_url) urls.add(s.file_url);
+            });
+        }
+        return urls;
     }
 
     async function downloadToLocal(fileUrl, title) {
@@ -2854,6 +3065,21 @@ let _bgCacheActive = false;
     }
 
     function startBackgroundCacheQueue(songs) {
+        // In der Huelle (neue Fassung) ist das Web-Caching ueberfluessig UND schaedlich: der
+        // native Player liest die IndexedDB nie, die 12,3 GB Bibliothek wurden hier trotzdem ein
+        // zweites Mal komplett geladen (3 Spuren, weil das <audio>-Element in der Huelle nie
+        // "spielt" und die Drosselung unten nie griff) - und stritten mit den Downloads des
+        // Songs, den man gerade hoert, um die Bandbreite. Stattdessen geht die Liste EINMAL an
+        // die Huelle: sie fuellt im Leerlauf auf, hoert an ihrer Fuellgrenze auf und
+        // verdraengt nie etwas (AudioFileCache.setBackground).
+        const bridge = _nativeBridge();
+        if (bridge && _nativeHas('cacheBackground')) {
+            const items = songs
+                .filter(s => s.file_url && !s.file_url.startsWith('blob:'))
+                .map(s => ({ id: s.id ?? 0, t: s.title || 'Unbekannt', a: s.artist || '', u: s.file_url, c: null, s: '' }));
+            bridge.postMessage(JSON.stringify({ cmd: 'cacheBackground', items }));
+            return;
+        }
         const newUrls = songs.filter(s => s.file_url).map(s => s.file_url);
         const existing = new Set(_bgCacheQueue);
         newUrls.forEach(url => { if (!existing.has(url)) _bgCacheQueue.push(url); });
@@ -2918,7 +3144,9 @@ let _bgCacheActive = false;
         return { usedMB: 0, quotaMB: 0 };
     }
 
-    setTimeout(async () => {
+    // Zeigt die "offline"-Haken in der Songliste. Laeuft beim Start und jedes Mal, wenn die Huelle
+    // einen neuen Cache-Stand meldet (_applyNativeCachedIds).
+    window._syncOfflineBadges = async function() {
         const localUrls = await getAllLocalUrls();
         if (localUrls.size === 0) return;
         document.querySelectorAll('.song-item').forEach(el => {
@@ -2934,8 +3162,9 @@ let _bgCacheActive = false;
             offlineBtn.style.setProperty('border-color', '#30d158', 'important');
             offlineBtn.style.setProperty('color', '#30d158', 'important');
         }
-        window._refreshOfflineLabel();
-    }, 1500);
+        window._refreshOfflineLabel?.();
+    };
+    setTimeout(() => window._syncOfflineBadges(), 1500);
 
     window.hbLocal = { clearLocalAudio, getLocalStorageInfo, getAllLocalUrls, downloadToLocal };
 
@@ -3215,31 +3444,24 @@ let _bgCacheActive = false;
     audioPlayer.addEventListener('seeked', syncLockscreenPosition);
 
     if (progressContainer) {
-        // Gibt null zurueck, wenn keine Dauer bekannt ist. Vorher war das 0 - und eine 0 ist
-        // von "an den Anfang springen" nicht zu unterscheiden, der Tipp landete also entweder
-        // am Songanfang oder wirkte gar nicht. In der Huelle ist audioPlayer.duration immer
-        // leer (inertes <audio>), die Dauer kommt dort ueber _applyNativeProgress herein.
+        // Liefert {percent, time}: der ANTEIL (0..1) steht allein aus der Geometrie fest und ist
+        // immer da; die Zeit nur, wenn eine Dauer bekannt ist (sonst null). Frueher kam bei
+        // unbekannter Dauer gar nichts zurueck - der Tipp wirkte dann einfach nicht. Seit die
+        // Huelle den Anteil selbst umrechnet (cmd 'seekTo' mit 'fraction'), braucht der Sprung
+        // keine Dauer mehr; die Zeit dient nur noch der Anzeige waehrend des Ziehens.
+        // In der Huelle ist audioPlayer.duration immer leer (inertes <audio>), die Dauer kommt
+        // dort ueber _applyNativeProgress herein.
         const handleScrub = (e) => {
-            // Dritter Fallback auf die DB-Dauer (window.currentSongData.duration, gesetzt in
-            // _applyNativeNowPlaying): window.currentSongDuration wird erst durch den ERSTEN
-            // Sekunden-Push des nativen Players gesetzt. Direkt nach einem App-Kaltstart/Reload
-            // ist das kurz leer, bevor der erste Tick ankommt - Ziehen auf der Leiste tat in
-            // diesem Fenster einfach nichts (dieser Fallback hat sofort eine brauchbare Dauer,
-            // sobald die Bibliothek geladen ist, ohne auf den nativen Tick warten zu muessen).
-            // NUR fuer die Anzeige waehrend des Ziehens gedacht - fuer den tatsaechlichen Sprung
-            // beim Loslassen zaehlt _durationIstVerlaesslich() weiter unten, die DB-Naeherung
-            // wird dafuer NICHT mehr genutzt (siehe seekTo).
-            let duration = audioPlayer.duration || window.currentSongDuration || window.currentSongData?.duration;
-            if (!duration || !isFinite(duration) || duration <= 0) return null;
             const rect = progressContainer.getBoundingClientRect();
             if (!rect.width) return null;
-            let clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : (e.changedTouches ? e.changedTouches[0].clientX : e.clientX);
+            const clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : (e.changedTouches ? e.changedTouches[0].clientX : e.clientX);
             if (typeof clientX !== 'number') return null;
-            let percent = (clientX - rect.left) / rect.width;
-            percent = Math.max(0, Math.min(1, percent));
-            const newTime = percent * duration;
-            updateTimeUI(newTime, duration);
-            return { time: newTime, percent };
+            const percent = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            const duration = audioPlayer.duration || window.currentSongDuration || window.currentSongData?.duration;
+            const known = !!duration && isFinite(duration) && duration > 0;
+            if (known) updateTimeUI(percent * duration, duration);
+            else if (progressBar) progressBar.style.width = (percent * 100) + '%';
+            return { percent, time: known ? percent * duration : null };
         };
 
         // Ist die aktuell bekannte Dauer verlaesslich genug, um einen ABSOLUTEN Sprung darauf zu
@@ -3257,31 +3479,43 @@ let _bgCacheActive = false;
         // <audio> ist dort inert - ein currentTime-Schubs daran bewegte den echten
         // AVPlayer nicht, die Anzeige sprang deshalb kurz zur gezogenen Stelle und dann
         // beim naechsten Sekunden-Push (_applyNativeProgress) wieder zurueck).
-        const _commitNativeSeek = (seconds) => {
+        const _commitNativeSeek = (seconds, percent) => {
             const b = _nativeBridge();
             if (b) {
                 // Bis der Sprung nativ greift, haben die Sekunden-Pushes noch den alten Stand
                 // im Gepaeck - solange die Anzeige auf dem Ziel halten (siehe _seekGuardUntil).
-                window._seekTargetSeconds = seconds;
+                // Ohne bekannte Dauer gibt es kein Ziel in Sekunden; dann haelt die Huelle selbst
+                // ihre Pushes waehrend des Sprungs zurueck.
+                window._seekTargetSeconds = (typeof seconds === 'number') ? seconds : null;
                 window._seekGuardUntil = Date.now() + 2500;
-                b.postMessage(JSON.stringify({ cmd: 'seekTo', seconds }));
+                const msg = { cmd: 'seekTo' };
+                if (typeof seconds === 'number') msg.seconds = seconds;
+                // Neue Huelle: der Anteil gilt, sie rechnet mit ihrer eigenen Dauer (der, die sie
+                // auch anzeigt). Aeltere Huellen kennen 'fraction' nicht und nehmen 'seconds'.
+                if (_nativeHas('seekFraction') && typeof percent === 'number') msg.fraction = percent;
+                b.postMessage(JSON.stringify(msg));
                 return;
             }
             audioPlayer.currentTime = seconds;
         };
 
-        // seconds wird nur genutzt, wenn die Dauer schon verlaesslich ist. Sonst wird NUR die
-        // Prozent-Position gemerkt (window._pendingScrubPercent) und der Sprung nachgeholt,
-        // sobald _flushPendingScrub() (siehe _applyNativeNowPlaying/_applyNativeProgress) die
-        // echte Dauer bekommt - meist binnen des naechsten Sekundentakts, aber dann IMMER an der
-        // tatsaechlich beruehrten Stelle statt "ungefaehr".
+        // Neue Huelle: Anteil sofort senden, keine Dauer noetig. Aeltere Huelle/Browser: wie bisher
+        // mit Sekunden - und ist die Dauer dort noch nicht verlaesslich, wird NUR die Prozent-
+        // Position gemerkt (window._pendingScrubPercent) und nachgeholt, sobald
+        // _flushPendingScrub() die echte Dauer bekommt.
         const seekTo = (seconds, percent) => {
-            if (seconds === null) return;
+            if (percent === null || percent === undefined) return;
+            const nativeCalcs = !!_nativeBridge() && _nativeHas('seekFraction');
+            if (nativeCalcs) { _commitNativeSeek(seconds, percent); return; }
+            // Aeltere Huelle: ist die Dauer noch nicht verlaesslich (auch: voellig unbekannt), den
+            // Anteil vormerken statt den Tipp zu verwerfen - er wird mit der ersten echten Dauer
+            // nachgeholt (_flushPendingScrub).
             if (_nativeBridge() && !_durationIstVerlaesslich()) {
                 window._pendingScrubPercent = percent;
                 return;
             }
-            _commitNativeSeek(seconds);
+            if (seconds === null) return;
+            _commitNativeSeek(seconds, percent);
         };
         // Auf window, weil _applyNativeNowPlaying/_applyNativeProgress ausserhalb dieses
         // initApp-Scopes liegen (gleiches Muster wie window.updateTimeUI oben). Wird aufgerufen,
@@ -3292,13 +3526,26 @@ let _bgCacheActive = false;
             if (!duration || !isFinite(duration) || duration <= 0) return;
             const seconds = window._pendingScrubPercent * duration;
             window._pendingScrubPercent = null;
-            _commitNativeSeek(seconds);
+            _commitNativeSeek(seconds, null);
         };
         // Letzte Position aus dem Ziehen. Bei touchcancel liefert iOS keine verlaesslichen
         // Koordinaten mehr - dann gilt die zuletzt gesehene Stelle, statt den Sprung
         // wegzuwerfen. Der Finger war ja dort.
         let lastScrubSeconds = null;
         let lastScrubPercent = null;
+
+        // Waehrend der Finger auf der Leiste liegt, gehoert die Anzeige dem Finger: die Sekunden-
+        // Pushes der Huelle (_applyNativeProgress) ueberschrieben die gezogene Stelle sonst jede
+        // Sekunde mit der echten - die Leiste sprang unter dem Finger zurueck.
+        const setDragging = (value) => {
+            isDraggingTime = value;
+            window._isScrubbing = value;
+            if (value) window._isScrubbingAt = Date.now();
+        };
+        // iOS erzeugt NACH einem Touch zusaetzlich synthetische Maus-Ereignisse (mousedown/mouseup
+        // an derselben Stelle). Ohne diese Sperre lief jeder Tipp zweimal durch dieselbe Logik und
+        // setzte zwei Spruenge ab, von denen der zweite den ersten abbrach.
+        let lastTouchAt = 0;
 
         const trackScrub = (e) => {
             const r = handleScrub(e);
@@ -3307,7 +3554,7 @@ let _bgCacheActive = false;
         };
         const endScrub = (e) => {
             if (!isDraggingTime) return;
-            isDraggingTime = false;
+            setDragging(false);
             const r = trackScrub(e);
             const seconds = r !== null ? r.time : lastScrubSeconds;
             const percent  = r !== null ? r.percent : lastScrubPercent;
@@ -3320,20 +3567,24 @@ let _bgCacheActive = false;
         // auch der Songwechsel per Wisch - ein Ziehen auf der Leiste loeste dann Sprung UND
         // Songwechsel aus, und der Wechsel warf den Sprung wieder weg.
         progressContainer.addEventListener('touchstart', (e) => {
-            e.stopPropagation(); isDraggingTime = true; trackScrub(e);
+            e.stopPropagation(); lastTouchAt = Date.now(); setDragging(true); trackScrub(e);
         }, {passive: true});
         progressContainer.addEventListener('touchmove', (e) => {
             if (!isDraggingTime) return;
             e.stopPropagation();
+            lastTouchAt = Date.now();
             trackScrub(e);
         }, {passive: true});
-        progressContainer.addEventListener('touchend', (e) => { e.stopPropagation(); endScrub(e); });
+        progressContainer.addEventListener('touchend', (e) => { e.stopPropagation(); lastTouchAt = Date.now(); endScrub(e); });
         // iOS bricht Beruehrungen von sich aus ab (Systemgeste, eingehender Anruf, Scroll-
         // Erkennung). Ohne diesen Zweig blieb isDraggingTime dann auf true haengen: der Sprung
         // wurde nie abgesetzt UND die naechste Beruehrung startete in einem halb gezogenen
         // Zustand. Genau das Bild "manchmal nimmt er die Stelle einfach nicht an".
-        progressContainer.addEventListener('touchcancel', (e) => { e.stopPropagation(); endScrub(e); });
-        progressContainer.addEventListener('mousedown', (e) => { isDraggingTime = true; trackScrub(e); });
+        progressContainer.addEventListener('touchcancel', (e) => { e.stopPropagation(); lastTouchAt = Date.now(); endScrub(e); });
+        progressContainer.addEventListener('mousedown', (e) => {
+            if (Date.now() - lastTouchAt < 800) return;   // synthetisch nach einem Touch
+            setDragging(true); trackScrub(e);
+        });
         document.addEventListener('mousemove', (e) => { if (isDraggingTime) trackScrub(e); });
         document.addEventListener('mouseup', endScrub);
     }
@@ -4911,6 +5162,19 @@ async function createNewPlaylistProcess() {
     const homeSearchResults = document.getElementById('home-search-results');
     const homeDefaultContent = document.getElementById('home-default-content');
 
+    // Suche leeren und die Standardansicht zeigen (Tab-Wechsel, siehe _resetViewToDefault). Ruft
+    // den Zustand direkt herbei statt ueber das entprellte input-Ereignis - sonst saehe man 300 ms
+    // lang noch das alte Ergebnis. Das synthetische 'focus' haelt nur den X-Knopf im Feld aktuell
+    // (addClearButton), ohne die Tastatur zu oeffnen und ohne den input-Handler nochmal zu rufen.
+    window._resetHomeSearch = function() {
+        if (!homeSearchInput || !homeSearchInput.value) return;
+        homeSearchInput.value = '';
+        homeSearchResults.style.display = 'none';
+        homeSearchResults.innerHTML = '';
+        if (homeDefaultContent) homeDefaultContent.style.display = 'block';
+        homeSearchInput.dispatchEvent(new Event('focus'));
+    };
+
     if(homeSearchInput) {
         homeSearchInput.addEventListener('input', debounce((e) => {
             const query = e.target.value.toLowerCase().trim();
@@ -4925,6 +5189,23 @@ async function createNewPlaylistProcess() {
     }
 
     const songsSearchInput = document.getElementById('songs-search-input');
+    window._resetSongsSearch = function() {
+        if (!songsSearchInput || !songsSearchInput.value) return;
+        songsSearchInput.value = '';
+        songsContainer.innerHTML = ''; allSongsElements = []; lazyRendered = 0; lazyRenderBatch();
+        songsSearchInput.dispatchEvent(new Event('focus'));
+    };
+    window._resetPlaylistDetailSearch = function() {
+        const input = document.getElementById('pld-search-input');
+        const cont = document.getElementById('pld-search-container');
+        if (!input || !cont) return;
+        if (input.value) {
+            input.value = '';
+            document.querySelectorAll('#playlist-details-songs-container .song-item').forEach(el => { el.style.display = 'flex'; });
+            input.dispatchEvent(new Event('focus'));
+        }
+        cont.style.display = 'none';
+    };
     if (songsSearchInput) {
         songsSearchInput.addEventListener('input', debounce((e) => {
             const query = e.target.value.toLowerCase().trim();
@@ -5856,13 +6137,11 @@ async function createNewPlaylistProcess() {
         const diagRow = document.getElementById('btn-playback-diag');
         if (diagRow) diagRow.style.display = 'flex';
         diagRow?.addEventListener('click', () => {
-            const log = window._nativeStartLog || [];
-            if (!log.length) { alert('Noch keine Songstarts gemessen. Spiel ein paar Songs ab und schau dann nochmal.'); return; }
-            const s = ms => (ms == null || ms < 0) ? '?' : (ms / 1000).toFixed(1).replace('.', ',') + ' s';
-            const lines = log.slice().reverse().map(e =>
-                `${e.at}  ${e.t}\n   ${e.src} · Wechsel nach ${s(e.waitMs)} · spielbereit nach weiteren ${s(e.readyMs)}` +
-                (e.sinceTap != null ? ` · ab Antippen ${s(e.sinceTap)}` : ''));
-            alert('Letzte Songstarts (neueste oben):\n\n' + lines.join('\n\n'));
+            const bridge = _nativeBridge();
+            // Neue Huelle: das native Protokoll holen (kommt ueber _applyNativeJournal zurueck).
+            // Aeltere Huelle kennt es nicht - dann nur die Seite-Seite der Diagnose zeigen.
+            if (bridge && _nativeHas('journal')) bridge.postMessage(JSON.stringify({ cmd: 'journal' }));
+            else window._applyNativeJournal('Diese Fassung der App kennt das Ereignisprotokoll noch nicht.\nNeue IPA installieren (siehe Projekt-Akte).');
         });
     }
 
@@ -6237,6 +6516,22 @@ async function createNewPlaylistProcess() {
         startBtn.addEventListener('click', async function() {
             if (!window.globalSongsData || window.globalSongsData.length === 0) {
                 alert('Bibliothek noch nicht geladen. Bitte warten.');
+                return;
+            }
+            // In der Huelle (neue Fassung) laedt der NATIVE Cache: nur er zaehlt fuer die Wiedergabe.
+            // Die IndexedDB dieser Seite liest der Player nie - sie ein zweites Mal mit der ganzen
+            // Bibliothek (12+ GB) zu fuellen kostete nur Speicher und Bandbreite. Die Huelle laedt
+            // im Leerlauf bis zu ihrer Fuellgrenze; der Rest wird beim Abspielen vorgeladen/gestreamt.
+            if (_nativeBridge() && _nativeHas('cacheBackground')) {
+                startBackgroundCacheQueue(window.globalSongsData);
+                infoWrap.style.display  = 'none';
+                progWrap.style.display  = 'none';
+                doneWrap.style.display  = 'block';
+                if (doneTxt) doneTxt.textContent = 'Die App lädt deine Bibliothek jetzt im Hintergrund auf dieses Gerät (bis ca. 7 GB, den Rest lädt sie beim Abspielen vor). Der Zähler im Menü zeigt den Stand.';
+                startBtn.style.display  = 'none';
+                localStorage.setItem('himusic_offline', '1');
+                colorBtn('on');
+                if (titleEl) titleEl.textContent = 'Offline-Laden läuft';
                 return;
             }
             infoWrap.style.display  = 'none';
