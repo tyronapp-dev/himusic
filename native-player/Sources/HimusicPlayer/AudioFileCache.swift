@@ -5,6 +5,22 @@ import AVFoundation
 /// Dateisystem liest statt zu streamen - erst das erlaubt echte Hintergrund-Wiedergabe
 /// ohne Netz (ADR-007, "Schritt 3"). Downloads brauchen keinen API-Key: /media/* ist
 /// auf dem Worker unauthentifiziert, gleiches Verhalten wie downloadToLocal() in app2.js.
+///
+/// ZWEI PRIORITAETSKLASSEN (ADR-015). Bis 2026-10-21 gab es genau eine FIFO-Warteschlange mit
+/// einer Spur. Gefuellt wurde sie von drei Seiten: dem Vorlade-Fenster um die aktuelle
+/// Position (15 Songs), dem Wiederherstellen der letzten Sitzung (die KOMPLETTE gespeicherte
+/// Warteschlange, bis ueber 2000 Songs) und der Seite, die fuer JEDEN Song der Bibliothek
+/// einen Eintrag nachschob. Bei 12,3 GB Bibliothek und 8 GB Obergrenze lud das Auffuellen
+/// dazu endlos: neue Downloads verdraengten per LRU aeltere, die beim naechsten App-Start
+/// wieder eingereiht wurden. Folge: die naechsten Songs standen stundenlang HINTER Altlasten,
+/// ein Skip landete fast immer auf einem nicht gecachten Song, der dann gestreamt wurde -
+/// und ein Stream hat weder verlaessliche Dauer noch genaues Seeking, braucht Netz und
+/// startet langsamer. Das war die gemeinsame Wurzel mehrerer gemeldeter Fehler.
+///
+///  - dringend: laufender Song + Vorlade-Fenster. Immer zuerst, bis zu 2 parallel, ersetzt bei
+///    jedem Songwechsel den alten Stand (veraltete Eintraege entfallen).
+///  - Auffuellen: der Rest der Bibliothek. Nur wenn nichts Dringendes ansteht, 1 parallel, und
+///    NUR unterhalb von backgroundFillCeiling - es verdraengt nie etwas.
 actor AudioFileCache {
     static let shared = AudioFileCache()
 
@@ -13,24 +29,45 @@ actor AudioFileCache {
     /// der am laengsten nicht gespielte Song zuerst raus (LRU).
     private let capBytes: Int64 = 8 * 1_073_741_824  // 8 GB
 
+    /// Ab hier hoert das Auffuellen im Leerlauf auf. Bewusst 1 GB unter der Obergrenze: dringende
+    /// Downloads (Songs, die man gerade hoert) sollen Platz finden, ohne jedes Mal etwas zu
+    /// verdraengen.
+    private let backgroundFillCeiling: Int64 = 7 * 1_073_741_824  // 7 GB
+
     private struct Entry: Codable {
         let id: Int
         var ext: String
         var sizeBytes: Int64
         var lastAccessed: Date
+        /// Gemessene Dauer der LOKALEN Datei in Sekunden (sample-genau, mit praeziser Zeitbasis
+        /// gelesen). Optional, damit ein aelterer Index ohne dieses Feld weiter lesbar ist.
+        var duration: Double?
     }
 
     private let cacheDir: URL
     private let indexURL: URL
     private var index: [Int: Entry] = [:]
+    private var indexDirty = false
 
-    private var downloadQueue: [QueueItem] = []
-    private var currentlyDownloadingId: Int?
-    private var currentlyPlayingId: Int?
+    private var urgentQueue: [QueueItem] = []
+    private var backgroundQueue: [QueueItem] = []
+    private var activeUrgent: Set<Int> = []
+    private var activeBackground: Int?
     private var inFlightNow: Set<Int> = []   // laeuft gerade ein fetchNow() fuer diese id?
+    private var currentlyPlayingId: Int?
+    private var loggedCeiling = false
+    private static let maxParallelUrgent = 2
+
+    /// Wird nach jedem fertigen Download gerufen (id). Das PlayerViewModel tauscht damit einen
+    /// noch gestreamten Nachfolger gegen die lokale Kopie und meldet der Seite den Cache-Stand.
+    private var onCached: (@Sendable (Int) -> Void)?
+
+    func setOnCached(_ callback: (@Sendable (Int) -> Void)?) {
+        onCached = callback
+    }
 
     /// Eigene Session mit knappen Timeouts: ein haengender Download darf die Wiedergabe nicht
-    /// minutenlang blockieren (beginPlayback wartet auf fetchNow).
+    /// minutenlang blockieren.
     private lazy var dlSession: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 25
@@ -99,6 +136,8 @@ actor AudioFileCache {
         saveIndex()
     }
 
+    // MARK: - Abfragen
+
     /// Nur nachsehen, ob eine lokale Kopie existiert - ohne sie anzufassen und ohne den
     /// Zugriffszeitstempel zu aendern (das tut localFileURL bewusst, hier waere es falsch).
     /// Der Aufrufer entscheidet damit, ob ein zweiter Versuch ueber das Netz Sinn ergibt.
@@ -117,7 +156,7 @@ actor AudioFileCache {
         guard let entry = index[id] else { return false }
         try? FileManager.default.removeItem(at: fileURL(for: entry))
         index.removeValue(forKey: id)
-        saveIndex()
+        scheduleIndexSave()
         return true
     }
 
@@ -125,20 +164,49 @@ actor AudioFileCache {
         cacheDir.appendingPathComponent("\(entry.id).\(entry.ext)")
     }
 
-    /// Lokale Datei, falls schon gecacht. Aktualisiert gleich den Zugriffszeitstempel -
-    /// schuetzt den Song vor Verdraengung, solange er im Rotationsfenster bleibt.
+    /// Lokale Datei, falls schon gecacht. Aktualisiert den Zugriffszeitstempel (schuetzt den Song
+    /// vor Verdraengung, solange er im Rotationsfenster bleibt) - aber hoechstens einmal pro
+    /// Minute und ohne sofort den ganzen Index auf Platte zu schreiben. Vorher schrieb JEDER
+    /// Aufruf den kompletten Index (2000+ Eintraege) atomar neu, und pro Songwechsel gibt es ueber
+    /// ein Dutzend Aufrufe.
     func localFileURL(forId id: Int) -> URL? {
         guard var entry = index[id] else { return nil }
         let url = fileURL(for: entry)
         guard FileManager.default.fileExists(atPath: url.path) else {
             index.removeValue(forKey: id)
-            saveIndex()
+            scheduleIndexSave()
             return nil
         }
-        entry.lastAccessed = Date()
-        index[id] = entry
-        saveIndex()
+        if Date().timeIntervalSince(entry.lastAccessed) > 60 {
+            entry.lastAccessed = Date()
+            index[id] = entry
+            scheduleIndexSave()
+        }
         return url
+    }
+
+    /// Gemessene Dauer der lokalen Kopie, falls bekannt.
+    func knownDuration(forId id: Int) -> Double? {
+        guard let d = index[id]?.duration, d.isFinite, d > 0 else { return nil }
+        return d
+    }
+
+    /// Haengt eine beim Abspielen gemessene Dauer an einen Eintrag, der noch keine hat (Songs,
+    /// die vor dieser Fassung gecacht wurden). Nur fuer LOKALE Wiedergabe sinnvoll - die Dauer
+    /// eines Streams kann eine Schaetzung sein.
+    func recordDuration(forId id: Int, seconds: Double) {
+        guard seconds.isFinite, seconds > 1, var entry = index[id], (entry.duration ?? 0) <= 0 else { return }
+        entry.duration = seconds
+        index[id] = entry
+        scheduleIndexSave()
+    }
+
+    func cachedIds() -> [Int] {
+        index.keys.sorted()
+    }
+
+    private func totalBytes() -> Int64 {
+        index.values.reduce(Int64(0)) { $0 + $1.sizeBytes }
     }
 
     /// Merkt sich, welcher Song gerade laeuft, damit enforceCap() ihn nie loescht -
@@ -147,91 +215,134 @@ actor AudioFileCache {
         currentlyPlayingId = id
     }
 
-    /// Reiht zum Download ein, falls weder gecacht noch schon in der Warteschlange
-    /// oder gerade aktiv am Laden. Downloads laufen absichtlich sequenziell (1
-    /// parallel) - gleiche Drosselung wie die PWA in ADR-002, schont Akku und Volumen.
+    // MARK: - Warteschlangen
+
+    private func isBusy(_ id: Int) -> Bool {
+        activeUrgent.contains(id) || activeBackground == id || inFlightNow.contains(id)
+    }
+
+    private func needsDownload(_ item: QueueItem) -> Bool {
+        item.fileURL != nil && index[item.id] == nil && !isBusy(item.id)
+    }
+
+    /// Einzelner Song, niedrige Prioritaet (Auffuellen). Ruft die Seite fuer einzelne Songs
+    /// (cmd "ensureCached"), ist das kein Grund, ein Vorlade-Fenster zu verdraengen.
     func ensureCached(item: QueueItem) {
-        guard item.fileURL != nil else { return }
-        if index[item.id] != nil { return }
-        if currentlyDownloadingId == item.id { return }
-        // Laeuft fuer diesen Song schon ein Prioritaets-Download (fetchNow), NICHT zusaetzlich
-        // einreihen: sonst lud dieselbe Datei zweimal gleichzeitig (halbe Bandbreite), und der
-        // spaeter fertige Download ersetzte am Ende die Datei, die der Player evtl. schon abspielte.
-        if inFlightNow.contains(item.id) { return }
-        if downloadQueue.contains(where: { $0.id == item.id }) { return }
-        downloadQueue.append(item)
-        processQueueIfNeeded()
+        guard needsDownload(item),
+              !urgentQueue.contains(where: { $0.id == item.id }),
+              !backgroundQueue.contains(where: { $0.id == item.id }) else { return }
+        backgroundQueue.append(item)
+        pump()
     }
 
-    func ensureCachedQueue(_ items: [QueueItem]) {
-        for item in items { ensureCached(item: item) }
+    /// Einzelner Song, hohe Prioritaet und ganz vorn: der Song, der GERADE gestreamt wird - sein
+    /// lokale Kopie soll so schnell wie moeglich da sein (genaues Seeking, feste Dauer).
+    func ensureCachedUrgent(item: QueueItem) {
+        guard needsDownload(item) else { return }
+        backgroundQueue.removeAll { $0.id == item.id }
+        urgentQueue.removeAll { $0.id == item.id }
+        urgentQueue.insert(item, at: 0)
+        pump()
     }
 
-    /// Sofort-Download MIT PRIORITAET: laedt direkt (nicht hinten in die 1-parallel-Queue),
+    /// Ersetzt die dringende Warteschlange durch genau diese Songs (in dieser Reihenfolge):
+    /// laufender Song + die naechsten. Alles, was vorher dringend war und nicht mehr dazugehoert,
+    /// faellt weg - wer weiterspringt, soll nicht noch die Songs von vorhin laden.
+    func setUpcoming(_ items: [QueueItem]) {
+        let wanted = items.filter { needsDownload($0) }
+        let ids = Set(wanted.map(\.id))
+        backgroundQueue.removeAll { ids.contains($0.id) }
+        urgentQueue = wanted
+        pump()
+    }
+
+    /// Ersetzt die Auffuell-Warteschlange (ganze Bibliothek). Statt tausender Einzelnachrichten
+    /// schickt die Seite die Liste einmal; Wiederholungen ersetzen, statt sich aufzustapeln.
+    func setBackground(_ items: [QueueItem]) {
+        let urgentIds = Set(urgentQueue.map(\.id))
+        backgroundQueue = items.filter { needsDownload($0) && !urgentIds.contains($0.id) }
+        pump()
+    }
+
+    /// Startet, was laufen darf. Dringendes hat immer Vorrang; Auffuellen nur im Leerlauf und
+    /// nur unterhalb der Fuellgrenze.
+    private func pump() {
+        while activeUrgent.count < Self.maxParallelUrgent, !urgentQueue.isEmpty {
+            let item = urgentQueue.removeFirst()
+            guard needsDownload(item), let remote = item.fileURL else { continue }
+            activeUrgent.insert(item.id)
+            Task { await self.runQueued(item, remote: remote, urgent: true) }
+        }
+
+        guard urgentQueue.isEmpty, activeUrgent.isEmpty, inFlightNow.isEmpty, activeBackground == nil else { return }
+        guard totalBytes() < backgroundFillCeiling else {
+            if !backgroundQueue.isEmpty, !loggedCeiling {
+                loggedCeiling = true
+                PlaybackJournal.note("Cache: Auffuellen gestoppt - Fuellgrenze erreicht (\(totalBytes() / 1_048_576) MB)")
+            }
+            backgroundQueue.removeAll()
+            return
+        }
+        while !backgroundQueue.isEmpty {
+            let item = backgroundQueue.removeFirst()
+            guard needsDownload(item), let remote = item.fileURL else { continue }
+            activeBackground = item.id
+            Task { await self.runQueued(item, remote: remote, urgent: false) }
+            return
+        }
+    }
+
+    private func runQueued(_ item: QueueItem, remote: URL, urgent: Bool) async {
+        _ = await download(item: item, from: remote)
+        if urgent { activeUrgent.remove(item.id) } else { activeBackground = nil }
+        pump()
+    }
+
+    /// Sofort-Download MIT PRIORITAET: laedt direkt (nicht hinten in die Warteschlange),
     /// mit den Retries + strikter Vollstaendigkeitspruefung aus download(). Gibt die lokale
     /// URL zurueck, wenn innerhalb von `maxWait` eine gueltige Datei liegt - sonst nil
     /// (Aufrufer streamt dann). Der Download selbst laeuft UNABHAENGIG von maxWait weiter und
     /// landet fuers naechste Mal im Cache.
     ///
-    /// maxWait seit 2026-10-01: vorher wartete beginPlayback auf den KOMPLETTEN Download. Ein
-    /// angetippter, noch nicht gecachter Song kam dadurch je nach Netz erst nach Sekunden (im
-    /// Extremfall 3 Anlaeufe a 90 s), waehrend der alte Song einfach weiterlief - das gemeldete
-    /// "manchmal starker Delay, bevor der Song kommt", abhaengig davon, ob der Song schon lokal lag.
-    ///
-    /// Laedt die Vorlade-Warteschlange genau diesen Song gerade, wird KEIN zweiter Download
-    /// gestartet, sondern auf diesen gewartet (siehe ensureCached).
+    /// Laedt die Warteschlange genau diesen Song gerade, wird KEIN zweiter Download gestartet,
+    /// sondern auf diesen gewartet.
     func fetchNow(item: QueueItem, maxWait: TimeInterval = .infinity) async -> URL? {
         if let existing = localFileURL(forId: item.id) { return existing }
         guard let remote = item.fileURL else { return nil }
-        if !inFlightNow.contains(item.id) && currentlyDownloadingId != item.id {
+        if !isBusy(item.id) {
+            urgentQueue.removeAll { $0.id == item.id }
+            backgroundQueue.removeAll { $0.id == item.id }
             inFlightNow.insert(item.id)
-            downloadQueue.removeAll { $0.id == item.id }
             Task {
-                await self.download(item: item, from: remote)
+                _ = await self.download(item: item, from: remote)
                 self.inFlightNow.remove(item.id)
+                self.pump()
             }
         }
         let deadline = maxWait.isFinite ? Date().addingTimeInterval(maxWait) : Date.distantFuture
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
-            // hasCachedFile statt localFileURL: Letzteres schreibt bei jedem Aufruf den Index
-            // auf Platte - im 100-ms-Takt waere das unnoetige Last waehrend des Songwechsels.
+            // hasCachedFile statt localFileURL: Letzteres fasst den Zugriffsstempel an.
             if hasCachedFile(forId: item.id) { return localFileURL(forId: item.id) }
-            if !inFlightNow.contains(item.id) && currentlyDownloadingId != item.id { break }
+            if !isBusy(item.id) { break }
         }
         return hasCachedFile(forId: item.id) ? localFileURL(forId: item.id) : nil
     }
 
-    private func processQueueIfNeeded() {
-        guard currentlyDownloadingId == nil, !downloadQueue.isEmpty else { return }
-        let item = downloadQueue.removeFirst()
-        // Inzwischen anderweitig gecacht oder per fetchNow in Arbeit -> ueberspringen, statt
-        // dieselbe Datei ein zweites Mal zu laden (und am Ende die laufende Kopie zu ersetzen).
-        if index[item.id] != nil || inFlightNow.contains(item.id) {
-            processQueueIfNeeded()
-            return
-        }
-        guard let remote = item.fileURL else {
-            processQueueIfNeeded()
-            return
-        }
-        currentlyDownloadingId = item.id
-        Task {
-            await self.download(item: item, from: remote)
-            await self.finishedDownloading()
-        }
-    }
-
-    private func finishedDownloading() {
-        currentlyDownloadingId = nil
-        processQueueIfNeeded()
-    }
+    // MARK: - Download
 
     /// Kleinste Groesse, die eine echte Audiodatei plausibel haben kann. Alles darunter ist
     /// eine Fehlerseite, eine leere Antwort oder ein abgebrochener Download.
     private static let minimumPlausibleBytes: Int64 = 16 * 1024
 
-    private func download(item: QueueItem, from remote: URL) async {
+    private func measureDuration(of url: URL) async -> Double? {
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        let d = ((try? await asset.load(.duration)) ?? .zero).seconds
+        return (d.isFinite && d > 1) ? d : nil
+    }
+
+    @discardableResult
+    private func download(item: QueueItem, from remote: URL) async -> Bool {
         // Bis zu 3 Anlaeufe mit wachsendem Abstand: ein frisch importierter Song ist am
         // CDN-Edge noch nicht gecacht, der erste Zugriff scheitert dort gern voruebergehend.
         // Ohne Retry blieb so ein Song dauerhaft ohne lokale Kopie (nur gestreamt, und der
@@ -250,12 +361,15 @@ actor AudioFileCache {
                 break
             }
         }
-        guard let tmpURL, let http else { return }
+        guard let tmpURL, let http else {
+            PlaybackJournal.note("Cache: Download id=\(item.id) fehlgeschlagen (kein 200 nach 3 Versuchen)")
+            return false
+        }
 
         // Status 200 allein sagt NICHT, dass hier eine brauchbare Audiodatei ankam. Genau
         // darauf hat sich der Cache bisher verlassen - eine HTML-Fehlerseite, eine leere
         // Antwort oder ein unterwegs abgebrochener Download wurde als gueltiger Song abgelegt.
-        // Weil beginPlayback die lokale Datei immer der Netzadresse vorzieht, war der Song
+        // Weil die lokale Datei immer der Netzadresse vorgezogen wird, war der Song
         // danach dauerhaft tot, auch bei bestem Empfang: der Player zeigte ihn an und spielte
         // ihn nie. Drei billige Pruefungen fangen praktisch alle diese Faelle ab.
         let downloadedAttrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path)
@@ -286,7 +400,8 @@ actor AudioFileCache {
 
         guard !istFehlerseite, goodHeader, downloadedBytes >= Self.minimumPlausibleBytes else {
             try? FileManager.default.removeItem(at: tmpURL)
-            return
+            PlaybackJournal.note("Cache: Download id=\(item.id) verworfen (Fehlerseite/Kopf/Groesse: \(downloadedBytes) B, \(contentType))")
+            return false
         }
 
         // Erst an den endgueltigen Ort mit RICHTIGER Endung verschieben - dann kann AVURLAsset
@@ -297,7 +412,7 @@ actor AudioFileCache {
         do {
             try FileManager.default.moveItem(at: tmpURL, to: dest)
         } catch {
-            return
+            return false
         }
 
         // VOLLSTAENDIGKEIT (Kern gegen "spielt nur teilweise"): entweder die heruntergeladene
@@ -316,25 +431,28 @@ actor AudioFileCache {
                 trueSize = total
             }
         }
-        var complete = trueSize > 0 && downloadedBytes >= trueSize
-        if !complete {
-            let dur = ((try? await AVURLAsset(url: dest).load(.duration)) ?? .zero).seconds
-            complete = dur.isFinite && dur > 1
-        }
+        // Dauer IMMER messen (nicht nur im Zweifel): 2/3 der Bibliothek hat in der Datenbank
+        // keine Dauer, und ein Stream liefert sie erst spaet - die lokale Datei ist die
+        // einzige Stelle, an der sie sample-genau und sofort feststeht.
+        let measured = await measureDuration(of: dest)
+        let complete = (trueSize > 0 && downloadedBytes >= trueSize) || measured != nil
         guard complete else {
             try? FileManager.default.removeItem(at: dest)
-            return
+            PlaybackJournal.note("Cache: Download id=\(item.id) unvollstaendig (\(downloadedBytes) von \(trueSize) B)")
+            return false
         }
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: dest.path)
         let size = (attrs?[.size] as? Int64) ?? 0
-        index[item.id] = Entry(id: item.id, ext: ext, sizeBytes: size, lastAccessed: Date())
-        saveIndex()
+        index[item.id] = Entry(id: item.id, ext: ext, sizeBytes: size, lastAccessed: Date(), duration: measured)
+        scheduleIndexSave()
         enforceCap()
+        onCached?(item.id)
+        return true
     }
 
     private func enforceCap() {
-        var total = index.values.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        var total = totalBytes()
         guard total > capBytes else { return }
         let candidates = index.values
             .filter { $0.id != currentlyPlayingId }
@@ -345,6 +463,26 @@ actor AudioFileCache {
             index.removeValue(forKey: entry.id)
             total -= entry.sizeBytes
         }
+        scheduleIndexSave()
+    }
+
+    // MARK: - Index
+
+    /// Index nicht bei jeder kleinen Aenderung komplett neu schreiben, sondern gebuendelt. Ein
+    /// Absturz in den 2 Sekunden dazwischen kostet hoechstens Zugriffsstempel - eine Datei ohne
+    /// Indexeintrag wird beim naechsten Vorladen einfach neu geholt.
+    private func scheduleIndexSave() {
+        guard !indexDirty else { return }
+        indexDirty = true
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            self.flushIndex()
+        }
+    }
+
+    func flushIndex() {
+        guard indexDirty else { return }
+        indexDirty = false
         saveIndex()
     }
 

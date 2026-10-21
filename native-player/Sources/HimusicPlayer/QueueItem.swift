@@ -20,12 +20,28 @@ struct QueueItem: Codable, Identifiable, Equatable {
     let u: String
     let c: String?
     let s: String?
+    /// Dauer aus der Datenbank in Sekunden. Nur ein Notbehelf: bei zwei Dritteln der Bibliothek
+    /// steht dort 0 (Datei-Uploads speicherten nie eine Dauer), bei YouTube-Importen ist es ein
+    /// auf ganze Sekunden gerundeter Wert. Die massgebliche Dauer misst der Player bzw. der
+    /// Datei-Cache - siehe PlayerViewModel.effectiveDuration(). Optional, damit aeltere
+    /// Snapshots und aeltere Seiten ohne dieses Feld weiter funktionieren.
+    let d: Double?
 
     var title: String { t }
     var artist: String { a }
     var fileURL: URL? { URL(string: u) }
     var coverURL: URL? { c.flatMap { URL(string: $0) } }
     var sourceLabel: String? { (s?.isEmpty == false) ? s : nil }
+    var dbDuration: Double? {
+        guard let d, d.isFinite, d > 0 else { return nil }
+        return d
+    }
+
+    /// Kopie mit anderem Cover. Gebraucht, wenn die Seite ein eingebettetes Cover nachliefert
+    /// (cmd "setCover") oder der Snapshot grosse data:-Cover weglaesst.
+    func withCover(_ cover: String?) -> QueueItem {
+        QueueItem(id: id, t: t, a: a, u: u, c: cover, s: s, d: d)
+    }
 }
 
 struct IncomingPayload: Codable {
@@ -52,14 +68,25 @@ struct QueueSnapshot: Codable {
 /// "index" nur bei cmd == "jumpTo"/"removeAt"/"moveItem" (Position in der echten nativen
 /// Warteschlange - bei "moveItem" die Startposition), "toIndex" nur bei cmd == "moveItem"
 /// (Zielposition, Array.splice()-Arithmetik - siehe moveItem() in PlayerViewModel.swift).
+///
+/// "fraction" (0...1) bei cmd == "seekTo": Zielposition als ANTEIL der Songdauer. Die Seite
+/// kennt die verlaessliche Dauer oft gar nicht (bei 2/3 der Songs steht in der Datenbank 0,
+/// bei Streams steht sie nativ erst spaeter fest) und rechnete daher mit einer falschen -
+/// jetzt rechnet der Player selbst, mit genau der Dauer, die er auch anzeigt.
+/// "items" bei cmd == "cacheBackground": die ganze Bibliothek fuers Auffuellen im Leerlauf.
+/// "id"/"c" bei cmd == "setCover": nachgelieferte Cover-Daten fuer einen Song.
 struct BridgeCommand: Codable {
     let cmd: String
     let open: Bool?
     let delta: Double?
     let seconds: Double?
+    let fraction: Double?
     let item: QueueItem?
+    let items: [QueueItem]?
     let index: Int?
     let toIndex: Int?
+    let id: Int?
+    let c: String?
 }
 
 extension Data {

@@ -57,10 +57,11 @@ final class HimusicHttpRedirectGuard: NSObject, URLSessionTaskDelegate {
 /// JS-Bruecke `himusicNative` an den nativen AVPlayer.
 struct WebShellView: UIViewRepresentable {
     let player: PlayerViewModel
+    let keyboard: KeyboardObserver
 
     private static let startURL = URL(string: "https://tyronapp-dev.github.io/himusic/")!
 
-    func makeCoordinator() -> Coordinator { Coordinator(player: player) }
+    func makeCoordinator() -> Coordinator { Coordinator(player: player, keyboard: keyboard) }
 
     func makeUIView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
@@ -93,10 +94,32 @@ struct WebShellView: UIViewRepresentable {
         // statt JS-Style-Toggle, weil playSong()/_applyNativeNowPlaying an mehreren
         // Stellen "display:flex" auf #mini-player setzen und ein einmaliger JS-Hide
         // davon sonst wieder ueberschrieben wuerde.
+        //
+        // Zusaetzlich (2026-10-21):
+        //  - Build-Kennung + Faehigkeiten: die Seite zeigt die Fassung in der Diagnose und nutzt neue
+        //    Bridge-Befehle nur, wenn diese Huelle sie kennt (die Seite wird sofort ausgeliefert,
+        //    die Huelle erst nach Neuinstallation).
+        //  - navigator.mediaSession der Seite stilllegen. In einem WKWebView haengt WebKit seine
+        //    Medien-Sitzung an dieselbe System-Schnittstelle wie der native Player (Sperrbildschirm,
+        //    Fernbedienung). Die Seite spielt hier nie selbst Ton - jede Registrierung dort kann
+        //    nur den nativen Eintrag stoeren (Titel ohne Zeit, Tasten, die ins Leere laufen). Nur
+        //    der Hauptframe: die YouTube-Vorschau im iframe bleibt unberuehrt.
+        let capabilities = HimusicBuild.capabilities.map { "\"\($0)\"" }.joined(separator: ",")
         controller.addUserScript(
             WKUserScript(
                 source: """
                 window.__himusicNativeShell = true;
+                window.__himusicNativeBuild = "\(HimusicBuild.id)";
+                window.__himusicNativeCaps = [\(capabilities)];
+                try {
+                  var ms = navigator.mediaSession;
+                  if (ms) {
+                    ms.setActionHandler = function () {};
+                    ms.setPositionState = function () {};
+                    Object.defineProperty(ms, 'metadata', { configurable: true, get: function () { return null; }, set: function () {} });
+                    Object.defineProperty(ms, 'playbackState', { configurable: true, get: function () { return 'none'; }, set: function () {} });
+                  }
+                } catch (e) {}
                 var s = document.createElement('style');
                 s.textContent = '#mini-player{display:none!important;}';
                 document.documentElement.appendChild(s);
@@ -157,9 +180,23 @@ struct WebShellView: UIViewRepresentable {
         /// sprengt. Fuer Phase 1 kommt hier ein Streaming-in-Datei-Weg statt base64 rein.
         private static let httpMaxResponseBytes = 30 * 1024 * 1024
 
-        init(player: PlayerViewModel) {
+        private let keyboard: KeyboardObserver
+
+        init(player: PlayerViewModel, keyboard: KeyboardObserver) {
             self.player = player
+            self.keyboard = keyboard
             super.init()
+            // Tastatur: die Seite blendet dann Navigation und Mini-Leiste aus (mehr Platz fuer
+            // Suchergebnisse) - siehe _applyNativeKeyboard in app2.js.
+            self.keyboard.onChange = { [weak self] visible in
+                self?.pushKeyboard(visible)
+            }
+            self.player.onCachedIds = { [weak self] ids in
+                self?.pushCachedIds(ids)
+            }
+            self.player.onJournalText = { [weak self] text in
+                self?.pushJournal(text)
+            }
             // Rueckkanal: bei jedem echten Songwechsel/Play-Pause meldet PlayerViewModel sich
             // hier, wir reichen es als JS an app2.js's _applyNativeNowPlaying weiter. Haelt die
             // Seite synchron mit dem, was nativ WIRKLICH laeuft (z.B. nach Auto-Skip im
@@ -283,6 +320,29 @@ struct WebShellView: UIViewRepresentable {
         private func pushQueue(_ json: String) {
             guard let webView else { return }
             webView.evaluateJavaScript("window._applyNativeQueue && window._applyNativeQueue(\(json));")
+        }
+
+        private func pushKeyboard(_ visible: Bool) {
+            webView?.evaluateJavaScript(
+                "window._applyNativeKeyboard && window._applyNativeKeyboard(\(visible ? "true" : "false"));"
+            )
+        }
+
+        /// Welche Songs nativ WIRKLICH lokal liegen - die Seite zeigt damit "offline"-Haken und
+        /// Zaehler an. Ihre eigene IndexedDB sagt dazu nichts, der native Player liest sie nie.
+        private func pushCachedIds(_ ids: [Int]) {
+            guard let webView else { return }
+            let json = "[" + ids.map(String.init).joined(separator: ",") + "]"
+            webView.evaluateJavaScript("window._applyNativeCachedIds && window._applyNativeCachedIds(\(json));")
+        }
+
+        /// Ereignisprotokoll als JS-String-Literal (JSON-kodiert, damit Zeilenumbrueche und
+        /// Anfuehrungszeichen den Aufruf nicht zerlegen).
+        private func pushJournal(_ text: String) {
+            guard let webView,
+                  let data = try? JSONEncoder().encode(text),
+                  let literal = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window._applyNativeJournal && window._applyNativeJournal(\(literal));")
         }
 
         func userContentController(
@@ -505,7 +565,12 @@ struct WebShellView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             pageIsLoaded = true
             loadAttempt = 0
-            Task { @MainActor [weak self] in self?.pushCurrentStateIfAny() }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.pushCurrentStateIfAny()
+                self.player.sendCachedIds()
+                if self.keyboard.isVisible { self.pushKeyboard(true) }
+            }
         }
 
         // MARK: - Laden, auch ohne Netz

@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct HimusicPlayerApp: App {
     @StateObject private var player = PlayerViewModel()
+    @StateObject private var keyboard = KeyboardObserver()
 
     var body: some Scene {
         WindowGroup {
@@ -28,10 +29,15 @@ struct HimusicPlayerApp: App {
             // darueber liegt - grosser Player ODER Action-Sheet (Vibe-Mix, Tag-Editor, ...).
             // Die Leiste liegt AUSSERHALB der Webseite, deren Overlays koennen sie sonst
             // nie verdecken und ihre Knoepfe fangen fremde Beruehrungen ab.
+            //
+            // Tastatur (2026-10-21): SwiftUI schiebt eine am unteren Rand verankerte Ansicht mit
+            // der Tastatur nach oben - die native Leiste rutschte mit hoch und verdeckte beim
+            // Suchen die Ergebnisse. Solange die Tastatur offen ist, bleibt die Leiste weg; die
+            // Seite blendet in derselben Zeit auch ihre Navigation aus (_applyNativeKeyboard).
             ZStack(alignment: .bottom) {
-                WebShellView(player: player)
+                WebShellView(player: player, keyboard: keyboard)
                     .ignoresSafeArea(.container, edges: .bottom)
-                if !player.isWebOverlayVisible {
+                if !player.isWebOverlayVisible && !keyboard.isVisible {
                     NativePlayerBar(player: player) {
                         NotificationCenter.default.post(name: .himusicExpandFullscreenPlayer, object: nil)
                     }
