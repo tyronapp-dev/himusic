@@ -232,7 +232,7 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
 
     await page.evaluate(() => window._applyNativeJournal('12:00:00.000  Start\n12:00:01.000  Wechsel 0->1'));
     const j = await page.evaluate(() => ({ open: document.getElementById('native-journal-overlay').classList.contains('open'), text: document.getElementById('njo-text').textContent }));
-    ok(j.open && /Seite v2\.00/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
+    ok(j.open && /Seite v2\.01/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
     const over = await posted(page);
     ok(over.some(m => m.cmd === 'playerView' && m.open === true), 'Protokoll-Ansicht meldet "Overlay offen" an die native Leiste');
     await page.click('#njo-close');
@@ -407,6 +407,26 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
     ok(s.count === lbl(n0 + 1) || s.count === lbl(n0), 'Abwaehlen zaehlt zurueck', s.count);
 
     await shot('2-vibes');
+    // Stabilitaet: Waehlen/Hauptvibe darf KEINEN Chip verschieben oder in der Groesse aendern (sonst trifft der zweite
+    // Tipp eines Doppeltippens den verrutschten Nachbarn: "Latenight" doppeltippen markierte "Soul").
+    const rects = () => page.evaluate(() => [...document.querySelectorAll('#edit-vibes-container .vibe-pill')].map(p => { const r = p.getBoundingClientRect(); return [p.dataset.vibe, Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)].join(':'); }));
+    const target = await page.evaluate(() => [...document.querySelectorAll('#edit-vibes-container .vibe-pill:not(.active)')].find(p => p.dataset.vibe === 'Latenight')?.dataset.vibe || document.querySelector('#edit-vibes-container .vibe-pill:not(.active)').dataset.vibe);
+    const sel = `#edit-vibes-container .vibe-pill[data-vibe="${target}"]`;
+    const r0 = await rects();
+    await page.click(sel); await page.waitForTimeout(300);
+    const r1 = await rects();
+    const moved1 = r0.filter((v, i) => v !== r1[i]);
+    ok(moved1.length === 0, 'Waehlen verschiebt/vergroessert KEINEN Chip', moved1.slice(0, 4).join(' | '));
+    await page.click(sel); await page.waitForTimeout(300);   // wieder abwaehlen -> Ausgangszustand
+    const nMain0 = await page.evaluate(() => document.querySelectorAll('#edit-vibes-container .vibe-pill.main-vibe').length);
+    await page.dblclick(sel); await page.waitForTimeout(300);
+    const r2 = await rects();
+    const moved2 = r0.filter((v, i) => v !== r2[i]);
+    const hit = await page.evaluate(() => [...document.querySelectorAll('#edit-vibes-container .vibe-pill.main-vibe')].map(p => p.dataset.vibe));
+    ok(moved2.length === 0, 'Hauptvibe (Stern) verschiebt/vergroessert KEINEN Chip', moved2.slice(0, 4).join(' | '));
+    ok(hit.length === nMain0 + 1 && hit.includes(target), `Doppeltippen auf "${target}" markiert GENAU diesen Vibe als Hauptvibe`, JSON.stringify(hit));
+    await page.dblclick(sel); await page.waitForTimeout(200);   // Hauptvibe wieder entfernen, Zaehler-Tests unten bleiben unberuehrt
+
     await page.click('#edit-tab-kuerzen');
     await shot('3-kuerzen');
     s = await st();

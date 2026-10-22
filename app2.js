@@ -549,7 +549,7 @@ function _nativeBridge() {
 // Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
 // CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
 // "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
-window.HIMUSIC_WEB_VERSION = '2.00';
+window.HIMUSIC_WEB_VERSION = '2.01';
 
 // Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
 // ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur

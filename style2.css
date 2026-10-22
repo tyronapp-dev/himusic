@@ -937,7 +937,15 @@ html.kb-open .view { padding-bottom: calc(env(safe-area-inset-bottom) + 16px); }
 /* Vibes im Editor: Chips mit Textbreite statt starrem 3er-Raster (ca. 6 statt 9 Zeilen, kein inneres Scrollen). Der
    Rahmen ist immer gleich breit, damit beim Wählen nichts springt. Gewählt = Akzentfarbe als Rahmen + Tönung + ✓. */
 #edit-vibes-container { display: flex; flex-wrap: wrap; gap: 8px; max-height: none; overflow: visible; padding: 4px; margin-bottom: 0; }
-#edit-vibes-container .vibe-pill { flex: 0 0 auto; min-height: 40px; padding: 8px 14px; border-radius: 20px; border: 1.5px solid rgba(255,255,255,0.14); }
+/* STABILE Chips: Wählen und Hauptvibe dürfen die Größe NIE ändern. Mit wechselnder Breite (✓ davor, fette Schrift)
+   rutschten die Nachbarn beim ersten Tipp weiter, und der zweite Tipp eines Doppeltippens traf den verschobenen
+   Nachbarn ("Latenight" doppeltippen markierte "Soul"). Darum: Platz für ✓/★ ist links IMMER reserviert, die Marke liegt
+   absolut darin, und die Schriftstärke ist in jedem Zustand gleich (Hauptvibe zeigt Stern + Ring statt Fettdruck). */
+#edit-vibes-container .vibe-pill {
+    position: relative; flex: 0 0 auto; min-height: 40px; padding: 8px 14px 8px 25px; border-radius: 20px;
+    border: 1.5px solid rgba(255,255,255,0.14); font-weight: 600;
+}
+#edit-vibes-container .vibe-pill::before { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); margin: 0; line-height: 1; }
 #edit-vibes-container .vibe-pill.active {
     background: rgba(var(--accent-rgb), 0.24); color: var(--text-primary); border-color: var(--accent);
 }
