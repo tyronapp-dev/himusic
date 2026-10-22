@@ -24,15 +24,23 @@ import AVFoundation
 actor AudioFileCache {
     static let shared = AudioFileCache()
 
-    /// Weiche Obergrenze, wird nach jedem abgeschlossenen Download durchgesetzt.
-    /// Der aktuell gespielte Song ist von der Verdraengung ausgenommen, sonst fliegt
-    /// der am laengsten nicht gespielte Song zuerst raus (LRU).
-    private let capBytes: Int64 = 8 * 1_073_741_824  // 8 GB
+    /// Obergrenze, nur noch ein Sicherheitsnetz (22.10.2026, Tyron: "alles offline, nicht nur 7 GB").
+    /// Die Bibliothek (heute ~12,3 GB) soll komplett lokal liegen; die eigentliche Grenze setzt der
+    /// FREIE SPEICHER des Geraets (minFreeBytes), nicht eine feste Zahl. Wird sie je erreicht, fliegt
+    /// zuerst der am laengsten nicht gespielte Song raus (LRU); der gerade gespielte bleibt.
+    private let capBytes: Int64 = 100 * 1_073_741_824  // 100 GB
 
-    /// Ab hier hoert das Auffuellen im Leerlauf auf. Bewusst 1 GB unter der Obergrenze: dringende
-    /// Downloads (Songs, die man gerade hoert) sollen Platz finden, ohne jedes Mal etwas zu
-    /// verdraengen.
-    private let backgroundFillCeiling: Int64 = 7 * 1_073_741_824  // 7 GB
+    /// Ab hier hoert das Auffuellen auf (siehe capBytes).
+    private let backgroundFillCeiling: Int64 = 100 * 1_073_741_824  // 100 GB
+
+    /// So viel Platz muss auf dem Geraet frei bleiben. Darunter hoert das Auffuellen auf, damit die
+    /// Bibliothek nicht das iPhone vollschreibt (Fotos, Updates, iOS selbst brauchen Platz).
+    private static let minFreeBytes: Int64 = 3 * 1_073_741_824  // 3 GB
+
+    private func freeBytes() -> Int64 {
+        let values = try? cacheDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage ?? Int64.max
+    }
 
     private struct Entry: Codable {
         let id: Int
@@ -74,6 +82,8 @@ actor AudioFileCache {
     /// Letzter Moment, in dem der Vordergrund (Tipp, laufender/naechster Song ohne Kopie) etwas laden musste.
     private var lastForegroundActivity = Date.distantPast
     private var backgroundResumeScheduled = false
+    private var backgroundFailures = 0
+    private var backgroundPausedUntil = Date.distantPast
     /// So lange nach der letzten Vordergrund-Arbeit bleibt das Auffuellen still. "Leerlauf" hiess vorher nur
     /// "gerade ist keine dringende Warteschlange da" - ein laufender Bibliotheks-Download teilte sich die
     /// Leitung mit dem Song, den man gerade angetippt hatte (Stream UND dringender Download), und startete
@@ -101,6 +111,21 @@ actor AudioFileCache {
 
     /// Eigene Session mit knappen Timeouts: ein haengender Download darf die Wiedergabe nicht
     /// minutenlang blockieren.
+    /// Auffuell-Session: NUR WLAN (kein Mobilfunk, kein Hotspot, kein Datensparmodus). Die ganze
+    /// Bibliothek sind 12+ GB - die gehen nie ueber das Datenvolumen. Songs, die man selbst antippt,
+    /// laden ueber dlSession in jedem Netz.
+    private lazy var fillSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 25
+        cfg.timeoutIntervalForResource = 300
+        cfg.waitsForConnectivity = false
+        cfg.allowsCellularAccess = false
+        cfg.allowsExpensiveNetworkAccess = false
+        cfg.allowsConstrainedNetworkAccess = false
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg)
+    }()
+
     private lazy var dlSession: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 25
@@ -337,11 +362,12 @@ actor AudioFileCache {
 
         guard urgentQueue.isEmpty, activeUrgent.isEmpty, inFlightNow.isEmpty, activeBackground == nil else { return }
         // Ruhezeit nach Vordergrund-Arbeit: erst danach weiter auffuellen (einmal wieder anstossen).
-        let quiet = Date().timeIntervalSince(lastForegroundActivity)
-        guard quiet >= Self.backgroundQuietSeconds else {
+        let readyAt = max(lastForegroundActivity.addingTimeInterval(Self.backgroundQuietSeconds), backgroundPausedUntil)
+        let remaining = readyAt.timeIntervalSinceNow
+        guard remaining <= 0 else {
             if !backgroundResumeScheduled, !backgroundQueue.isEmpty {
                 backgroundResumeScheduled = true
-                let wait = Self.backgroundQuietSeconds - quiet + 0.5
+                let wait = remaining + 0.5
                 Task {
                     try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                     self.backgroundResumeScheduled = false
@@ -350,10 +376,10 @@ actor AudioFileCache {
             }
             return
         }
-        guard totalBytes() < backgroundFillCeiling else {
+        guard totalBytes() < backgroundFillCeiling, freeBytes() > Self.minFreeBytes else {
             if !backgroundQueue.isEmpty, !loggedCeiling {
                 loggedCeiling = true
-                PlaybackJournal.note("Cache: Auffuellen gestoppt - Fuellgrenze erreicht (\(totalBytes() / 1_048_576) MB)")
+                PlaybackJournal.note("Cache: Auffuellen gestoppt - Cache \(totalBytes() / 1_048_576) MB, frei auf dem Geraet \(freeBytes() / 1_048_576) MB (Reserve \(Self.minFreeBytes / 1_048_576) MB)")
             }
             backgroundQueue.removeAll()
             return
@@ -368,14 +394,28 @@ actor AudioFileCache {
     }
 
     private func runQueued(_ item: QueueItem, remote: URL, urgent: Bool) async {
-        _ = await download(item: item, from: remote)
+        let ok = await download(item: item, from: remote, session: urgent ? nil : fillSession)
         if urgent {
             activeUrgent.remove(item.id)
             urgentTasks.removeValue(forKey: item.id)
         } else {
             activeBackground = nil
-            // Fuer den Vordergrund abgebrochen: nicht aus der Liste verlieren, spaeter weitermachen.
-            if Task.isCancelled, needsDownload(item) { backgroundQueue.insert(item, at: 0) }
+            if Task.isCancelled {
+                // Fuer den Vordergrund abgebrochen: nicht aus der Liste verlieren, spaeter weitermachen.
+                if needsDownload(item) { backgroundQueue.insert(item, at: 0) }
+            } else if ok {
+                backgroundFailures = 0
+            } else {
+                // Auffuellen laeuft nur im WLAN. Ohne WLAN (oder bei Serverproblemen) scheitert jeder Song
+                // sofort - nicht die ganze Liste durchrattern und das Protokoll fluten, sondern
+                // nach drei Fehlschlaegen in Folge 5 Minuten Pause.
+                backgroundFailures += 1
+                if backgroundFailures >= 3 {
+                    backgroundFailures = 0
+                    backgroundPausedUntil = Date().addingTimeInterval(300)
+                    PlaybackJournal.note("Cache: Auffuellen pausiert 5 min (3 Fehlschlaege in Folge - kein WLAN?)")
+                }
+            }
         }
         pump()
     }
@@ -425,7 +465,8 @@ actor AudioFileCache {
     }
 
     @discardableResult
-    private func download(item: QueueItem, from remote: URL) async -> Bool {
+    private func download(item: QueueItem, from remote: URL, session: URLSession? = nil) async -> Bool {
+        let loader = session ?? dlSession
         // Bis zu 3 Anlaeufe mit wachsendem Abstand: ein frisch importierter Song ist am
         // CDN-Edge noch nicht gecacht, der erste Zugriff scheitert dort gern voruebergehend.
         // Ohne Retry blieb so ein Song dauerhaft ohne lokale Kopie (nur gestreamt, und der
@@ -439,7 +480,7 @@ actor AudioFileCache {
                 try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_800_000_000)
                 if Task.isCancelled { return false }
             }
-            if let (u, resp) = try? await dlSession.download(from: remote),
+            if let (u, resp) = try? await loader.download(from: remote),
                let h = resp as? HTTPURLResponse, h.statusCode == 200 {
                 tmpURL = u
                 http = h

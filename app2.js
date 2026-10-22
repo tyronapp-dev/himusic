@@ -548,7 +548,7 @@ function _nativeBridge() {
 // Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
 // CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
 // "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
-window.HIMUSIC_WEB_VERSION = '1.95';
+window.HIMUSIC_WEB_VERSION = '1.96';
 
 // Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
 // ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur
@@ -6547,7 +6547,7 @@ async function createNewPlaylistProcess() {
                 infoWrap.style.display  = 'none';
                 progWrap.style.display  = 'none';
                 doneWrap.style.display  = 'block';
-                if (doneTxt) doneTxt.textContent = 'Die App lädt deine Bibliothek jetzt im Hintergrund auf dieses Gerät (bis ca. 7 GB, den Rest lädt sie beim Abspielen vor). Der Zähler im Menü zeigt den Stand.';
+                if (doneTxt) doneTxt.textContent = 'Die App lädt deine ganze Bibliothek auf dieses Gerät – nur im WLAN, solange mindestens 3 GB Speicher frei bleiben. Die App dabei offen lassen. Der Zähler im Menü zeigt den Stand.';
                 startBtn.style.display  = 'none';
                 localStorage.setItem('himusic_offline', '1');
                 colorBtn('on');
