@@ -549,7 +549,7 @@ function _nativeBridge() {
 // Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
 // CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
 // "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
-window.HIMUSIC_WEB_VERSION = '1.99';
+window.HIMUSIC_WEB_VERSION = '2.00';
 
 // Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
 // ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur
@@ -4267,6 +4267,55 @@ let _bgCacheActive = false;
 
     let currentEditCoverData = "";
 
+    // ── Audiotags-Editor: Reiter (Infos | Vibes | Kürzen), Neuaufbau 22.10.2026 ──────────────
+    // Auf Vibes/Kürzen zeigt eine Zeile, WELCHER Song bearbeitet wird; der Zähler am Reiter "Vibes" ersetzt die
+    // frühere Pflicht, durch alle 26 Pillen zu scrollen, um zu sehen, was gewählt ist.
+    const editTabs = editOverlay ? Array.from(editOverlay.querySelectorAll('.edit-tab')) : [];
+    const editPanels = editOverlay ? Array.from(editOverlay.querySelectorAll('.edit-panel')) : [];
+    const editSummary = document.getElementById('edit-summary');
+    const EDIT_TAB_KEY = 'himusic_edit_tab';
+
+    function refreshEditSummary() {
+        if (!editOverlay) return;
+        const n = editVibesContainer ? editVibesContainer.querySelectorAll('.vibe-pill.active').length : 0;
+        const count = document.getElementById('edit-tab-count');
+        if (count) count.textContent = n > 0 ? '· ' + n : '';
+        const img = document.getElementById('edit-summary-img');
+        const t = document.getElementById('edit-summary-title');
+        const a = document.getElementById('edit-summary-artist');
+        if (img && editCoverPreview) img.src = editCoverPreview.src;
+        if (t) t.textContent = (editTitle && editTitle.value.trim()) || 'Ohne Titel';
+        if (a) a.textContent = (editArtist && editArtist.value.trim()) || 'Unbekannter Künstler';
+    }
+
+    function showEditTab(name) {
+        if (!editTabs.some(t => t.dataset.tab === name)) name = 'infos';
+        editTabs.forEach(t => {
+            const on = t.dataset.tab === name;
+            t.setAttribute('aria-selected', on ? 'true' : 'false');
+            t.tabIndex = on ? 0 : -1;
+        });
+        editPanels.forEach(p => { p.hidden = p.dataset.panel !== name; });
+        if (editSummary) editSummary.hidden = (name === 'infos');
+        refreshEditSummary();
+        const scroller = editOverlay && editOverlay.querySelector('.edit-panels');
+        if (scroller) scroller.scrollTop = 0;
+        try { localStorage.setItem(EDIT_TAB_KEY, name); } catch (e) {}
+    }
+
+    editTabs.forEach((tab, i) => {
+        tab.addEventListener('click', () => showEditTab(tab.dataset.tab));
+        // Pfeiltasten wechseln den Reiter (Tab-Muster), Tab springt weiter in den Inhalt
+        tab.addEventListener('keydown', (e) => {
+            if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+            e.preventDefault();
+            const next = editTabs[(i + (e.key === 'ArrowRight' ? 1 : editTabs.length - 1)) % editTabs.length];
+            showEditTab(next.dataset.tab);
+            next.focus();
+        });
+    });
+    if (editSummary) editSummary.addEventListener('click', () => showEditTab('infos'));
+
     if(ctxEditTags) {
         ctxEditTags.addEventListener('click', () => {
             if(songContextOverlay) songContextOverlay.classList.remove('active');
@@ -4310,14 +4359,20 @@ let _bgCacheActive = false;
                 pill.addEventListener('click', () => {
                     pill.classList.toggle('active');
                     if (!pill.classList.contains('active')) pill.classList.remove('main-vibe');
+                    refreshEditSummary();
                 });
                 pill.addEventListener('dblclick', () => {
                     pill.classList.add('active');
                     pill.classList.toggle('main-vibe');
                     _hapticTick();
+                    refreshEditSummary();
                 });
                 editVibesContainer.appendChild(pill);
             });
+            // Zuletzt benutzter Reiter (nur Komfort, localStorage kann fehlen), sonst Infos
+            let lastTab = 'infos';
+            try { lastTab = localStorage.getItem(EDIT_TAB_KEY) || 'infos'; } catch (e) {}
+            showEditTab(lastTab);
             editOverlay.classList.add('active');
         });
     }
@@ -6130,7 +6185,7 @@ async function createNewPlaylistProcess() {
         }
 
         sheet.addEventListener('touchstart', (e) => {
-            const scrollable = e.target.closest('.vibes-container, [style*="overflow-y: auto"], [style*="overflow-y:auto"], .song-container, #queue-list, #dup-results-container, #edit-tags-overlay .sheet-content');
+            const scrollable = e.target.closest('.vibes-container, [style*="overflow-y: auto"], [style*="overflow-y:auto"], .song-container, #queue-list, #dup-results-container, #edit-tags-overlay .edit-panels');
             if (scrollable) { dragging = false; return; }
             startY = lastY = e.touches[0].clientY; startTime = Date.now(); dragging = true;
         }, {passive: true});

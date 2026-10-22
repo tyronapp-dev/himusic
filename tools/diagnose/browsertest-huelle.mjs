@@ -232,7 +232,7 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
 
     await page.evaluate(() => window._applyNativeJournal('12:00:00.000  Start\n12:00:01.000  Wechsel 0->1'));
     const j = await page.evaluate(() => ({ open: document.getElementById('native-journal-overlay').classList.contains('open'), text: document.getElementById('njo-text').textContent }));
-    ok(j.open && /Seite v1\.99/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
+    ok(j.open && /Seite v2\.00/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
     const over = await posted(page);
     ok(over.some(m => m.cmd === 'playerView' && m.open === true), 'Protokoll-Ansicht meldet "Overlay offen" an die native Leiste');
     await page.click('#njo-close');
@@ -343,6 +343,94 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
     ok(results.every(r => r.weight === '700'), 'Hauptvibe ist fett');
     ok(results.every(r => (r.plainStar === 'none' || r.plainStar === 'normal') && r.plainShadow === 'none'), 'normal aktive Pille hat weder Stern noch Ring', JSON.stringify(results[0]));
     ok(errors.length === 0, 'keine JS-Fehler (Test 5c)', errors.join(' | '));
+    await ctx.close();
+}
+
+// ───────────── 5d. Audiotags-Editor: Kopfzeile, Reiter, EIN Scrollbereich, Chips in Akzentfarbe (22.10.2026) ─────────────
+{
+    const { page, ctx, errors } = await newPage(NEW_CAPS);
+    await page.waitForTimeout(600);
+    await page.evaluate(() => { localStorage.removeItem('himusic_edit_tab'); window.currentContextSongId = 5; document.getElementById('ctx-edit-tags').click(); });
+    await page.waitForTimeout(500);
+    const st = () => page.evaluate(() => {
+        const ov = document.getElementById('edit-tags-overlay');
+        const vis = id => { const el = document.getElementById(id); return !!el && !el.hidden && getComputedStyle(el).display !== 'none'; };
+        return {
+            open: ov.classList.contains('active'),
+            tabs: [...ov.querySelectorAll('.edit-tab')].map(t => t.dataset.tab + ':' + t.getAttribute('aria-selected')),
+            infos: vis('edit-panel-infos'), vibes: vis('edit-panel-vibes'), kuerzen: vis('edit-panel-kuerzen'), summary: vis('edit-summary'),
+            saveInHead: !!ov.querySelector('.edit-head #btn-save-tags'), saveText: document.getElementById('btn-save-tags').textContent,
+            cancels: ov.querySelectorAll('.close-sub-sheet').length,
+            count: document.getElementById('edit-tab-count').textContent,
+        };
+    });
+    const shot = async n => { if (process.env.SHOT) { await page.waitForTimeout(450); await page.screenshot({ path: process.env.SHOT + '/editor-' + n + '.png' }); } };
+    if (process.env.SHOT) await page.evaluate(() => { const r = document.documentElement.style; r.setProperty('--accent', '#00ff1a'); r.setProperty('--accent-rgb', '0, 255, 26'); r.setProperty('--accent-text', '#000'); });
+    await shot('1-infos');
+    let s = await st();
+    ok(s.open && s.saveInHead && s.saveText === 'Speichern' && s.cancels === 1, 'Editor: Kopfzeile mit Abbrechen + Speichern, kein zweites Abbrechen darunter', JSON.stringify(s));
+    ok(s.tabs.join() === 'infos:true,vibes:false,kuerzen:false' && s.infos && !s.vibes && !s.kuerzen && !s.summary, 'Editor oeffnet auf "Infos", Song-Zeile dort ausgeblendet', JSON.stringify(s));
+    const cover = await page.evaluate(() => { const r = document.getElementById('edit-cover-btn').getBoundingClientRect(); const t = document.getElementById('edit-input-title').getBoundingClientRect(); return { w: r.width, h: r.height, titleRight: t.left >= r.right - 1, inside: r.width > 0 }; });
+    ok(cover.inside && cover.w <= 100 && cover.titleRight, 'Cover steht klein NEBEN den Feldern (Infos)', JSON.stringify(cover));
+
+    await page.click('#edit-tab-vibes');
+    s = await st();
+    const summ = await page.evaluate(() => ({ t: document.getElementById('edit-summary-title').textContent, a: document.getElementById('edit-summary-artist').textContent, img: !!document.getElementById('edit-summary-img').getAttribute('src') }));
+    ok(!s.infos && s.vibes && s.summary && s.tabs[1] === 'vibes:true', 'Reiter "Vibes": Panel + Song-Zeile sichtbar, Infos weg', JSON.stringify(s));
+    ok(/Song 5/.test(summ.t) && summ.a.length > 0 && summ.img, 'Song-Zeile zeigt Titel, Kuenstler und Cover des bearbeiteten Songs', JSON.stringify(summ));
+
+    // ein Scrollbereich: Vibe-Container scrollt NICHT selbst, .edit-panels schon
+    const ov = await page.evaluate(() => ({ vib: getComputedStyle(document.getElementById('edit-vibes-container')).overflowY, pan: getComputedStyle(document.querySelector('#edit-tags-overlay .edit-panels')).overflowY, sheet: getComputedStyle(document.querySelector('#edit-tags-overlay .sheet-content')).overflowY, n: document.querySelectorAll('#edit-vibes-container .vibe-pill').length }));
+    ok(ov.vib === 'visible' && ov.pan === 'auto' && ov.sheet !== 'auto' && ov.n >= 20, 'genau EIN Scrollbereich (kein verschachteltes Scrollen)', JSON.stringify(ov));
+
+    // Chips folgen der Akzentfarbe der Einstellungen (relativ zu den schon gewaehlten Vibes des Test-Songs)
+    const cnt = () => page.evaluate(() => document.querySelectorAll('#edit-vibes-container .vibe-pill.active').length);
+    const lbl = n => n > 0 ? '· ' + n : '';
+    const n0 = await cnt();
+    s = await st();
+    ok(s.count === lbl(n0), 'Zaehler am Reiter Vibes stimmt beim Oeffnen', s.count + ' vs ' + n0);
+    await page.evaluate(() => { const r = document.documentElement.style; r.setProperty('--accent', '#ff9f0a'); r.setProperty('--accent-rgb', '255, 159, 10'); });
+    await page.click('#edit-vibes-container .vibe-pill:not(.active)');
+    await page.waitForTimeout(350);   // Uebergang 0,18 s
+    const chip = await page.evaluate(() => { const p = document.querySelector('#edit-vibes-container .vibe-pill.active:not(.main-vibe):last-child') || [...document.querySelectorAll('#edit-vibes-container .vibe-pill.active')].pop(); const cs = getComputedStyle(p); return { active: p.classList.contains('active'), border: cs.borderTopColor, bg: cs.backgroundColor, check: getComputedStyle(p, '::before').content }; });
+    ok(chip.active && chip.border === 'rgb(255, 159, 10)' && /255, 159, 10/.test(chip.bg), 'gewaehlter Chip uebernimmt die Akzentfarbe aus den Einstellungen', JSON.stringify(chip));
+    ok(chip.check === '"✓"', 'gewaehlter Chip traegt zusaetzlich einen Haken (Form, nicht nur Farbe)', chip.check);
+    s = await st();
+    ok(s.count === lbl(n0 + 1), 'Zaehler zaehlt beim Waehlen mit', s.count);
+    await page.dblclick('#edit-vibes-container .vibe-pill:not(.active)');
+    await page.waitForTimeout(200);
+    const main = await page.evaluate(() => { const p = document.querySelector('#edit-vibes-container .vibe-pill.main-vibe'); return { main: !!p, star: p ? getComputedStyle(p, '::before').content : null }; });
+    s = await st();
+    ok(main.main && main.star === '"★"' && s.count === lbl(n0 + 2), 'Doppeltippen: Hauptvibe mit Stern, Zaehler +1', JSON.stringify({ main, count: s.count }));
+    await page.click('#edit-vibes-container .vibe-pill.active:not(.main-vibe)');
+    s = await st();
+    ok(s.count === lbl(n0 + 1) || s.count === lbl(n0), 'Abwaehlen zaehlt zurueck', s.count);
+
+    await shot('2-vibes');
+    await page.click('#edit-tab-kuerzen');
+    await shot('3-kuerzen');
+    s = await st();
+    ok(s.kuerzen && !s.vibes && await page.evaluate(() => !!document.getElementById('btn-trim-song').offsetParent), 'Reiter "Kuerzen" zeigt das Kuerzen-Formular', JSON.stringify(s));
+
+    // Pfeiltasten wechseln den Reiter, Song-Zeile bringt zurueck zu Infos
+    await page.focus('#edit-tab-kuerzen');
+    await page.keyboard.press('ArrowLeft');
+    s = await st();
+    ok(s.vibes && s.tabs[1] === 'vibes:true', 'Pfeiltaste links: Kuerzen -> Vibes', JSON.stringify(s));
+    await page.click('#edit-summary');
+    s = await st();
+    ok(s.infos && !s.summary, 'Tipp auf die Song-Zeile fuehrt zurueck zu Infos');
+
+    // letzter Reiter wird gemerkt
+    await page.click('#edit-tab-vibes');
+    await page.evaluate(() => document.querySelector('#edit-tags-overlay .edit-head-btn').click());
+    await page.waitForTimeout(300);
+    await page.evaluate(() => { window.currentContextSongId = 6; document.getElementById('ctx-edit-tags').click(); });
+    await page.waitForTimeout(400);
+    s = await st();
+    const nNew = await cnt();
+    ok(s.open && s.vibes && s.tabs[1] === 'vibes:true' && s.count === lbl(nNew), 'Editor oeffnet auf dem zuletzt benutzten Reiter, Zaehler passt zum neuen Song', JSON.stringify({ s, nNew }));
+    ok(errors.length === 0, 'keine JS-Fehler (Test 5d)', errors.join(' | '));
     await ctx.close();
 }
 

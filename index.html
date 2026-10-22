@@ -569,39 +569,65 @@
     </div>
 
     <div id="edit-tags-overlay" class="action-sheet-overlay">
-        <div class="action-sheet" style="padding-top: 40px;">
+        <div class="action-sheet">
             <div class="sheet-handle"></div>
-            <div class="sheet-content" style="background: rgba(30,30,30,0.9); padding: 20px;">
-                <h3 style="text-align: center; margin-bottom: 20px; font-weight: 600;">Audiotags bearbeiten</h3>
-                
-                <div class="edit-cover-container" id="edit-cover-btn">
-                    <img id="edit-cover-preview" src="" class="edit-cover-preview">
-                    <div class="edit-cover-overlay">Bild ändern</div>
+            <div class="sheet-content edit-sheet">
+                <!-- Kopfzeile: immer sichtbar, Speichern ist nie weiter als ein Tipp entfernt -->
+                <div class="edit-head">
+                    <button type="button" class="edit-head-btn close-sub-sheet">Abbrechen</button>
+                    <h3>Audiotags</h3>
+                    <button type="button" id="btn-save-tags" class="edit-head-save">Speichern</button>
                 </div>
-                <input type="file" id="edit-cover-upload" accept="image/*" style="display: none;">
 
-                <input type="text" id="edit-input-title" class="edit-input" placeholder="Songname">
-                <input type="text" id="edit-input-artist" class="edit-input" placeholder="Künstler">
-
-                <h4 style="font-size: 14px; margin-bottom: 10px; color: var(--text-secondary);">Vibes hinzufügen</h4>
-                <div class="vibes-container" id="edit-vibes-container"></div>
-                <p style="font-size: 12px; color: var(--text-secondary); margin: -10px 0 14px;">Doppeltippen macht einen Vibe zum Hauptvibe (★).</p>
-
-                <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-                    <button class="secondary-btn" id="btn-search-itunes" style="flex: 1; background: rgba(255,255,255,0.05); padding-left: 8px; padding-right: 8px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px; margin-top: -2px;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>iTunes</button>
-                    <button class="secondary-btn" id="btn-search-spotify" style="flex: 1; background: rgba(30,215,96,0.12); padding-left: 8px; padding-right: 8px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="#1DB954" style="vertical-align: middle; margin-right: 4px; margin-top: -2px;"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141 4.32-1.32 9.719-.66 13.439 1.621.361.181.54.78.301 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.1 9.301c-.6.18-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>Spotify</button>
+                <div class="edit-tabs" role="tablist" aria-label="Bereiche des Editors">
+                    <button type="button" role="tab" class="edit-tab" id="edit-tab-infos" data-tab="infos" aria-controls="edit-panel-infos" aria-selected="true">Infos</button>
+                    <button type="button" role="tab" class="edit-tab" id="edit-tab-vibes" data-tab="vibes" aria-controls="edit-panel-vibes" aria-selected="false" tabindex="-1">Vibes<span class="edit-tab-count" id="edit-tab-count"></span></button>
+                    <button type="button" role="tab" class="edit-tab" id="edit-tab-kuerzen" data-tab="kuerzen" aria-controls="edit-panel-kuerzen" aria-selected="false" tabindex="-1">Kürzen</button>
                 </div>
-                <button class="secondary-btn" id="btn-save-tags" style="width: 100%; background: var(--accent); color: var(--accent-text); border-color: var(--accent);">Speichern</button>
 
-                <h4 style="font-size: 14px; margin: 18px 0 10px; color: var(--text-secondary);">Song kürzen</h4>
-                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                    <input type="number" id="trim-start-input" class="edit-input" placeholder="Start (Sek.)" min="0" step="0.5" style="margin-bottom: 0;">
-                    <input type="number" id="trim-end-input" class="edit-input" placeholder="Ende (Sek.)" min="0" step="0.5" style="margin-bottom: 0;">
+                <!-- Auf Vibes/Kürzen bleibt sichtbar, WELCHER Song gerade bearbeitet wird (auf Infos steht es ohnehin da) -->
+                <button type="button" id="edit-summary" class="edit-summary" hidden aria-label="Zurück zu den Infos">
+                    <img id="edit-summary-img" alt="">
+                    <span class="edit-summary-text"><b id="edit-summary-title"></b><span id="edit-summary-artist"></span></span>
+                    <span class="edit-summary-more" aria-hidden="true">Ändern</span>
+                </button>
+
+                <div class="edit-panels">
+                    <section class="edit-panel" id="edit-panel-infos" data-panel="infos" role="tabpanel" aria-labelledby="edit-tab-infos">
+                        <div class="edit-info-row">
+                            <div class="edit-cover-container" id="edit-cover-btn">
+                                <img id="edit-cover-preview" src="" class="edit-cover-preview" alt="Cover">
+                                <div class="edit-cover-overlay">Bild ändern</div>
+                            </div>
+                            <input type="file" id="edit-cover-upload" accept="image/*" style="display: none;">
+                            <div class="edit-info-fields">
+                                <input type="text" id="edit-input-title" class="edit-input" placeholder="Songname" aria-label="Songname">
+                                <input type="text" id="edit-input-artist" class="edit-input" placeholder="Künstler" aria-label="Künstler">
+                            </div>
+                        </div>
+                        <h4 class="edit-sub">Titel, Künstler und Cover übernehmen</h4>
+                        <div class="edit-search-row">
+                            <button class="secondary-btn" id="btn-search-itunes" style="flex: 1; background: rgba(255,255,255,0.05); padding-left: 8px; padding-right: 8px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px; margin-top: -2px;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>iTunes</button>
+                            <button class="secondary-btn" id="btn-search-spotify" style="flex: 1; background: rgba(30,215,96,0.12); padding-left: 8px; padding-right: 8px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="#1DB954" style="vertical-align: middle; margin-right: 4px; margin-top: -2px;"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141 4.32-1.32 9.719-.66 13.439 1.621.361.181.54.78.301 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.1 9.301c-.6.18-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>Spotify</button>
+                        </div>
+                    </section>
+
+                    <section class="edit-panel" id="edit-panel-vibes" data-panel="vibes" role="tabpanel" aria-labelledby="edit-tab-vibes" hidden>
+                        <p class="edit-hint">Tippen wählt einen Vibe. Doppeltippen macht ihn zum Hauptvibe (★).</p>
+                        <div class="vibes-container" id="edit-vibes-container"></div>
+                    </section>
+
+                    <section class="edit-panel" id="edit-panel-kuerzen" data-panel="kuerzen" role="tabpanel" aria-labelledby="edit-tab-kuerzen" hidden>
+                        <p class="edit-hint">Schneidet den Song auf den Bereich zwischen Start und Ende zu.</p>
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                            <input type="number" id="trim-start-input" class="edit-input" placeholder="Start (Sek.)" aria-label="Start in Sekunden" min="0" step="0.5" style="margin-bottom: 0;">
+                            <input type="number" id="trim-end-input" class="edit-input" placeholder="Ende (Sek.)" aria-label="Ende in Sekunden" min="0" step="0.5" style="margin-bottom: 0;">
+                        </div>
+                        <p id="trim-status" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; min-height: 16px;"></p>
+                        <button class="secondary-btn" id="btn-trim-song" style="width: 100%; background: rgba(255,255,255,0.08);">Kürzen &amp; speichern</button>
+                    </section>
                 </div>
-                <p id="trim-status" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; min-height: 16px;"></p>
-                <button class="secondary-btn" id="btn-trim-song" style="width: 100%; background: rgba(255,255,255,0.08);">Kürzen &amp; speichern</button>
             </div>
-            <button class="sheet-btn cancel-btn close-sub-sheet">Abbrechen</button>
         </div>
     </div>
 

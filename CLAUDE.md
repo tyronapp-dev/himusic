@@ -195,3 +195,6 @@ verpackt bleiben. Und der PC braucht Apples USB-Treiber: ohne den meldet Windows
 
 ## Git workflow
 The user has authorized automatic `git add` / `git commit` / `git push` to `origin/main` after making requested code changes in this repo, without asking for confirmation each time. Still confirm before destructive/irreversible git operations (force-push, reset --hard, history rewrites, deleting branches).
+
+### Audiotags editor layout (rebuilt 2026-10-22)
+`#edit-tags-overlay` is a fixed header (Abbrechen · Audiotags · Speichern, `#btn-save-tags` lives there) + three tabs (`.edit-tab`: Infos | Vibes · n | Kürzen) + **one** scroll area (`.edit-panels`). Before, the whole sheet *and* the vibes grid scrolled (nested scroll, clipped pills at the bottom). Rules: only `.edit-panels` scrolls — it is listed in the sheet-swipe-dismiss exclusion selector in `app2.js` (`touchstart` handler), keep it there; vibes are flex-wrapped chips (`#edit-vibes-container`), selected = accent border + tint (`--accent`/`--accent-rgb`, so it follows the settings colour) + ✓, main vibe = ★ + ring; on Vibes/Kürzen the `#edit-summary` row shows which song is being edited; the last-used tab is remembered in `localStorage himusic_edit_tab`. `SHOT=<dir> node tools/diagnose/browsertest-huelle.mjs` writes screenshots of the three tabs.
