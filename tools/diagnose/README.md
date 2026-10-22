@@ -14,6 +14,7 @@ Nichts davon wird ausgeliefert. **Alle Messskripte sind lesend** (nur `GET /song
 | `bibliothek-datentypen.mjs` | Datentypen der Felder, die in den Handoff gehen (Text statt Zahl würde die native Dekodierung kippen) |
 | `bibliothek-urls.mjs` | Gibt es URLs, die eine strenge URL-Prüfung ablehnt? |
 | `handoff-dekodierbar.mjs` | Bildet `toItem()` der Seite nach und prüft, ob die strikte Swift-Dekodierung (`QueueItem`: `t`/`a`/`u` Text, `id` ganzzahlig, `d` Zahl) einen Eintrag ablehnen würde (falsche Typen, einzelne Surrogate, Steuerzeichen); dazu doppelte `id`/`file_url`. **Warum:** `handleBridgeJSON` verwirft die GANZE Warteschlange still, wenn ein einziger Eintrag nicht dekodiert (kein Protokoll). |
+| `media-range-test.mjs` | Wie antwortet `/media/*` auf `Range: bytes=0-1` (AVPlayers erste Anfrage) und auf das Dateiende? **Messung 22.10.: bei ALLEN Formaten HTTP 200 mit der ganzen Datei, nie 206/`Content-Range`, obwohl `Accept-Ranges: bytes` gesendet wird** (mit curl bestätigt). |
 | `id-wiederverwendung.mjs` | Hinweise auf wiederverwendete IDs / ersetzte Dateien (Dateistempel gegen ID-Reihenfolge, Lücken). **Warum:** der native Cache ist nur nach `id` indiziert (`AudioFileCache.Entry` hat keine URL) und prüft nie, ob die Datei zur Adresse passt. |
 
 Stand der Messung (21.10.2026): 2188 Songs, 12,3 GB; 1449 mit `duration==0`; 117 `data:`-Cover = 16,8 MB;
