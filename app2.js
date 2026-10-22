@@ -226,14 +226,15 @@ function _vibesForSave(songId, vibes) {
     return out;
 }
 
-// Baut den Vibes-Text für den Big Player, Hauptvibes fett + in der aktuellen Akzentfarbe (var(--accent),
-// live vom Farbwähler in den Einstellungen gesetzt - siehe _setAccentColor) hervorgehoben.
+// Baut den Vibes-Text für den Big Player, Hauptvibes mit Stern + fett + in der aktuellen Akzentfarbe
+// (var(--accent), live vom Farbwähler in den Einstellungen gesetzt - siehe _setAccentColor) hervorgehoben.
+// Der Stern ist die Form-Markierung: eine Farbe allein trägt nicht (helle Akzente, Farbsehschwäche).
 function _renderVibesText(el, vibesArr, songId) {
     if (!el) return;
     const vibes = _parseVibes(vibesArr);
     if (vibes.length === 0) { el.innerText = 'Aktueller Titel'; return; }
     const mainVibes = songId != null ? _getMainVibes(songId) : [];
-    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b style="color:var(--accent)">${_esc(v)}</b>` : _esc(v)).join(' • ');
+    el.innerHTML = vibes.map(v => mainVibes.includes(v) ? `<b style="color:var(--accent)">★ ${_esc(v)}</b>` : _esc(v)).join(' • ');
 }
 
 // Sender-Songliste für einen Ausgangssong: gewichtete Ähnlichkeit statt reinem Overlap-Zähler.
@@ -548,7 +549,7 @@ function _nativeBridge() {
 // Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
 // CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
 // "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
-window.HIMUSIC_WEB_VERSION = '1.97';
+window.HIMUSIC_WEB_VERSION = '1.98';
 
 // Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
 // ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur

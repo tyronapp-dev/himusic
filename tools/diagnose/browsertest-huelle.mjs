@@ -232,7 +232,7 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
 
     await page.evaluate(() => window._applyNativeJournal('12:00:00.000  Start\n12:00:01.000  Wechsel 0->1'));
     const j = await page.evaluate(() => ({ open: document.getElementById('native-journal-overlay').classList.contains('open'), text: document.getElementById('njo-text').textContent }));
-    ok(j.open && /Seite v1\.97/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
+    ok(j.open && /Seite v1\.98/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
     const over = await posted(page);
     ok(over.some(m => m.cmd === 'playerView' && m.open === true), 'Protokoll-Ansicht meldet "Overlay offen" an die native Leiste');
     await page.click('#njo-close');
@@ -317,6 +317,33 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
     const oldDlg = await old.page.evaluate(() => ({ wrap: document.getElementById('offline-budget-wrap').style.display, start: document.getElementById('offline-start-btn').style.display }));
     ok(oldDlg.wrap === 'none' && oldDlg.start === 'block', 'aeltere Huelle (ohne offlineBudget): alter Dialog bleibt', JSON.stringify(oldDlg));
     await old.ctx.close();
+}
+
+// ───────────── 5c. Hauptvibe: Form (Stern) + fester Doppelring statt Ring in --accent-text (22.10.2026) ─────────────
+{
+    const { page, ctx, errors } = await newPage(NEW_CAPS);
+    const results = [];
+    for (const accent of ['#fc3c44', '#ffffff', '#fff200', '#000000']) {
+        results.push(await page.evaluate((accent) => {
+            const hex = accent.replace('#', ''), r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+            const root = document.documentElement.style;
+            root.setProperty('--accent', accent);
+            root.setProperty('--accent-text', (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? '#000' : '#fff');   // wie _setAccentColor
+            const mk = cls => { const d = document.createElement('div'); d.className = cls; d.textContent = 'Chill'; d.style.cssText = 'position:fixed;left:0;top:0;width:120px'; document.body.appendChild(d); return d; };
+            const main = mk('vibe-pill active main-vibe'), plain = mk('vibe-pill active');
+            const out = { accent, shadow: getComputedStyle(main).boxShadow, star: getComputedStyle(main, '::before').content, weight: getComputedStyle(main).fontWeight, plainStar: getComputedStyle(plain, '::before').content, plainShadow: getComputedStyle(plain).boxShadow };
+            main.remove(); plain.remove();
+            return out;
+        }, accent));
+    }
+    const same = results.every(r => r.shadow === results[0].shadow);
+    ok(same, 'Hauptvibe-Ring ist bei JEDER Akzentfarbe gleich (haengt nicht mehr an --accent-text)', JSON.stringify(results.map(r => r.shadow)));
+    ok(/rgb\(255, 255, 255\)/.test(results[0].shadow) && /rgb\(10, 10, 12\)/.test(results[0].shadow), 'Doppelring: heller Aussenring + dunkler Innenring', results[0].shadow);
+    ok(results.every(r => r.star === '"★"'), 'Hauptvibe traegt einen Stern (Form statt nur Farbe)', JSON.stringify(results.map(r => r.star)));
+    ok(results.every(r => r.weight === '700'), 'Hauptvibe ist fett');
+    ok(results.every(r => (r.plainStar === 'none' || r.plainStar === 'normal') && r.plainShadow === 'none'), 'normal aktive Pille hat weder Stern noch Ring', JSON.stringify(results[0]));
+    ok(errors.length === 0, 'keine JS-Fehler (Test 5c)', errors.join(' | '));
+    await ctx.close();
 }
 
 // ───────────── 5b. Zweite Dauer-Quelle: das <audio> der Huelle darf NICHT mit dem letzten Song befuellt werden ─────────────
