@@ -232,7 +232,7 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
 
     await page.evaluate(() => window._applyNativeJournal('12:00:00.000  Start\n12:00:01.000  Wechsel 0->1'));
     const j = await page.evaluate(() => ({ open: document.getElementById('native-journal-overlay').classList.contains('open'), text: document.getElementById('njo-text').textContent }));
-    ok(j.open && /Seite v1\.96/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
+    ok(j.open && /Seite v1\.97/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
     const over = await posted(page);
     ok(over.some(m => m.cmd === 'playerView' && m.open === true), 'Protokoll-Ansicht meldet "Overlay offen" an die native Leiste');
     await page.click('#njo-close');
@@ -249,6 +249,74 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
     ok(sc && sc.id === 61 && sc.c.startsWith('data:image/'), 'fehlendes eingebettetes Cover wird per setCover nachgeliefert');
     ok(errors.length === 0, 'keine JS-Fehler (Test 5)', errors.join(' | '));
     await ctx.close();
+}
+
+// ───────────── 5a. Offline-Speicher (Aus / 3 / 6 GB / Alles), 22.10.2026 ─────────────
+{
+    const BUDGET_CAPS = [...NEW_CAPS, 'offlineBudget'];
+    const { page, ctx, errors } = await newPage(BUDGET_CAPS);
+    await page.waitForTimeout(800);
+    let msgs = await posted(page);
+    const sb = msgs.filter(m => m.cmd === 'setOfflineBudget');
+    ok(sb.length >= 1 && sb.every(m => m.gb === 3), 'Standard 3 GB: Huelle bekommt setOfflineBudget 3', JSON.stringify(sb));
+    ok(!msgs.some(m => m.cmd === 'cacheBackground'), 'bei 3 GB wird die Bibliothek NICHT zum Auffuellen geschickt');
+
+    await page.evaluate(() => { window.__posted.length = 0; document.getElementById('btn-offline-mode').click(); });
+    await page.waitForTimeout(200);
+    const dlg = await page.evaluate(() => ({
+        modal: document.getElementById('offline-modal').style.display,
+        wrap: document.getElementById('offline-budget-wrap').style.display,
+        start: document.getElementById('offline-start-btn').style.display,
+        title: document.getElementById('offline-modal-title').textContent,
+        radios: [...document.querySelectorAll('#offline-budget-opts [role=radio]')].map(b => ({ gb: b.dataset.gb, on: b.getAttribute('aria-checked'), t: b.textContent })),
+    }));
+    ok(dlg.modal === 'flex' && dlg.wrap === 'block' && dlg.start === 'none' && dlg.title === 'Offline-Speicher', 'Dialog zeigt die Einstellung statt des alten Herunterladen-Ablaufs', JSON.stringify(dlg));
+    ok(dlg.radios.length === 4 && dlg.radios.filter(r => r.on === 'true').length === 1 && dlg.radios.find(r => r.on === 'true').gb === '3' && /✓/.test(dlg.radios.find(r => r.on === 'true').t), 'genau eine Option gewaehlt (3 GB), auch als Text markiert (nicht nur Farbe)', JSON.stringify(dlg.radios));
+    ok((await posted(page)).some(m => m.cmd === 'cacheInfo'), 'Dialog fragt den aktuellen Speicherstand an');
+
+    await page.evaluate(() => window._applyNativeCacheInfo({ budgetGB: 3, usedBytes: 2400000000, freeBytes: 20000000000, count: 412 }));
+    const usage = await page.evaluate(() => document.getElementById('offline-budget-usage').textContent);
+    ok(/2,4 GB/.test(usage) && /412 Songs/.test(usage) && /20,0 GB/.test(usage), 'Belegung wird angezeigt', usage);
+
+    await page.evaluate(() => { window.__posted.length = 0; document.querySelector('#offline-budget-opts [data-gb="-1"]').click(); });
+    await page.waitForTimeout(200);
+    msgs = await posted(page);
+    const all = msgs.find(m => m.cmd === 'cacheBackground');
+    ok(msgs.some(m => m.cmd === 'setOfflineBudget' && m.gb === -1), '"Alles": setOfflineBudget -1');
+    ok(all && all.gb === -1 && all.items.length === 120, '"Alles": Bibliothek geht mit gb=-1 an die Huelle (ein Schritt)', all ? `${all.items.length} Songs, gb=${all.gb}` : 'keine Nachricht');
+    const lbl = await page.evaluate(() => document.getElementById('offline-btn-label').textContent);
+    ok(/Alles/.test(lbl), 'Menue-Zeile zeigt den Modus', lbl);
+
+    await page.evaluate(() => { window.__posted.length = 0; document.querySelector('#offline-budget-opts [data-gb="6"]').click(); });
+    msgs = await posted(page);
+    ok(msgs.some(m => m.cmd === 'setOfflineBudget' && m.gb === 6) && !msgs.some(m => m.cmd === 'cacheBackground'), '"6 GB": setOfflineBudget 6, kein Auffuellen');
+    await page.evaluate(() => { window.__posted.length = 0; document.querySelector('#offline-budget-opts [data-gb="0"]').click(); });
+    ok((await posted(page)).some(m => m.cmd === 'setOfflineBudget' && m.gb === 0), '"Aus": setOfflineBudget 0');
+
+    // Speicher freigeben: bei "Alles" faellt die Einstellung auf 3 GB zurueck (sonst laedt die App sofort wieder auf)
+    await page.evaluate(() => { window.confirm = () => true; document.querySelector('#offline-budget-opts [data-gb="-1"]').click(); window.__posted.length = 0; document.getElementById('offline-budget-clear').click(); });
+    msgs = await posted(page);
+    ok(msgs.some(m => m.cmd === 'clearOfflineCache'), '"Speicher freigeben" schickt clearOfflineCache');
+    ok(msgs.some(m => m.cmd === 'setOfflineBudget' && m.gb === 3) && await page.evaluate(() => localStorage.getItem('himusic_offline_budget')) === '3', 'bei "Alles" wird beim Freigeben auf 3 GB gestellt');
+    await page.evaluate(() => { window.confirm = () => false; window.__posted.length = 0; document.getElementById('offline-budget-clear').click(); });
+    ok(!(await posted(page)).some(m => m.cmd === 'clearOfflineCache'), 'Abbrechen im Bestaetigungsdialog loescht nichts');
+
+    // Wahl bleibt nach Neuladen erhalten und geht wieder an die Huelle
+    await page.evaluate(() => localStorage.setItem('himusic_offline_budget', '6'));
+    await page.evaluate(() => { window.__posted.length = 0; });
+    await page.reload();
+    await page.waitForTimeout(1500);
+    ok((await posted(page)).some(m => m.cmd === 'setOfflineBudget' && m.gb === 6), 'gespeicherte Wahl (6 GB) geht nach dem Neuladen wieder an die Huelle');
+    ok(errors.length === 0, 'keine JS-Fehler (Test 5a)', errors.join(' | '));
+    await ctx.close();
+
+    // Aeltere Huelle ohne Faehigkeit: alter Ablauf bleibt
+    const old = await newPage(NEW_CAPS);
+    await old.page.evaluate(() => document.getElementById('btn-offline-mode').click());
+    await old.page.waitForTimeout(200);
+    const oldDlg = await old.page.evaluate(() => ({ wrap: document.getElementById('offline-budget-wrap').style.display, start: document.getElementById('offline-start-btn').style.display }));
+    ok(oldDlg.wrap === 'none' && oldDlg.start === 'block', 'aeltere Huelle (ohne offlineBudget): alter Dialog bleibt', JSON.stringify(oldDlg));
+    await old.ctx.close();
 }
 
 // ───────────── 5b. Zweite Dauer-Quelle: das <audio> der Huelle darf NICHT mit dem letzten Song befuellt werden ─────────────

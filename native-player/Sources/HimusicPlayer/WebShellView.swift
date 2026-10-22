@@ -194,6 +194,9 @@ struct WebShellView: UIViewRepresentable {
             self.player.onCachedIds = { [weak self] ids in
                 self?.pushCachedIds(ids)
             }
+            self.player.onCacheInfo = { [weak self] info in
+                self?.pushCacheInfo(info)
+            }
             self.player.onJournalText = { [weak self] text in
                 self?.pushJournal(text)
             }
@@ -334,6 +337,14 @@ struct WebShellView: UIViewRepresentable {
             guard let webView else { return }
             let json = "[" + ids.map(String.init).joined(separator: ",") + "]"
             webView.evaluateJavaScript("window._applyNativeCachedIds && window._applyNativeCachedIds(\(json));")
+        }
+
+        /// Offline-Speicher: gewaehlte Grenze, belegt, frei, Anzahl - fuer die Einstellung im Offline-Dialog.
+        private func pushCacheInfo(_ info: AudioFileCache.Info) {
+            guard let webView,
+                  let data = try? JSONEncoder().encode(info),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window._applyNativeCacheInfo && window._applyNativeCacheInfo(\(json));")
         }
 
         /// Ereignisprotokoll als JS-String-Literal (JSON-kodiert, damit Zeilenumbrueche und

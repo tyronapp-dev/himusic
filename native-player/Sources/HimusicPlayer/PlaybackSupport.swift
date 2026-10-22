@@ -7,7 +7,7 @@ import UIKit
 /// fuer Verwirrung: "ist die neue IPA ueberhaupt installiert?" liess sich nur raten.
 /// Bei jeder Aenderung unter native-player/ hochzaehlen.
 enum HimusicBuild {
-    static let id = "2026-10-22.3"
+    static let id = "2026-10-22.4"
 
     /// Einziger Host, von dem die Huelle Audio laedt oder streamt (alle 2188 Songs der Bibliothek
     /// liegen dort, gemessen 2026-10-21). Bis dahin konnte die Seite - oder ein fremder Frame, der
@@ -33,6 +33,7 @@ enum HimusicBuild {
         "cachedIds",        // _applyNativeCachedIds
         "cacheBackground",  // Bibliothek als Ganzes im Leerlauf nachladen
         "setCover",         // eingebettetes Cover nachliefern
+        "offlineBudget",    // setOfflineBudget / clearOfflineCache / cacheInfo + _applyNativeCacheInfo
     ]
 }
 

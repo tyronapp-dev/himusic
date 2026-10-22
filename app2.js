@@ -548,7 +548,7 @@ function _nativeBridge() {
 // Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
 // CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
 // "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
-window.HIMUSIC_WEB_VERSION = '1.96';
+window.HIMUSIC_WEB_VERSION = '1.97';
 
 // Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
 // ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur
@@ -1693,6 +1693,30 @@ window._applyNativeCachedIds = function(ids) {
     window._nativeCachedIds = new Set(Array.isArray(ids) ? ids : []);
     window._syncOfflineBadges?.();
     window._refreshOfflineLabel?.();
+};
+
+// ── OFFLINE-SPEICHER (Einstellung, nur in der Huelle) ──────────────────────────
+// Wieviel die App auf diesem Geraet behalten darf: Aus / 3 GB / 6 GB / Alles (Variante "C", 22.10.2026).
+// Standard 3 GB: die zuletzt gespielten und kommenden Songs; alles andere kommt per Stream (der Worker
+// liefert seit 22.10. echte Teilstuecke). Nur "Alles" laedt die ganze Bibliothek (WLAN, 3 GB Reserve).
+// Die Wahl liegt in localStorage und wird bei jedem Bibliotheksladen an die Huelle geschickt, die sie
+// zusaetzlich selbst speichert.
+const _OFFLINE_BUDGETS = ['0', '3', '6', '-1'];
+function _offlineBudget() {
+    try { const v = localStorage.getItem('himusic_offline_budget'); if (_OFFLINE_BUDGETS.includes(v)) return v; } catch (e) {}
+    return '3';
+}
+function _offlineBudgetLabel(v) { return v === '0' ? 'Aus' : v === '-1' ? 'Alles' : `${v} GB`; }
+function _offlineBudgetOn() { return !!_nativeBridge() && _nativeHas('offlineBudget'); }
+function _syncOfflineBudget() {
+    const bridge = _nativeBridge();
+    if (!bridge || !_nativeHas('offlineBudget')) return;
+    bridge.postMessage(JSON.stringify({ cmd: 'setOfflineBudget', gb: parseInt(_offlineBudget(), 10) }));
+}
+window._nativeCacheInfo = null;
+window._applyNativeCacheInfo = function(info) {
+    window._nativeCacheInfo = info || null;
+    window._renderOfflineBudget?.();
 };
 
 // ── WIEDERGABE-DIAGNOSE (Protokoll der Huelle) ──────────────────────────────────
@@ -3070,6 +3094,7 @@ let _bgCacheActive = false;
     }
 
     function startBackgroundCacheQueue(songs) {
+        _syncOfflineBudget();
         // In der Huelle (neue Fassung) ist das Web-Caching ueberfluessig UND schaedlich: der
         // native Player liest die IndexedDB nie, die 12,3 GB Bibliothek wurden hier trotzdem ein
         // zweites Mal komplett geladen (3 Spuren, weil das <audio>-Element in der Huelle nie
@@ -3079,10 +3104,14 @@ let _bgCacheActive = false;
         // verdraengt nie etwas (AudioFileCache.setBackground).
         const bridge = _nativeBridge();
         if (bridge && _nativeHas('cacheBackground')) {
+            // Neue Huelle: die ganze Bibliothek laedt NUR im Modus "Alles" (Einstellung "Offline-Speicher").
+            if (_nativeHas('offlineBudget') && _offlineBudget() !== '-1') return;
             const items = songs
                 .filter(s => s.file_url && !s.file_url.startsWith('blob:'))
                 .map(s => ({ id: s.id ?? 0, t: s.title || 'Unbekannt', a: s.artist || '', u: s.file_url, c: null, s: '' }));
-            bridge.postMessage(JSON.stringify({ cmd: 'cacheBackground', items }));
+            // gb mitschicken: die Huelle stellt die Grenze und nimmt die Liste in EINEM Schritt (zwei getrennte
+            // Nachrichten koennten in falscher Reihenfolge ankommen).
+            bridge.postMessage(JSON.stringify({ cmd: 'cacheBackground', items, gb: parseInt(_offlineBudget(), 10) }));
             return;
         }
         const newUrls = songs.filter(s => s.file_url).map(s => s.file_url);
@@ -3181,6 +3210,11 @@ let _bgCacheActive = false;
         if (!label) return;
         const urls = await getAllLocalUrls();
         const count = window.globalSongsData ? window.globalSongsData.filter(s => s.file_url && urls.has(s.file_url)).length : urls.size;
+        if (_offlineBudgetOn()) {
+            const bl = _offlineBudgetLabel(_offlineBudget());
+            label.textContent = count > 0 ? `${count} Songs offline · Speicher: ${bl}` : `Offline-Speicher: ${bl}`;
+            return;
+        }
         label.textContent = count > 0 ? `${count} Songs offline ✓` : 'Offline-Modus aktivieren';
     };
 
@@ -6444,6 +6478,73 @@ async function createNewPlaylistProcess() {
         var cacheInfo = document.getElementById('offline-cache-info');
         var titleEl   = document.getElementById('offline-modal-title');
 
+        // --- Offline-Speicher (nur Huelle mit Faehigkeit "offlineBudget") ---
+        var budgetWrap  = document.getElementById('offline-budget-wrap');
+        var budgetOpts  = document.getElementById('offline-budget-opts');
+        var budgetDesc  = document.getElementById('offline-budget-desc');
+        var budgetUse   = document.getElementById('offline-budget-usage');
+        var budgetClear = document.getElementById('offline-budget-clear');
+        var budgetWeb   = document.getElementById('offline-budget-web');
+        var budgetWebSz = document.getElementById('offline-budget-websize');
+        var subEl       = document.getElementById('offline-modal-sub');
+        var BUDGET_TEXT = {
+            '0':  'Nur die nächsten Songs werden kurz zwischengespeichert (ca. 0,5 GB). Alles andere kommt aus dem Netz.',
+            '3':  'Zuletzt gespielte und kommende Songs bleiben bis zu 3 GB auf dem Gerät. Alles andere kommt aus dem Netz.',
+            '6':  'Zuletzt gespielte und kommende Songs bleiben bis zu 6 GB auf dem Gerät. Alles andere kommt aus dem Netz.',
+            '-1': 'Die ganze Bibliothek wird auf das Gerät geladen – nur im WLAN, solange mindestens 3 GB frei bleiben. Die App dabei offen lassen.'
+        };
+        function fmtBytes(b) {
+            return b >= 1e9 ? (b / 1e9).toFixed(1).replace('.', ',') + ' GB' : Math.round(b / 1e6) + ' MB';
+        }
+        window._renderOfflineBudget = function() {
+            if (!budgetWrap || !budgetOpts) return;
+            var cur = _offlineBudget();
+            budgetOpts.querySelectorAll('button[data-gb]').forEach(function(b) {
+                var on = b.dataset.gb === cur;
+                b.setAttribute('aria-checked', on ? 'true' : 'false');
+                b.style.background = on ? 'var(--accent)' : 'rgba(255,255,255,0.07)';
+                b.style.color      = on ? '#fff' : 'var(--text-secondary)';
+                b.style.fontWeight = on ? '700' : '600';
+                b.textContent      = (on ? '✓ ' : '') + _offlineBudgetLabel(b.dataset.gb);   // Zustand nicht nur ueber die Farbe
+            });
+            if (budgetDesc) budgetDesc.textContent = BUDGET_TEXT[cur] || '';
+            var info = window._nativeCacheInfo;
+            if (budgetUse) budgetUse.textContent = info
+                ? 'Gerade belegt: ' + fmtBytes(info.usedBytes) + ' · ' + info.count + ' Songs · frei auf dem iPhone: ' + fmtBytes(info.freeBytes)
+                : '';
+        };
+        function refreshWebSize() {
+            if (!budgetWebSz || !window.hbLocal || !window.hbLocal.getLocalStorageInfo) return;
+            window.hbLocal.getLocalStorageInfo().then(function(i) {
+                budgetWebSz.textContent = i && i.usedMB ? 'Web-Speicher der Seite: ca. ' + i.usedMB + ' MB (wird von der App nicht gebraucht)' : '';
+            });
+        }
+        if (budgetOpts) budgetOpts.addEventListener('click', function(e) {
+            var b = e.target.closest('button[data-gb]');
+            if (!b) return;
+            try { localStorage.setItem('himusic_offline_budget', b.dataset.gb); } catch (err) {}
+            _syncOfflineBudget();
+            if (b.dataset.gb === '-1' && window.globalSongsData && window.globalSongsData.length) startBackgroundCacheQueue(window.globalSongsData);
+            window._renderOfflineBudget();
+            window._refreshOfflineLabel?.();
+        });
+        if (budgetClear) budgetClear.addEventListener('click', function() {
+            var bridge = _nativeBridge();
+            if (!bridge) return;
+            var wasAll = _offlineBudget() === '-1';
+            if (!confirm('Alle auf diesem iPhone gespeicherten Songs löschen? Sie lassen sich später wieder laden oder streamen.' +
+                (wasAll ? '\n\nDer Offline-Speicher wird dabei auf 3 GB gestellt, sonst lädt die App beim nächsten Start wieder alles.' : ''))) return;
+            if (wasAll) { try { localStorage.setItem('himusic_offline_budget', '3'); } catch (err) {} _syncOfflineBudget(); }
+            bridge.postMessage(JSON.stringify({ cmd: 'clearOfflineCache' }));
+            window._renderOfflineBudget();
+        });
+        if (budgetWeb) budgetWeb.addEventListener('click', async function() {
+            if (!confirm('Die alte Web-Kopie der Songs löschen? Die App spielt sie nie ab, sie belegt nur Platz.')) return;
+            try { await window.hbLocal.clearLocalAudio(); } catch (err) {}
+            refreshWebSize();
+            window._refreshOfflineLabel?.();
+        });
+
         var SW_OK = ('serviceWorker' in navigator);
 
         function colorBtn(state) {
@@ -6527,6 +6628,24 @@ async function createNewPlaylistProcess() {
                 ? 'Erneut herunterladen' : 'Jetzt herunterladen';
             if (SW_OK && navigator.serviceWorker.controller)
                 navigator.serviceWorker.controller.postMessage({ type: 'GET_CACHE_INFO' });
+            // In der Huelle mit Offline-Speicher-Einstellung ersetzt sie den alten Herunterladen-Ablauf.
+            if (budgetWrap) {
+                var shell = _offlineBudgetOn();
+                budgetWrap.style.display = shell ? 'block' : 'none';
+                if (shell) {
+                    infoWrap.style.display = 'none';
+                    startBtn.style.display = 'none';
+                    if (clearBtn) clearBtn.style.display = 'none';
+                    if (titleEl) titleEl.textContent = 'Offline-Speicher';
+                    if (subEl) subEl.textContent = 'So viel darf die App auf diesem iPhone behalten';
+                    window._renderOfflineBudget();
+                    var br = _nativeBridge();
+                    if (br) br.postMessage(JSON.stringify({ cmd: 'cacheInfo' }));
+                    refreshWebSize();
+                } else if (subEl) {
+                    subEl.textContent = 'Alle Songs herunterladen & ohne Internet hören';
+                }
+            }
             modal.style.display = 'flex';
         });
 

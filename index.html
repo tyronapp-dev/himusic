@@ -905,7 +905,22 @@
     <div id="offline-modal" style="display:none; position:fixed; inset:0; z-index:99990; background:rgba(0,0,0,0.88); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); align-items:center; justify-content:center; padding:24px; flex-direction:column;">
         <div style="background:#1c1c1e; border-radius:20px; padding:28px 22px; width:100%; max-width:360px;">
             <h2 id="offline-modal-title" style="font-size:19px;font-weight:700;text-align:center;margin:0 0 5px;">Offline-Modus</h2>
-            <p style="font-size:13px;color:var(--text-secondary);text-align:center;margin:0 0 18px;">Alle Songs herunterladen &amp; ohne Internet hören</p>
+            <p id="offline-modal-sub" style="font-size:13px;color:var(--text-secondary);text-align:center;margin:0 0 18px;">Alle Songs herunterladen &amp; ohne Internet hören</p>
+
+            <!-- Offline-Speicher (nur in der iOS-Huelle): wieviel die App auf diesem Geraet behalten darf -->
+            <div id="offline-budget-wrap" style="display:none;margin-bottom:6px;">
+                <div id="offline-budget-opts" role="radiogroup" aria-label="Offline-Speicher" style="display:flex;gap:6px;margin-bottom:12px;">
+                    <button type="button" role="radio" aria-checked="false" data-gb="0" style="flex:1;min-height:44px;padding:10px 4px;border:1px solid rgba(255,255,255,0.15);border-radius:12px;font-size:14px;cursor:pointer;">Aus</button>
+                    <button type="button" role="radio" aria-checked="false" data-gb="3" style="flex:1;min-height:44px;padding:10px 4px;border:1px solid rgba(255,255,255,0.15);border-radius:12px;font-size:14px;cursor:pointer;">3 GB</button>
+                    <button type="button" role="radio" aria-checked="false" data-gb="6" style="flex:1;min-height:44px;padding:10px 4px;border:1px solid rgba(255,255,255,0.15);border-radius:12px;font-size:14px;cursor:pointer;">6 GB</button>
+                    <button type="button" role="radio" aria-checked="false" data-gb="-1" style="flex:1;min-height:44px;padding:10px 4px;border:1px solid rgba(255,255,255,0.15);border-radius:12px;font-size:14px;cursor:pointer;">Alles</button>
+                </div>
+                <p id="offline-budget-desc" style="font-size:13px;color:var(--text-secondary);line-height:1.55;margin:0 0 10px;"></p>
+                <div id="offline-budget-usage" aria-live="polite" style="font-size:12px;color:var(--text-secondary);text-align:center;min-height:16px;margin-bottom:14px;"></div>
+                <button id="offline-budget-clear" type="button" style="display:block;width:100%;min-height:44px;padding:12px;background:rgba(255,59,48,0.1);color:#ff3b30;border:1px solid rgba(255,59,48,0.3);border-radius:12px;font-size:14px;cursor:pointer;margin-bottom:9px;">Speicher freigeben</button>
+                <button id="offline-budget-web" type="button" style="display:block;width:100%;min-height:44px;padding:12px;background:transparent;color:var(--text-secondary);border:1px solid rgba(255,255,255,0.1);border-radius:12px;font-size:13px;cursor:pointer;margin-bottom:9px;">Alte Web-Kopie löschen</button>
+                <div id="offline-budget-websize" style="font-size:11px;color:var(--text-secondary);text-align:center;opacity:0.7;margin-bottom:12px;"></div>
+            </div>
 
             <div id="offline-info-wrap">
                 <div style="background:rgba(250,35,59,0.1);border:1px solid rgba(250,35,59,0.25);border-radius:11px;padding:12px 14px;font-size:13px;color:var(--text-secondary);line-height:1.55;margin-bottom:12px;">

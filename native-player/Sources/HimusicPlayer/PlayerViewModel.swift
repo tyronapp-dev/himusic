@@ -197,6 +197,8 @@ final class PlayerViewModel: ObservableObject {
     /// Stand des Datei-Caches (ids), damit die Seite "offline"-Haken und Zaehler aus dem
     /// zeigen kann, was nativ WIRKLICH lokal liegt (statt aus der unbenutzbaren IndexedDB).
     var onCachedIds: (([Int]) -> Void)?
+    /// Belegter Platz, gewaehlte Grenze, freier Speicher (fuer die Offline-Einstellung der Seite).
+    var onCacheInfo: ((AudioFileCache.Info) -> Void)?
 
     /// Bricht die Kette, wenn mehrere Songs hintereinander scheitern. Ohne das wuerde ein
     /// flaechiger Ausfall (Netz weg, Serverfehler, ganze Warteschlange ungueltig) die
@@ -502,11 +504,34 @@ final class PlayerViewModel: ObservableObject {
             // Mit Obergrenze: die echte Bibliothek hat ~2200 Songs; mehr als das Mehrfache davon ist
             // kein Auffuellen mehr, sondern ein Speicher-/Datenvolumen-Problem.
             case "cacheBackground":
-                if let items = command.items { Task { await AudioFileCache.shared.setBackground(Array(items.prefix(10_000))) } }
+                if let items = command.items {
+                    let gb = command.gb
+                    Task {
+                        // Grenze und Liste in einem Schritt: sonst koennte die Liste vor der Einstellung ankommen
+                        // und als "nicht im Modus Alles" verworfen werden.
+                        if let gb { await AudioFileCache.shared.setBudget(gb: gb) }
+                        await AudioFileCache.shared.setBackground(Array(items.prefix(10_000)))
+                    }
+                }
             // Frisch importierter Song: SOFORT mit Prioritaet in den lokalen Cache holen, damit
             // der erste Antipper von Platte spielt statt die noch kalte Datei zu streamen.
             case "cacheNow": if let item = command.item { Task { _ = await AudioFileCache.shared.fetchNow(item: item) } }
             case "setCover": if let id = command.id, let cover = command.c { applyCover(forId: id, cover: cover) }
+            // Offline-Speicher (Einstellung der Seite): Aus / 3 / 6 GB / Alles. Danach Stand an die Seite melden.
+            case "setOfflineBudget":
+                if let gb = command.gb {
+                    Task { @MainActor [weak self] in
+                        await AudioFileCache.shared.setBudget(gb: gb)
+                        await self?.pushCachedIds()
+                    }
+                }
+            case "clearOfflineCache":
+                Task { @MainActor [weak self] in
+                    await AudioFileCache.shared.clearAll()
+                    await self?.pushCachedIds()
+                }
+            case "cacheInfo":
+                Task { @MainActor [weak self] in await self?.pushCachedIds() }
             case "journal": onJournalText?(journalReport())
             case "journalClear": PlaybackJournal.shared.clear()
             case "haptic": playHapticTick()
@@ -815,6 +840,7 @@ final class PlayerViewModel: ObservableObject {
         let ids = await AudioFileCache.shared.cachedIds()
         cachedIdSet = Set(ids)   // frischt auch den Speicherstand fuer nextPlayableIndex auf
         onCachedIds?(ids)
+        onCacheInfo?(await AudioFileCache.shared.info())
     }
 
     /// Von aussen (WebShellView nach dem Laden der Seite).

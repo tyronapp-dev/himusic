@@ -92,6 +92,8 @@ struct BridgeCommand: Codable {
     let toIndex: Int?
     let id: Int?
     let c: String?
+    /// cmd == "setOfflineBudget": 0 = Aus, 3, 6 (GB) oder -1 = Alles.
+    let gb: Int?
 }
 
 extension Data {

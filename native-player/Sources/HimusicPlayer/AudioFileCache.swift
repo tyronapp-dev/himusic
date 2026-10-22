@@ -24,14 +24,76 @@ import AVFoundation
 actor AudioFileCache {
     static let shared = AudioFileCache()
 
-    /// Obergrenze, nur noch ein Sicherheitsnetz (22.10.2026, Tyron: "alles offline, nicht nur 7 GB").
-    /// Die Bibliothek (heute ~12,3 GB) soll komplett lokal liegen; die eigentliche Grenze setzt der
-    /// FREIE SPEICHER des Geraets (minFreeBytes), nicht eine feste Zahl. Wird sie je erreicht, fliegt
-    /// zuerst der am laengsten nicht gespielte Song raus (LRU); der gerade gespielte bleibt.
-    private let capBytes: Int64 = 100 * 1_073_741_824  // 100 GB
+    // MARK: - Offline-Speicher (Einstellung des Nutzers, 22.10.2026, Variante "C")
+
+    /// Vom Nutzer gewaehlt (Seite: Offline-Modus): 0 = Aus, 3, 6 (GB) oder -1 = Alles. Gespeichert in
+    /// UserDefaults, damit sie gilt, bevor die Seite geladen ist (App-Start, Wiederherstellung).
+    ///  - Aus / 3 / 6: KEIN Auffuellen der Bibliothek. Behalten werden die zuletzt gespielten und die
+    ///    naechsten Songs bis zur Grenze (am laengsten nicht gespielt fliegt zuerst raus, der laufende
+    ///    bleibt). Alles andere kommt per Stream - der Worker liefert seit 22.10. echte Teilstuecke.
+    ///  - Alles: die ganze Bibliothek wird im WLAN aufgefuellt, solange minFreeBytes frei bleiben.
+    private static let budgetKey = "himusic.offlineBudgetGB"
+    static let allowedBudgets = [0, 3, 6, -1]
+    private var budgetGB: Int = {
+        let v = UserDefaults.standard.object(forKey: AudioFileCache.budgetKey) as? Int
+        return (v != nil && AudioFileCache.allowedBudgets.contains(v!)) ? v! : 3
+    }()
+
+    /// Harte Grenze fuer die Verdraengung. "Aus" behaelt bewusst ~0,5 GB als Arbeitsspeicher (die naechsten
+    /// 15 Songs), sonst waere jeder Skip ein neuer Stream.
+    private var capBytes: Int64 {
+        switch budgetGB {
+        case 0: return 512 * 1_048_576
+        case -1: return 100 * 1_073_741_824   // praktisch unbegrenzt; die Grenze setzt der freie Speicher
+        default: return Int64(budgetGB) * 1_073_741_824
+        }
+    }
+
+    private var backgroundFillEnabled: Bool { budgetGB == -1 }
 
     /// Ab hier hoert das Auffuellen auf (siehe capBytes).
     private let backgroundFillCeiling: Int64 = 100 * 1_073_741_824  // 100 GB
+
+    struct Info: Codable, Sendable {
+        let budgetGB: Int
+        let usedBytes: Int64
+        let freeBytes: Int64
+        let count: Int
+    }
+
+    func info() -> Info {
+        Info(budgetGB: budgetGB, usedBytes: totalBytes(), freeBytes: freeBytes(), count: index.count)
+    }
+
+    /// Neue Einstellung uebernehmen. Verkleinern verdraengt sofort (zuerst nie gespielte Auffuell-Songs,
+    /// dann die am laengsten nicht gespielten); ausserhalb von "Alles" wird die Auffuell-Liste verworfen.
+    func setBudget(gb: Int) {
+        guard Self.allowedBudgets.contains(gb), gb != budgetGB else { return }
+        budgetGB = gb
+        UserDefaults.standard.set(gb, forKey: Self.budgetKey)
+        PlaybackJournal.note("Cache: Offline-Speicher auf \(gb == -1 ? "Alles" : gb == 0 ? "Aus" : "\(gb) GB") gestellt")
+        if !backgroundFillEnabled {
+            backgroundQueue.removeAll()
+            backgroundTask?.cancel()
+        }
+        enforceCap()
+    }
+
+    /// "Speicher freigeben": alle lokalen Kopien loeschen (ausser dem laufenden Song). Streams funktionieren
+    /// danach unveraendert; die Songs lassen sich wieder laden.
+    func clearAll() {
+        backgroundQueue.removeAll()
+        urgentQueue.removeAll()
+        backgroundTask?.cancel()
+        var removed = 0
+        for entry in Array(index.values) where entry.id != currentlyPlayingId {
+            try? FileManager.default.removeItem(at: fileURL(for: entry))
+            index.removeValue(forKey: entry.id)
+            removed += 1
+        }
+        scheduleIndexSave()
+        PlaybackJournal.note("Cache: Speicher freigegeben (\(removed) Songs geloescht)")
+    }
 
     /// So viel Platz muss auf dem Geraet frei bleiben. Darunter hoert das Auffuellen auf, damit die
     /// Bibliothek nicht das iPhone vollschreibt (Fotos, Updates, iOS selbst brauchen Platz).
@@ -345,6 +407,7 @@ actor AudioFileCache {
     /// Ersetzt die Auffuell-Warteschlange (ganze Bibliothek). Statt tausender Einzelnachrichten
     /// schickt die Seite die Liste einmal; Wiederholungen ersetzen, statt sich aufzustapeln.
     func setBackground(_ items: [QueueItem]) {
+        guard backgroundFillEnabled else { backgroundQueue.removeAll(); return }   // nur im Modus "Alles"
         let urgentIds = Set(urgentQueue.map(\.id))
         backgroundQueue = items.filter { needsDownload($0) && !urgentIds.contains($0.id) }
         pump()
@@ -361,6 +424,7 @@ actor AudioFileCache {
         }
 
         guard urgentQueue.isEmpty, activeUrgent.isEmpty, inFlightNow.isEmpty, activeBackground == nil else { return }
+        guard backgroundFillEnabled else { backgroundQueue.removeAll(); return }
         // Ruhezeit nach Vordergrund-Arbeit: erst danach weiter auffuellen (einmal wieder anstossen).
         let readyAt = max(lastForegroundActivity.addingTimeInterval(Self.backgroundQuietSeconds), backgroundPausedUntil)
         let remaining = readyAt.timeIntervalSinceNow
@@ -394,7 +458,7 @@ actor AudioFileCache {
     }
 
     private func runQueued(_ item: QueueItem, remote: URL, urgent: Bool) async {
-        let ok = await download(item: item, from: remote, session: urgent ? nil : fillSession)
+        let ok = await download(item: item, from: remote, session: urgent ? nil : fillSession, isFill: !urgent)
         if urgent {
             activeUrgent.remove(item.id)
             urgentTasks.removeValue(forKey: item.id)
@@ -465,7 +529,7 @@ actor AudioFileCache {
     }
 
     @discardableResult
-    private func download(item: QueueItem, from remote: URL, session: URLSession? = nil) async -> Bool {
+    private func download(item: QueueItem, from remote: URL, session: URLSession? = nil, isFill: Bool = false) async -> Bool {
         let loader = session ?? dlSession
         // Bis zu 3 Anlaeufe mit wachsendem Abstand: ein frisch importierter Song ist am
         // CDN-Edge noch nicht gecacht, der erste Zugriff scheitert dort gern voruebergehend.
@@ -573,7 +637,10 @@ actor AudioFileCache {
         let size = (attrs?[.size] as? Int64) ?? 0
         // Lag unter dieser id eine Datei mit anderer Endung, wird sie hier nicht mehr referenziert - weg damit.
         if let old = index[item.id], old.ext != ext { try? FileManager.default.removeItem(at: fileURL(for: old)) }
-        index[item.id] = Entry(id: item.id, ext: ext, sizeBytes: size, lastAccessed: Date(), duration: measured, src: Self.sourceName(of: item))
+        // Auffuell-Songs (nie gespielt) bekommen den aeltesten Zeitstempel: beim Verkleinern der Grenze fliegen
+        // sie vor allem raus, was der Nutzer wirklich gehoert hat (localFileURL setzt den Stempel beim Abspielen neu).
+        let stamp = isFill ? Date(timeIntervalSince1970: 0) : Date()
+        index[item.id] = Entry(id: item.id, ext: ext, sizeBytes: size, lastAccessed: stamp, duration: measured, src: Self.sourceName(of: item))
         scheduleIndexSave()
         enforceCap()
         onCached?(item.id)
