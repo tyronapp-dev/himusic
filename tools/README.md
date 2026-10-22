@@ -113,3 +113,18 @@ wieder Einloggen mit dem `LOGIN_PASSWORD`.
 
 Lesende Bibliotheks-Messungen (nur Summen, nie Titel/Key) und Playwright-Browsertests der Seite gegen eine gestubbte API.
 Anleitung, Stand der Messung und Grenzen: [diagnose/README.md](diagnose/README.md).
+
+## worker-deploy.mjs — Worker mit Sicherungen veröffentlichen (22.10.2026)
+
+Lädt eine neue Fassung von `himusic-api` hoch. Erlaubnis von Tyron am 22.10.2026, gilt nur für diesen Worker. Token in `tools/.env`: `CF_API_TOKEN=…` (**eine Zeile**, Recht *Account | Workers Scripts | Edit*).
+
+```bash
+node tools/worker-deploy.mjs <neu.js> <sicherung-alt.js> [--dry] [--expect-range] [--probe-url <media-url>]
+node tools/worker-deploy.mjs --rollback <sicherung-alt.js>
+```
+
+Was es absichtlich tut: Einstellungen vorher lesen, `keep_bindings` für alle vorhandenen Typen setzen (**ein roher Upload würde API_KEY, LOGIN_PASSWORD, D1_API_KEY, R2- und D1-Anbindung löschen**), danach Einstellungen und Cron-Trigger vergleichen, dann Proben (Login-Route 401 = Secrets da, `GET /songs` ohne Schlüssel 401, mit Schlüssel 200, Range-Probe). Scheitert etwas → automatisch die gesicherte alte Fassung hochladen. Der Quelltext enthält die Zugriffslogik: **Sicherungen nie in dieses öffentliche Repo** (liegen in `MEGA\Claude\himusic-worker-backup\<datum>\`).
+
+## audio-aus-video.mjs — Audiospur aus den .mp4-„Songs" lösen (22.10.2026)
+
+Löst die Audiospur ohne Neukodierung heraus (`ffmpeg -vn -c:a copy`), lädt sie als `.m4a` hoch und stellt `file_url`/`duration` der Zeile um. Backup aller Zeilen vorher (`plan`), Originale bleiben, `verify` vergleicht gegen das Backup, `rollback` stellt zurück. Der Worker ignoriert `file_size` bei `PUT /songs/:id` (bleibt alt, nur Anzeigewert). Details im Kopf der Datei und in ADR-015.
