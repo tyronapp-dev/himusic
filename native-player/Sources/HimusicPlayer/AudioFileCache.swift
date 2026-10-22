@@ -69,6 +69,23 @@ actor AudioFileCache {
     /// warteten und wurden gestreamt.
     private var urgentTasks: [Int: Task<Void, Never>] = [:]
     private var activeBackground: Int?
+    /// Laufender Auffuell-Download, damit er abgebrochen werden kann, sobald der Vordergrund Bandbreite braucht.
+    private var backgroundTask: Task<Void, Never>?
+    /// Letzter Moment, in dem der Vordergrund (Tipp, laufender/naechster Song ohne Kopie) etwas laden musste.
+    private var lastForegroundActivity = Date.distantPast
+    private var backgroundResumeScheduled = false
+    /// So lange nach der letzten Vordergrund-Arbeit bleibt das Auffuellen still. "Leerlauf" hiess vorher nur
+    /// "gerade ist keine dringende Warteschlange da" - ein laufender Bibliotheks-Download teilte sich die
+    /// Leitung mit dem Song, den man gerade angetippt hatte (Stream UND dringender Download), und startete
+    /// nach jedem Tipp sofort wieder.
+    private static let backgroundQuietSeconds: TimeInterval = 30
+
+    /// Der Vordergrund hat Vorrang: den Auffuell-Download abbrechen (er wird spaeter neu aufgenommen)
+    /// und die Ruhezeit neu starten.
+    private func foregroundNeeded() {
+        lastForegroundActivity = Date()
+        backgroundTask?.cancel()
+    }
     private var inFlightNow: Set<Int> = []   // laeuft gerade ein fetchNow() fuer diese id?
     private var currentlyPlayingId: Int?
     private var loggedCeiling = false
@@ -277,6 +294,7 @@ actor AudioFileCache {
     /// lokale Kopie soll so schnell wie moeglich da sein (genaues Seeking, feste Dauer).
     func ensureCachedUrgent(item: QueueItem) {
         guard needsDownload(item) else { return }
+        foregroundNeeded()
         backgroundQueue.removeAll { $0.id == item.id }
         urgentQueue.removeAll { $0.id == item.id }
         urgentQueue.insert(item, at: 0)
@@ -292,6 +310,7 @@ actor AudioFileCache {
         // der zwei Spuren, waehrend der laufende/naechste Song wartet.
         for (id, task) in urgentTasks where !keep.contains(id) { task.cancel() }
         let wanted = items.filter { needsDownload($0) }
+        if !wanted.isEmpty { foregroundNeeded() }   // nur wenn der Vordergrund wirklich etwas laden muss
         let ids = Set(wanted.map(\.id))
         backgroundQueue.removeAll { ids.contains($0.id) }
         urgentQueue = wanted
@@ -317,6 +336,20 @@ actor AudioFileCache {
         }
 
         guard urgentQueue.isEmpty, activeUrgent.isEmpty, inFlightNow.isEmpty, activeBackground == nil else { return }
+        // Ruhezeit nach Vordergrund-Arbeit: erst danach weiter auffuellen (einmal wieder anstossen).
+        let quiet = Date().timeIntervalSince(lastForegroundActivity)
+        guard quiet >= Self.backgroundQuietSeconds else {
+            if !backgroundResumeScheduled, !backgroundQueue.isEmpty {
+                backgroundResumeScheduled = true
+                let wait = Self.backgroundQuietSeconds - quiet + 0.5
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    self.backgroundResumeScheduled = false
+                    self.pump()
+                }
+            }
+            return
+        }
         guard totalBytes() < backgroundFillCeiling else {
             if !backgroundQueue.isEmpty, !loggedCeiling {
                 loggedCeiling = true
@@ -329,7 +362,7 @@ actor AudioFileCache {
             let item = backgroundQueue.removeFirst()
             guard needsDownload(item), let remote = item.fileURL else { continue }
             activeBackground = item.id
-            Task { await self.runQueued(item, remote: remote, urgent: false) }
+            backgroundTask = Task { await self.runQueued(item, remote: remote, urgent: false) }
             return
         }
     }
@@ -341,6 +374,8 @@ actor AudioFileCache {
             urgentTasks.removeValue(forKey: item.id)
         } else {
             activeBackground = nil
+            // Fuer den Vordergrund abgebrochen: nicht aus der Liste verlieren, spaeter weitermachen.
+            if Task.isCancelled, needsDownload(item) { backgroundQueue.insert(item, at: 0) }
         }
         pump()
     }
@@ -356,6 +391,7 @@ actor AudioFileCache {
     func fetchNow(item: QueueItem, maxWait: TimeInterval = .infinity) async -> URL? {
         if let existing = localFileURL(for: item) { return existing }
         guard let remote = item.fileURL else { return nil }
+        foregroundNeeded()
         if !isBusy(item.id) {
             urgentQueue.removeAll { $0.id == item.id }
             backgroundQueue.removeAll { $0.id == item.id }
