@@ -1255,7 +1255,15 @@ final class PlayerViewModel: ObservableObject {
                     if n < Self.maxRemoteRetries {
                         self.remoteRetryCount[item.id] = n + 1
                         self.retriedFromRemoteId = nil   // erlaubt diesem Zweig, erneut zu greifen
-                        try? await Task.sleep(nanoseconds: 1_800_000_000)
+                        // NICHT denselben kalten Stream noch dreimal probieren (Ursache laut Commit
+                        // b939a42: der erste Stream vom kalten CDN-Rand scheitert zufaellig; jeder
+                        // Tipp setzte die Zaehler zurueck und der Song kam erst nach vielen Tipps).
+                        // Stattdessen den geprueften Download abwarten (3 Anlaeufe mit Pause, eigene
+                        // Vollstaendigkeitspruefung) und danach von Platte spielen. Der Download
+                        // laeuft ohnehin schon (beginPlayback -> ensureCachedUrgent) - fetchNow
+                        // haengt sich daran, startet keinen zweiten.
+                        self.journal("Stream gescheitert -> warte auf den Download (Versuch \(n + 1)/\(Self.maxRemoteRetries))")
+                        _ = await AudioFileCache.shared.fetchNow(item: item, maxWait: 40)
                         guard self.currentItem?.id == item.id else { return }
                         self.playCurrent()
                     } else {
