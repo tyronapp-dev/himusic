@@ -232,7 +232,7 @@ const NEW_CAPS = ['queuePlayer', 'seekFraction', 'journal', 'keyboard', 'cachedI
 
     await page.evaluate(() => window._applyNativeJournal('12:00:00.000  Start\n12:00:01.000  Wechsel 0->1'));
     const j = await page.evaluate(() => ({ open: document.getElementById('native-journal-overlay').classList.contains('open'), text: document.getElementById('njo-text').textContent }));
-    ok(j.open && /Seite v2\.01/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
+    ok(j.open && /Seite v\d+\.\d+/.test(j.text) && /Hülle TEST/.test(j.text) && /Wechsel 0->1/.test(j.text), 'Protokoll-Ansicht zeigt Fassungen + native Zeilen');
     const over = await posted(page);
     ok(over.some(m => m.cmd === 'playerView' && m.open === true), 'Protokoll-Ansicht meldet "Overlay offen" an die native Leiste');
     await page.click('#njo-close');

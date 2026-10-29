@@ -549,7 +549,7 @@ function _nativeBridge() {
 // Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
 // CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
 // "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
-window.HIMUSIC_WEB_VERSION = '2.01';
+window.HIMUSIC_WEB_VERSION = '2.02';
 
 // Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
 // ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur
@@ -3850,8 +3850,34 @@ let _bgCacheActive = false;
     function loadSongsSnapshot() { try { const raw = localStorage.getItem(SONGS_CACHE_KEY); return raw ? JSON.parse(raw) : null; } catch(e) { return null; } }
 
     let _fetchSongsSeq = 0;
+
+    // Noch nicht serverseitig bestaetigte Tag-Aenderungen (songId -> { payload, confirmedAt }).
+    // Speichern im Tag-Editor ist optimistisch: die Anzeige springt sofort um, das PUT laeuft im
+    // Hintergrund. Ein GET /songs, der VOR dem Speichern gestartet wurde (Sichtbarkeitswechsel,
+    // Hintergrund-Sync, Import-Ende), liefert noch den alten Stand und ueberschrieb die Anzeige -
+    // "Speichern macht es optisch wieder rueckgaengig". Der Sequenz-Schutz oben greift dort nicht,
+    // weil diese Antwort die zuletzt gestartete ist. Deshalb wird jede Songliste (Server-Antwort,
+    // Offline-Schnappschuss) mit diesen Aenderungen und den offline wartenden Edits ueberlagert.
+    const _localEdits = new Map();
+    function _overlayLocalEdits(rows, startedAt, plain) {
+        const edits = new Map();
+        try { JSON.parse(localStorage.getItem('heatbox_pending_edits') || '[]').forEach(e => edits.set(String(e.id), e.changes)); } catch (e) {}
+        _localEdits.forEach((v, id) => edits.set(String(id), v.payload));
+        if (edits.size === 0) return;
+        rows.forEach(s => {
+            const p = edits.get(String(s.id));
+            if (!p) return;
+            Object.assign(s, p);
+            // Roh-Form (mit Markern) fuer die Server-Antwort, bereinigte Form fuer fertig geparste Listen
+            if (plain) s.vibes = _parseVibes(p.vibes);
+        });
+        // Bestaetigt UND von einer erst danach gestarteten Antwort bestaetigt -> Ueberlagerung nicht mehr noetig
+        _localEdits.forEach((v, id) => { if (v.confirmedAt && startedAt >= v.confirmedAt) _localEdits.delete(id); });
+    }
+
     async function fetchSongsFromDatabase(silent = false) {
         if (!songsContainer) return;
+        const startedAt = Date.now();
         // Import-Ende, Hintergrund-Sync und Sichtbarkeitswechsel feuern GET /songs mehrfach kurz
         // hintereinander ab. Ohne Sequenz-Schutz konnte eine spaeter gestartete, aber
         // schneller zurueckkommende Antwort von einer AELTEREN, langsameren Antwort ueberschrieben
@@ -3863,6 +3889,7 @@ let _bgCacheActive = false;
             const all = await apiGetAllSongs();
             if (mySeq !== _fetchSongsSeq) return;
             if (all) {
+                _overlayLocalEdits(all, startedAt, false);
                 // Hauptvibe-Cache aus den ROHEN Server-Daten wiederherstellen, BEVOR
                 // _parseVibes() den Marker gleich darunter entfernt - siehe MAIN_VIBE_MARKER.
                 all.forEach(s => { _setMainVibes(s.id, _extractMainVibes(s.vibes)); });
@@ -3881,6 +3908,7 @@ let _bgCacheActive = false;
             if (mySeq !== _fetchSongsSeq) return;
             const snapshot = loadSongsSnapshot();
             if (snapshot && snapshot.length > 0) {
+                _overlayLocalEdits(snapshot, startedAt, true);
                 window.globalSongsData = snapshot;
                 window._songIndex = new Map(snapshot.map(s => [s.id, s]));
                 rerenderSongsList(snapshot);
@@ -3898,6 +3926,7 @@ let _bgCacheActive = false;
     const _startupSnapshot = loadSongsSnapshot();
     if (_startupSnapshot && _startupSnapshot.length > 0) {
         _startupSnapshot.forEach(s => { s.vibes = _parseVibes(s.vibes); });
+        _overlayLocalEdits(_startupSnapshot, 0, true);
         window.globalSongsData = _startupSnapshot;
         window._songIndex = new Map(_startupSnapshot.map(s => [s.id, s]));
         rerenderSongsList(_startupSnapshot);
@@ -4511,6 +4540,10 @@ let _bgCacheActive = false;
             // vorlaeufig. songId wird hier festgehalten, weil window.currentEditSongId sich
             // aendern kann, waehrend der Request noch laeuft.
             const songId = window.currentEditSongId;
+            // Bis der Server die Aenderung bestaetigt hat, ueberlagert sie jede eintreffende Songliste
+            // (siehe _overlayLocalEdits) - sonst setzt eine ältere Antwort die Anzeige zurueck.
+            const localEdit = { payload: apiPayload, confirmedAt: 0 };
+            _localEdits.set(songId, localEdit);
             editOverlay.classList.remove('active');
             btnSaveTags.innerText = "Speichern";
 
@@ -4566,6 +4599,7 @@ let _bgCacheActive = false;
 
             if (!navigator.onLine) {
                 _savePendingEdit(songId, apiPayload);
+                if (_localEdits.get(songId) === localEdit) _localEdits.delete(songId); // wartet jetzt als Pending-Edit
                 _showToast('✈️ Offline gespeichert – wird synchronisiert wenn online');
                 return;
             }
@@ -4576,8 +4610,12 @@ let _bgCacheActive = false;
             // "changes", also die Fassung OHNE "*"-Hauptvibe-Marker: ein nach Netzwerkfehler
             // nachgetragener Edit haette die Hauptvibe-Markierung stillschweigend geloescht.
             apiUpdateSong(songId, apiPayload)
-                .then(() => { _showToast('✅ Gespeichert'); fetchSongsFromDatabase(true); })
-                .catch(() => { _savePendingEdit(songId, apiPayload); _showToast('⚠️ Offline gesichert – wird nachgetragen'); });
+                .then(() => { localEdit.confirmedAt = Date.now(); _showToast('✅ Gespeichert'); fetchSongsFromDatabase(true); })
+                .catch(() => {
+                    _savePendingEdit(songId, apiPayload);
+                    if (_localEdits.get(songId) === localEdit) _localEdits.delete(songId); // Pending-Edit uebernimmt
+                    _showToast('⚠️ Offline gesichert – wird nachgetragen');
+                });
         });
     }
 
