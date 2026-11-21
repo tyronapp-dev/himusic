@@ -549,7 +549,7 @@ function _nativeBridge() {
 // Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
 // CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
 // "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
-window.HIMUSIC_WEB_VERSION = '2.03';
+window.HIMUSIC_WEB_VERSION = '2.04';
 
 // Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
 // ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur
@@ -1961,8 +1961,10 @@ window._updateSourceBadge = function() {
 // tauchte also nie auf. Deshalb per Bruecke direkt HINTER den laufenden Song einfuegen:
 // der Rest der Warteschlange bleibt dabei unangetastet, sodass nach dem eingereihten Song
 // die urspruengliche Reihenfolge (Playlist/Mix) normal weiterlaeuft.
-function _enqueueSongNext(song) {
-    if (song && song.id != null) window._manuallyQueuedIds.add(song.id);
+// sourceLabel (optional): Herkunftsetikett am Song, z.B. "Aus Sender: X". Ohne Angabe bleibt
+// es leer (Song von Hand eingereiht, gehoert zu keiner Quelle) - wie bisher beim Swipe.
+function _enqueueSongNext(song, sourceLabel) {
+    if (song && song.id != null && !sourceLabel) window._manuallyQueuedIds.add(song.id);
     const bridge = _nativeBridge();
     if (bridge) {
         const url = song.file_url || song.fileUrl;
@@ -1984,7 +1986,7 @@ function _enqueueSongNext(song) {
                 // richtig, wenn die Seite zwischendurch neu geladen wird - die frueher dafuer
                 // gefuehrte Merkliste (_manuallyQueuedIds) war nach jedem Reload leer, und der
                 // eingereihte Song trug danach wieder das Etikett der alten Quelle.
-                s: '',
+                s: sourceLabel || '',
                 d: song.duration > 0 ? song.duration : undefined
             }
         }));
@@ -1993,6 +1995,24 @@ function _enqueueSongNext(song) {
     // Ausserhalb der Huelle: playbackQueue liegt im initApp-Scope und ist von hier
     // (Top-Level) nicht erreichbar - deshalb ueber die dort registrierte Funktion.
     if (typeof window._localEnqueueNext === 'function') window._localEnqueueNext(song);
+}
+
+// Mehrere Songs (Sender/Mix) direkt HINTER den laufenden Song einreihen: sie spielen, sobald
+// der aktuelle zu Ende ist, danach laeuft die bisherige Warteschlange weiter. Der Einfuege-
+// Befehl setzt immer unmittelbar hinter den laufenden Song - deshalb in umgekehrter Reihenfolge
+// senden, dann stimmt die Endreihenfolge. Gedeckelt auf 50, damit nicht hunderte Bruecken-
+// Nachrichten auf einmal rausgehen. Gibt die Zahl der eingereihten Songs zurueck.
+// Genutzt vom Sender-Menue ("Als naechstes spielen") und von der Rueckfrage nach dem Erstellen.
+function _enqueueSongsNext(songs, sourceLabel) {
+    const list = (songs || []).filter(s => s && s.id != null);
+    if (list.length === 0) return 0;
+    if (_nativeBridge()) {
+        const part = list.slice(0, 50);
+        part.slice().reverse().forEach(s => _enqueueSongNext(s, sourceLabel));
+        return part.length;
+    }
+    if (typeof window._localEnqueueSongs === 'function') window._localEnqueueSongs(list);
+    return list.length;
 }
 
 // Der native AVPlayer liest NIE aus IndexedDB (kann er technisch nicht) - er hat einen
@@ -2601,6 +2621,7 @@ function initApp() {
     // Gegenstueck zum nativen "insertNext" fuer den Nicht-Huellen-Fall (Safari/PWA):
     // _enqueueSongNext liegt auf Top-Level und kaeme sonst nicht an playbackQueue heran.
     window._localEnqueueNext = function(song) { playbackQueue.unshift(song); savePlayerState(); };
+    window._localEnqueueSongs = function(songs) { playbackQueue.unshift(...songs); savePlayerState(); };
     function _doSavePlayerState() {
         const state = {
             currentSong: window.currentSongData || null,
@@ -4204,18 +4225,35 @@ let _bgCacheActive = false;
     // dieselbe Quelle, dieselbe Mischen-Logik, Herkunfts-Kennung und Hervorhebung stimmen so.
     // Die Songs werden erst beim Antippen aufgeloest, nicht beim Erstellen, damit ein Sender
     // nichts haelt, wenn die Frage mit "Nicht jetzt" oder Tippen daneben geschlossen wird.
+    // Laeuft oder liegt gerade ein Song an, wird der Sender NACH dessen Ende gespielt (hinter den
+    // laufenden Song eingereiht, der Song wird nicht unterbrochen; Tyron, 2026-11-21). Nur wenn
+    // nichts anliegt, startet er sofort.
     function _offerPlayStation(station) {
         const overlay = document.getElementById('station-play-overlay');
         const yes = document.getElementById('station-play-yes');
         if (!overlay || !yes || !station) return;
+        const name = station.name.replace(/^Sender:\s*/i, '');
+        const queueAfterCurrent = window.currentPlayingSongId != null;
         const text = document.getElementById('station-play-text');
-        if (text) text.textContent = `„${station.name.replace(/^Sender:\s*/i, '')}“ jetzt abspielen?`;
+        if (text) text.textContent = queueAfterCurrent
+            ? `„${name}“ nach dem aktuellen Song abspielen?`
+            : `„${name}“ jetzt abspielen?`;
+        yes.textContent = queueAfterCurrent ? 'Als nächstes' : 'Abspielen';
         // onclick statt addEventListener: ein erneuter Aufruf ersetzt den alten Handler,
         // sonst spielte ein frueher geschlossener Dialog beim naechsten Sender den alten mit ab.
         yes.onclick = () => {
             overlay.classList.remove('active');
-            const songs = window._getStationLikeSongs ? window._getStationLikeSongs(station) : [];
+            let songs = window._getStationLikeSongs ? window._getStationLikeSongs(station) : [];
             if (songs.length === 0) { _showToast('⚠️ Sender ist leer'); return; }
+            if (queueAfterCurrent) {
+                // Mischen wie beim Play-Knopf der Karte, damit die Reihenfolge nicht davon abhaengt,
+                // ueber welchen Weg der Sender gestartet wird.
+                if (document.getElementById('btn-shuffle')?.classList.contains('ctrl-active')) songs = _shuffleForList(station.id, [...songs]);
+                const n = _enqueueSongsNext(songs, `Aus Sender: ${name}`);
+                if (n === 0) { _showToast('⚠️ Sender konnte nicht eingereiht werden'); return; }
+                _showToast(`„${name}“ spielt nach dem aktuellen Song`);
+                return;
+            }
             window.togglePlaylistPlayback(null, station.id, songs);
         };
         overlay.classList.add('active');
@@ -5473,17 +5511,10 @@ async function createNewPlaylistProcess() {
         const item = _getStationLikeList(window.currentContextStationType).find(x => x.id === window.currentContextStationId); if (!item) return;
         const songs = _getStationLikeSongs(item); if (songs.length === 0) return;
         // In der Huelle fuehrt der native Player die Warteschlange - playbackQueue.unshift()
-        // hier liest dort niemand, die Songs erschienen in der Ansicht nie und spielten auch
-        // nie (dieselbe Fehlerklasse, die _enqueueSongNext oben schon fuer den Einzel-Song-
-        // Swipe behoben hat, hier nur nie auf den Mehr-Song-Fall uebertragen). insertNext()
-        // fuegt IMMER direkt hinter den laufenden Song ein - in umgekehrter Reihenfolge
-        // aufgerufen ergibt das wieder die gewuenschte Endreihenfolge. Gedeckelt auf 50, damit
-        // ein grosser Sender/Mix nicht hunderte Bruecken-Nachrichten auf einmal abfeuert.
-        if (_nativeBridge()) {
-            songs.slice(0, 50).reverse().forEach(s => _enqueueSongNext(s));
-        } else {
-            playbackQueue.unshift(...songs); savePlayerState();
-        }
+        // hier liest dort niemand (siehe _enqueueSongsNext). Die Songs tragen die Herkunft
+        // "Aus Sender/Vibe Mix: <Name>", damit der grosse Player sie richtig zuordnet.
+        const kind = window.currentContextStationType === 'mix' ? 'Vibe Mix' : 'Sender';
+        _enqueueSongsNext(songs, `Aus ${kind}: ${item.name.replace(/^(Sender|Vibe Mix):\s*/i, '')}`);
         _showToast(`"${item.name}" spielt als nächstes.`);
     });
     document.getElementById('ctx-st-pin')?.addEventListener('click', () => {
