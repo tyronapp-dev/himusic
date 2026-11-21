@@ -549,7 +549,7 @@ function _nativeBridge() {
 // Version dieser Seite, nur fuer die Anzeige in Einstellungen -> Wiedergabe-Diagnose. Zusammen mit
 // CACHE_NAME in sw.js hochzaehlen. Dazu die Kennung der nativen Huelle (window.__himusicNativeBuild):
 // "laeuft die neue IPA ueberhaupt?" und "ist die neue Seite angekommen?" liessen sich bisher nur raten.
-window.HIMUSIC_WEB_VERSION = '2.02';
+window.HIMUSIC_WEB_VERSION = '2.03';
 
 // Kennt die installierte Huelle einen neuen Bridge-Befehl? Die Seite wird ueber GitHub Pages sofort
 // ausgeliefert, die Huelle erst nach Neuinstallation der IPA - neue Befehle duerfen deshalb nur
@@ -4199,6 +4199,28 @@ let _bgCacheActive = false;
             || ((window.currentSongData && window.currentSongData.id == id) ? window.currentSongData : null);
     };
 
+    // Rueckfrage direkt nach dem Erstellen eines Senders: "Jetzt abspielen?" (Tyron, 2026-11-21).
+    // Spielt ueber denselben Weg wie der Play-Knopf der Sender-Karte (togglePlaylistPlayback) -
+    // dieselbe Quelle, dieselbe Mischen-Logik, Herkunfts-Kennung und Hervorhebung stimmen so.
+    // Die Songs werden erst beim Antippen aufgeloest, nicht beim Erstellen, damit ein Sender
+    // nichts haelt, wenn die Frage mit "Nicht jetzt" oder Tippen daneben geschlossen wird.
+    function _offerPlayStation(station) {
+        const overlay = document.getElementById('station-play-overlay');
+        const yes = document.getElementById('station-play-yes');
+        if (!overlay || !yes || !station) return;
+        const text = document.getElementById('station-play-text');
+        if (text) text.textContent = `„${station.name.replace(/^Sender:\s*/i, '')}“ jetzt abspielen?`;
+        // onclick statt addEventListener: ein erneuter Aufruf ersetzt den alten Handler,
+        // sonst spielte ein frueher geschlossener Dialog beim naechsten Sender den alten mit ab.
+        yes.onclick = () => {
+            overlay.classList.remove('active');
+            const songs = window._getStationLikeSongs ? window._getStationLikeSongs(station) : [];
+            if (songs.length === 0) { _showToast('⚠️ Sender ist leer'); return; }
+            window.togglePlaylistPlayback(null, station.id, songs);
+        };
+        overlay.classList.add('active');
+    }
+
     window.createStationForSong = function(song) {
         if (!song || !song.title) { _showToast('⚠️ Song nicht gefunden – Sender nicht erstellt'); return; }
         const ranked = _buildStationSongs(song);
@@ -4233,6 +4255,7 @@ let _bgCacheActive = false;
         // Direkt in den neuen Sender springen - man will nach dem Erstellen sehen, was drin
         // gelandet ist, statt ihn auf der Startseite erst wiederfinden zu muessen.
         if (typeof window.openPlaylistDetails === 'function') window.openPlaylistDetails(newStation.id, newStation.name);
+        _offerPlayStation(newStation);
     };
 
     // Kuenstler-Sender (2026-10-01): Titel dieses Kuenstlers hauptsaechlich, nach Vibe-Naehe zum
@@ -4270,6 +4293,7 @@ let _bgCacheActive = false;
         if (typeof window.renderHomeSections === 'function') window.renderHomeSections();
         _showToast(`Künstler-Sender – ${res.ownCount} Songs von ${name}, ${othersIn} mit ähnlichem Vibe`);
         if (typeof window.openPlaylistDetails === 'function') window.openPlaylistDetails(newStation.id, newStation.name);
+        _offerPlayStation(newStation);
     };
 
     if(ctxCreateStation) {
